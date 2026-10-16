@@ -125,6 +125,10 @@ If all configured accounts are exhausted, the task waits and continues automatic
 `wait --through-sleep` to keep waiting. Use `accounts` to inspect availability; two homes signed into
 the same ChatGPT account share limits.
 
+`use_reset_credits` defaults to `false`; enable it to spend one free reset before sleeping when the natural reset is more than `reset_credit_min_hours` (default `12`) away.
+`reset-credit <account> [--credit ID]` previews the earliest-expiring reset; add `--yes` to consume it and show the RPC response and refreshed limits.
+Authentication errors get one retry, then rotation; when `wait` says `needs login`, have the user run `login <account>`.
+
 ## The loop
 
 1. Write the brief to a temporary file outside the repository, such as the session scratchpad or a
@@ -173,9 +177,7 @@ Steering a desktop turn mid-way requires the app's Steer control.
   in the brief and follow the repository's rules.
 - Restarting the desktop app kills the turns of the app's threads; exec tasks of this skill are
   separate processes and keep running.
-- Codex processes sharing a `CODEX_HOME` share its login; a refresh-token race can log it out. If a task
-  fails with an auth error, have the user run `python3 -I "$T" login <account>`. Never copy
-  `auth.json` between homes; each subscription needs its own sign-in.
+- Never copy `auth.json` between homes; each subscription needs its own sign-in.
 - `codex exec` trusts the repository's main checkout in `config.toml`
   (`[projects."<repo>"] trust_level`), not each worktree. A first task in a new repository adds one entry.
 - `clean` removes the task worktree and logs; use it after reviewing and merging the result.

@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -96,7 +97,46 @@ def app_server():
             trace({"command": "quota-snapshot", "primary": current_limits["primary"]})
             result = {"accountId": value["accountId"],
                       "ordinaryUsageAllowed": value.get("ordinaryUsageAllowed", True),
-                      "rateLimits": current_limits}
+                      "rateLimits": current_limits,
+                      "rateLimitResetCredits": value.get("rateLimitResetCredits", {
+                          "availableCount": 0, "credits": []})}
+        elif method == "account/rateLimitResetCredit/consume":
+            params = request.get("params") or {}
+            journal = Path(os.environ["CODEX_TASK_HOME"]) / "codex-worker-resets.jsonl"
+            journal_before = []
+            for line in journal.read_text().splitlines() if journal.exists() else []:
+                try:
+                    journal_before.append(json.loads(line))
+                except ValueError:
+                    pass  # A killed writer may leave a partial final record.
+            trace({"command": "consume", "params": params, "journal_before": journal_before})
+            credit_id = params.get("creditId")
+            key = params.get("idempotencyKey")
+            if not isinstance(credit_id, str) or not credit_id or not isinstance(key, str) or not key:
+                emit({"id": request["id"], "error": {"message": "creditId and idempotencyKey must not be empty"}})
+                continue
+            if value.get("consume_error") or value.get("consume_timeout"):
+                message = ("rate limit reset consume timed out" if value.get("consume_timeout")
+                           else "fixture reset credit unavailable")
+                emit({"id": request["id"], "error": {"code": -32000, "message": message}})
+                continue
+            reset_credits = value.get("rateLimitResetCredits", {})
+            credit = next((credit for credit in reset_credits.get("credits", [])
+                           if credit.get("id") == credit_id and credit.get("status") == "available"), None)
+            if not credit:
+                emit({"id": request["id"], "error": {"message": "fixture reset credit not available"}})
+                continue
+            credit["status"] = "consumed"
+            reset_credits["availableCount"] = sum(credit.get("status") == "available"
+                                                    for credit in reset_credits["credits"])
+            if not value.get("consume_no_reset"):
+                for name in ("primary", "secondary"):
+                    if value.get(name):
+                        value[name]["usedPercent"] = 0
+                value["ordinaryUsageAllowed"] = True
+            fixture_path.write_text(json.dumps(value))
+            # Deliberately opaque fields: callers must not assume a response schema.
+            result = {"fixtureReceipt": "receipt-for-" + credit_id, "fixtureApplied": True}
         else:
             emit({"id": request["id"], "error": {"message": "unknown method"}})
             continue
@@ -165,6 +205,26 @@ def execute():
               "type": "agent_message", "text": text}})
         append(rollout, {"type": "event_msg", "payload": {"type": "agent_message", "message": text}})
 
+    def auth_failure():
+        value = fixture()
+        if "account_after" in run:
+            value["account"] = run["account_after"]
+            fixture_path.write_text(json.dumps(value))
+        for other_home in run.get("logout_other_homes", []):
+            path = Path(other_home) / "fixture.json"
+            other = json.loads(path.read_text())
+            other["account"] = None
+            path.write_text(json.dumps(other))
+        error = {"message": run.get("error", "Your access token could not be refreshed because you have since "
+                                   "logged out or signed in to another account. Please sign in again.")}
+        if run.get("event") == "error":
+            emit(dict(error, type="error"))
+        else:
+            emit({"type": "turn.failed", "error": error})
+        return 1
+
+    if run["mode"] == "auth_error" and run.get("before_thread"):
+        return auth_failure()
     rollout_limits()
     # Publish the ready fixture before the supervisor starts looking for its rollout.
     emit({"type": "thread.started", "thread_id": thread})
@@ -191,6 +251,8 @@ def execute():
     if run["mode"] == "failed":
         emit({"type": "turn.failed", "error": {"message": "fixture task failed"}})
         return 1
+    if run["mode"] == "auth_error":
+        return auth_failure()
     if run["mode"] in ("limit", "hold"):
         deadline = time.monotonic() + 100
         while not stopped[0] and time.monotonic() < deadline:
@@ -309,14 +371,48 @@ class RotationTests(unittest.TestCase):
         (home / "fixture.json").write_text(json.dumps(value))
         return value
 
-    def configure(self, credits=False, wait_for_reset=None, language="ru"):
+    def configure(self, credits=False, wait_for_reset=None, language="ru",
+                  use_reset_credits=None, reset_credit_min_hours=None):
         config = {
             "switch_at": 99, "credits": credits, "language": language,
             "accounts": [{"name": "main", "home": str(self.home)},
                          {"name": "second", "home": str(self.other)}]}
         if wait_for_reset is not None:
             config["wait_for_reset"] = wait_for_reset
+        if use_reset_credits is not None:
+            config["use_reset_credits"] = use_reset_credits
+        if reset_credit_min_hours is not None:
+            config["reset_credit_min_hours"] = reset_credit_min_hours
         (self.home / "claude-accounts.json").write_text(json.dumps(config))
+
+    def reset_credits(self, home, *credits, **changes):
+        path = home / "fixture.json"
+        value = json.loads(path.read_text())
+        value["rateLimitResetCredits"] = {
+            "availableCount": sum(credit.get("status") == "available" for credit in credits),
+            "credits": list(credits)}
+        value.update(changes)
+        path.write_text(json.dumps(value))
+
+    def reset_credit(self, credit_id, expires, **changes):
+        credit = {"id": credit_id, "resetType": "codexRateLimits", "status": "available",
+                  "grantedAt": int(time.time()) - 86400, "expiresAt": expires,
+                  "title": "Full reset", "description": "A free full reset from the fixture."}
+        credit.update(changes)
+        return credit
+
+    def consume_calls(self):
+        return [event for event in self.trace() if event.get("command") == "consume"]
+
+    def reset_journal(self):
+        path = self.home / "codex-worker-resets.jsonl"
+        entries = []
+        for line in path.read_text().splitlines() if path.exists() else []:
+            try:
+                entries.append(json.loads(line))
+            except ValueError:
+                pass
+        return entries
 
     def worker(self):
         with mock.patch.dict(os.environ, self.env), mock.patch.object(sys, "dont_write_bytecode", True):
@@ -1253,6 +1349,382 @@ class RotationTests(unittest.TestCase):
         self.assertIn("not logged in", rows["logged-out"])
         self.assertIn("not logged in", rows["rpc-error"])
         self.assertFalse(self.invocations())
+
+    def test_reset_credit_settings_default_to_manual_use_and_twelve_hours(self):
+        self.configure()
+        cfg = self.worker().accounts_config()
+        self.assertIs(cfg["use_reset_credits"], False)
+        self.assertEqual(cfg["reset_credit_min_hours"], 12)
+
+    def test_free_reset_uses_earliest_expiry_across_accounts_and_hands_off_without_sleep(self):
+        self.configure(use_reset_credits=True)
+        reset = int(time.time()) + 30 * 3600
+        self.account(self.home, "A", reset, runs=[{
+            "mode": "usage_error", "messages": ["Незавершённая работа перед бесплатным сбросом"]}])
+        self.account(self.other, "B", reset + 3600, used=99)
+        self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_later", reset + 10 * 86400))
+        credit = self.reset_credit("RateLimitResetCredit_earliest", reset + 86400)
+        self.reset_credits(self.other, credit,
+                           self.reset_credit("RateLimitResetCredit_last", reset + 20 * 86400))
+        self.start("free-reset-switch")
+        output = self.wait("free-reset-switch")
+        prompt = self.assert_rotation("free-reset-switch", output)
+        self.assertIn("Незавершённая работа перед бесплатным сбросом", prompt)
+        calls = self.consume_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["home"], str(self.other))
+        self.assertEqual(calls[0]["params"]["creditId"], credit["id"])
+        key = calls[0]["params"]["idempotencyKey"]
+        self.assertEqual(uuid.UUID(key).version, 4)
+        attempts = [entry for entry in calls[0]["journal_before"] if entry["event"] == "attempt"]
+        self.assertEqual(len(attempts), 1, "persist the request before spending a reset")
+        self.assertEqual((attempts[0]["slug"], attempts[0]["account"]), ("free-reset-switch", "second"))
+        self.assertEqual((attempts[0]["creditId"], attempts[0]["idempotencyKey"]), (credit["id"], key))
+        self.assertIsInstance(attempts[0]["at"], (int, float))
+        self.assertEqual([entry["outcome"] for entry in self.reset_journal() if entry["event"] == "result"],
+                         ["success"])
+        state = self.state("free-reset-switch")
+        resets = [entry for entry in state["rotations"] if entry.get("event") == "reset_credit"]
+        self.assertEqual(len(resets), 1)
+        self.assertEqual((resets[0]["account"], resets[0]["credit_id"], resets[0]["expires_at"]),
+                         ("second", credit["id"], credit["expiresAt"]))
+        self.assertFalse(any(entry.get("event") == "sleep" for entry in state["rotations"]))
+        self.assertIn("== used a free limit reset on second (" + credit["id"] + "), expires ", output)
+        self.assertEqual(state["outcome"], "completed")
+
+    def test_free_reset_on_current_account_resumes_its_existing_thread(self):
+        self.configure(use_reset_credits=True)
+        reset = int(time.time()) + 30 * 3600
+        self.account(self.home, "A", reset, runs=[
+            {"mode": "usage_error"}, {"mode": "complete", "reply": "Бесплатный сброс помог"}])
+        self.account(self.other, "B", reset + 3600, used=99)
+        self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_current", reset + 86400))
+        self.start("free-reset-resume")
+        output = self.wait("free-reset-resume")
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertTrue(executions[1]["resume"])
+        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
+        self.assertEqual(executions[1]["prompt"],
+                         "Лимит подписки сбросился. Продолжай с того места, где остановился.")
+        self.assertIn("Бесплатный сброс помог", output)
+        self.assertEqual(len(self.consume_calls()), 1)
+        self.assertFalse(any(entry.get("event") == "sleep"
+                             for entry in self.state("free-reset-resume")["rotations"]))
+
+    def test_disabled_free_resets_keep_the_original_sleep(self):
+        self.configure(use_reset_credits=False)
+        reset = int(time.time()) + 30 * 3600
+        self.account(self.home, "A", reset, used=99)
+        self.account(self.other, "B", reset + 3600, used=99)
+        self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_disabled", reset + 86400))
+        self.start("free-reset-disabled")
+        self.assert_sleeping("free-reset-disabled", self.wait("free-reset-disabled"), reset)
+        self.assertFalse(self.consume_calls())
+        self.assertFalse(self.invocations())
+
+    def test_near_natural_reset_keeps_the_credit_and_sleeps(self):
+        self.configure(use_reset_credits=True, reset_credit_min_hours=12)
+        self.account(self.home, "A", self.reset, used=99)
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_keep", self.reset + 86400))
+        self.start("free-reset-too-soon")
+        self.assert_sleeping("free-reset-too-soon", self.wait("free-reset-too-soon"), self.reset)
+        self.assertFalse(self.consume_calls())
+
+    def test_reset_credit_error_or_unchanged_quota_sleeps_after_one_attempt(self):
+        for slug, changes in (("free-reset-rpc-error", {"consume_error": True}),
+                              ("free-reset-no-quota", {"consume_no_reset": True})):
+            with self.subTest(slug=slug):
+                before = len(self.consume_calls())
+                self.configure(use_reset_credits=True)
+                reset = int(time.time()) + 30 * 3600
+                self.account(self.home, "A", reset, used=99)
+                self.account(self.other, "B", reset + 3600, used=99)
+                self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_" + slug, reset + 86400),
+                                   self.reset_credit("RateLimitResetCredit_spare_" + slug, reset + 2 * 86400),
+                                   **changes)
+                self.start(slug)
+                self.assert_sleeping(slug, self.wait(slug), reset)
+                self.assertEqual(len(self.consume_calls()) - before, 1, "one reset attempt per sleep episode")
+                self.cli("stop", slug, timeout=20)
+                self.wait(slug)
+
+    def test_reset_credit_timeout_retries_with_the_original_idempotency_key(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, used=99)
+        credit = self.reset_credit("RateLimitResetCredit_unknown", self.reset + 86400)
+        self.reset_credits(self.home, credit, consume_timeout=True)
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "reset-credit", "main", "--yes"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("timed out", result.stdout + result.stderr)
+        first = self.consume_calls()
+        self.assertEqual(len(first), 1)
+        self.assertTrue(any(entry.get("outcome") == "unknown" for entry in self.reset_journal()))
+        path = self.home / "fixture.json"
+        fixture = json.loads(path.read_text())
+        fixture["consume_timeout"] = False
+        path.write_text(json.dumps(fixture))
+        self.cli("reset-credit", "main", "--yes")
+        calls = self.consume_calls()
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0]["params"], calls[1]["params"])
+        self.assertTrue(calls[1]["params"]["idempotencyKey"])
+        results = [entry["outcome"] for entry in self.reset_journal() if entry["event"] == "result"]
+        self.assertEqual(results, ["unknown", "success"])
+
+    def test_reset_journal_unterminated_or_truncated_tail_preserves_the_next_attempt(self):
+        self.configure()
+        journal = self.home / "codex-worker-resets.jsonl"
+        old_attempt = {"event": "attempt", "slug": "old-task", "account": "main", "at": time.time(),
+                       "creditId": "RateLimitResetCredit_old", "idempotencyKey": str(uuid.uuid4())}
+        tails = {"unterminated": json.dumps(old_attempt),
+                 "truncated": json.dumps(old_attempt) + '\n{"event":"attempt","creditId":"partial'}
+        for name, tail in tails.items():
+            with self.subTest(tail=name):
+                before = len(self.consume_calls())
+                journal.write_text(tail)
+                self.account(self.home, "A", self.reset, used=99)
+                credit = self.reset_credit("RateLimitResetCredit_tail_" + name, self.reset + 86400)
+                self.reset_credits(self.home, credit, consume_timeout=True)
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "reset-credit", "main", "--yes"],
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("timed out", result.stdout + result.stderr)
+                calls = self.consume_calls()[before:]
+                self.assertEqual(len(calls), 1)
+                attempts = [entry for entry in calls[0]["journal_before"]
+                            if entry.get("event") == "attempt" and entry.get("creditId") == credit["id"]]
+                self.assertEqual(len(attempts), 1, "a partial final line must not swallow the new durable intent")
+                self.assertEqual(attempts[0]["idempotencyKey"], calls[0]["params"]["idempotencyKey"])
+                self.assertIn(old_attempt, self.reset_journal(), "preserve the preceding valid record")
+                fixture_path = self.home / "fixture.json"
+                fixture = json.loads(fixture_path.read_text())
+                fixture["consume_timeout"] = False
+                fixture_path.write_text(json.dumps(fixture))
+                self.cli("reset-credit", "main", "--yes")
+                calls = self.consume_calls()[before:]
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0]["params"], calls[1]["params"])
+                attempts = [entry for entry in self.reset_journal()
+                            if entry.get("event") == "attempt" and entry.get("creditId") == credit["id"]]
+                self.assertEqual(len(attempts), 2)
+                self.assertEqual(attempts[0]["idempotencyKey"], attempts[1]["idempotencyKey"])
+
+    def test_reset_credit_reuses_a_persisted_attempt_without_a_result_after_a_crash(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, used=99)
+        credit = self.reset_credit("RateLimitResetCredit_crashed", self.reset + 86400)
+        self.reset_credits(self.home, credit)
+        key = str(uuid.uuid4())
+        attempt = {"event": "attempt", "slug": "interrupted-task", "account": "main", "at": time.time(),
+                   "creditId": credit["id"], "idempotencyKey": key}
+        (self.home / "codex-worker-resets.jsonl").write_text(json.dumps(attempt) + "\n")
+        self.cli("reset-credit", "main", "--yes")
+        calls = self.consume_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["params"], {"creditId": credit["id"], "idempotencyKey": key})
+        self.assertEqual(len([entry for entry in calls[0]["journal_before"] if entry["event"] == "attempt"]), 2)
+        results = [entry for entry in self.reset_journal() if entry["event"] == "result"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual((results[0]["outcome"], results[0]["idempotencyKey"]), ("success", key))
+
+    def test_reset_credit_can_be_cancelled_while_another_process_holds_the_journal_lock(self):
+        journal = self.home / "codex-worker-resets.jsonl"
+        holder_code = """import fcntl
+import select
+import sys
+with open(sys.argv[1], "a+") as journal:
+    fcntl.flock(journal, fcntl.LOCK_EX)
+    print("locked", flush=True)
+    select.select([sys.stdin], [], [], 5)
+"""
+        holder = subprocess.Popen([PYTHON, "-I", "-c", holder_code, str(journal)],
+                                  cwd=self.repo, env=self.env, stdin=subprocess.PIPE,
+                                  stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            self.assertEqual(holder.stdout.readline(), "locked\n")
+            worker = self.worker()
+            cancelled = [False]
+
+            def cancel_while_waiting(seconds):
+                cancelled[0] = True
+
+            with mock.patch.dict(os.environ, self.env), \
+                    mock.patch.object(worker.time, "sleep", side_effect=cancel_while_waiting), \
+                    mock.patch.object(worker, "account_rpc") as account_rpc:
+                with self.assertRaisesRegex(RuntimeError, "stopped"):
+                    worker.consume_reset_credit({"name": "main", "home": str(self.home)},
+                                                self.reset_credit("RateLimitResetCredit_cancelled", self.reset),
+                                                slug="cancelled-reset", cancelled=lambda: cancelled[0])
+            self.assertTrue(cancelled[0], "the operation must wait for the contended lock")
+            account_rpc.assert_not_called()
+            self.assertEqual(journal.read_text(), "", "cancel before recording an intent or sending an RPC")
+            self.assertFalse(self.consume_calls())
+            self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
+        finally:
+            holder.communicate(timeout=5)
+
+    def test_reset_credit_cli_previews_then_spends_only_with_yes(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, used=99)
+        earliest = self.reset_credit("RateLimitResetCredit_preview", self.reset + 86400)
+        later = self.reset_credit("RateLimitResetCredit_explicit", self.reset + 2 * 86400)
+        self.reset_credits(self.home, later, earliest,
+                           self.reset_credit("RateLimitResetCredit_expired", int(time.time()) - 100),
+                           self.reset_credit("RateLimitResetCredit_used", self.reset + 100, status="consumed"))
+        preview = self.cli("reset-credit", "main")
+        self.assertIn(earliest["id"], preview)
+        self.assertIn("Full reset", preview)
+        self.assertFalse(self.consume_calls())
+        self.assertFalse(self.reset_journal())
+        output = self.cli("reset-credit", "main", "--yes")
+        self.assertEqual(self.consume_calls()[0]["params"]["creditId"], earliest["id"])
+        self.assertIn('"fixtureReceipt"', output)
+        self.assertIn('"fixtureApplied"', output)
+        self.assertIn("receipt-for-" + earliest["id"], output)
+        trace = self.trace()
+        position = next(i for i, event in enumerate(trace) if event.get("command") == "consume")
+        self.assertTrue(any(event.get("command") == "quota-snapshot" and event["primary"]["usedPercent"] == 0
+                            for event in trace[position + 1:]), "refresh limits after consuming the credit")
+        self.assertIn("main", output)
+        self.cli("reset-credit", "main", "--credit", later["id"], "--yes")
+        self.assertEqual(self.consume_calls()[-1]["params"]["creditId"], later["id"])
+        self.assertEqual(len(self.consume_calls()), 2)
+
+    def test_accounts_displays_available_resets_and_nearest_expiry(self):
+        self.configure()
+        expires = self.reset + 13 * 86400
+        credits = [self.reset_credit("RateLimitResetCredit_one", expires),
+                   self.reset_credit("RateLimitResetCredit_two", expires + 9 * 86400)]
+        self.reset_credits(self.home, *credits)
+        worker = self.worker()
+        with mock.patch.dict(os.environ, self.env):
+            info = worker.account_read({"name": "main", "home": str(self.home)})
+        self.assertEqual(info["reset_credits"], {"availableCount": 2, "credits": credits})
+        output = self.cli("accounts")
+        lines = output.splitlines()
+        headers = lines[0].split("\t")
+        self.assertIn("RESETS", headers)
+        index = headers.index("RESETS")
+        rows = {line.split("\t")[0]: line.split("\t") for line in lines[1:]}
+        expires_date = datetime.datetime.fromtimestamp(expires).strftime("%Y-%m-%d")
+        self.assertEqual(rows["main"][index], "2 (exp " + expires_date + ")")
+        self.assertEqual(rows["second"][index], "0")
+
+    def test_auth_race_retries_once_on_the_same_thread_in_both_languages(self):
+        prompts = {"ru": "Ход прервался из-за ошибки входа. Продолжай с того места, где остановился.",
+                   "en": "The turn was interrupted by an authentication error. Continue from where you stopped."}
+        for language in ("ru", "en"):
+            with self.subTest(language=language):
+                self.configure(language=language)
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "auth_error"}, {"mode": "complete", "reply": "Recovered after authentication"}])
+                before = len(self.invocations())
+                slug = "auth-retry-" + language
+                self.start(slug)
+                output = self.wait(slug)
+                executions = self.invocations()[before:]
+                self.assertEqual(len(executions), 2)
+                self.assertEqual(executions[0]["thread"], executions[1]["thread"])
+                self.assertTrue(executions[1]["resume"])
+                self.assertEqual(executions[1]["home"], str(self.home))
+                self.assertEqual(executions[1]["prompt"], prompts[language])
+                self.assertIn("Recovered after authentication", output)
+                self.assertFalse(self.state(slug).get("needs_login"))
+                self.assertFalse(self.state(slug)["rotations"])
+
+    def test_auth_error_before_thread_started_retries_with_the_original_task_prompt(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "auth_error", "before_thread": True, "event": "error"},
+            {"mode": "complete", "reply": "Original task completed after early authentication failure"}])
+        self.start("auth-before-thread")
+        output = self.wait("auth-before-thread")
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertFalse(executions[0]["resume"])
+        self.assertFalse(executions[1]["resume"], "the failed attempt never created a resumable thread")
+        self.assertEqual(executions[1]["prompt"], executions[0]["prompt"])
+        self.assertIn(self.brief.read_text().strip(), executions[1]["prompt"])
+        self.assertEqual(executions[1]["home"], str(self.home))
+        self.assertIn("Original task completed after early authentication failure", output)
+        state = self.state("auth-before-thread")
+        self.assertEqual(len(state["threads"]), 1)
+        self.assertEqual(state["thread"], executions[1]["thread"])
+        self.assertFalse(state["rotations"])
+
+    def test_auth_logout_switches_account_and_wait_explains_login(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "auth_error", "account_after": None, "messages": ["Работа до ошибки входа"],
+            "event": "error", "error": "OAuth refresh token was rejected"}])
+        self.start("auth-logout")
+        output = self.wait("auth-logout")
+        prompt = self.assert_rotation("auth-logout", output)
+        self.assertIn("Работа до ошибки входа", prompt)
+        self.assertIn("== account main needs login: run login main", output)
+        self.assertIn("main", self.state("auth-logout")["needs_login"])
+        self.assertEqual(len(self.invocations()), 2)
+
+    def test_second_consecutive_auth_failure_marks_account_and_switches(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "auth_error", "error": "Failed to refresh token"},
+            {"mode": "auth_error", "error": "401 Unauthorized"},
+            {"mode": "complete", "reply": "This account must not get a third attempt"}])
+        self.start("auth-twice")
+        output = self.wait("auth-twice")
+        self.assert_rotation("auth-twice", output)
+        executions = self.invocations()
+        self.assertEqual(len(executions), 3)
+        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
+        self.assertTrue(executions[1]["resume"])
+        self.assertIn("== account main needs login: run login main", output)
+        self.assertIn("main", self.state("auth-twice")["needs_login"])
+
+    def test_auth_logout_waits_only_for_the_other_logged_in_account(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "auth_error", "account_after": None,
+            "error": "Your authentication session could not be refreshed automatically. "
+                     "Please log out and sign in again."}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.start("auth-then-sleep")
+        output = self.wait("auth-then-sleep")
+        self.assert_sleeping("auth-then-sleep", output, self.reset + 3600, account="second")
+        self.assertIn("== account main needs login: run login main", output)
+        self.assertEqual(len(self.invocations()), 1)
+
+    def test_auth_failure_with_every_account_logged_out_fails_clearly(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "auth_error", "account_after": None, "logout_other_homes": [str(self.other)],
+            "error": "Your access token could not be refreshed. Please log out and sign in again."}])
+        self.start("auth-all-gone")
+        output = self.cli("wait", "auth-all-gone", "--timeout", "10")
+        state = self.state("auth-all-gone")
+        self.assertEqual(state["outcome"], "failed")
+        self.assertRegex(state.get("error", ""), r"(?i)(log.?in|signed? in|authentication)")
+        self.assertIn("== account main needs login: run login main", output)
+        self.assertFalse(state.get("sleeping"))
+        self.assertEqual(len(self.invocations()), 1)
+
+    def test_auth_failure_in_single_account_mode_keeps_legacy_failure(self):
+        (self.home / "codex-worker.json").write_text('{"language":"en"}')
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "auth_error", "error": "401 unauthorized"}])
+        self.start("auth-single")
+        output = self.cli("wait", "auth-single", "--timeout", "10")
+        state = self.state("auth-single")
+        self.assertEqual(state["outcome"], "failed")
+        self.assertIn("401 unauthorized", output)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(state.get("needs_login"))
+        self.assertFalse(state["rotations"])
+        self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
 
     def test_secondary_window_and_credit_helpers(self):
         # Helpers normalize both app-server's camelCase and rollout's snake_case.

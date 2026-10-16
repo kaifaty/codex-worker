@@ -185,6 +185,10 @@ If every configured account is exhausted, the task can sleep until a reset and c
 `wait --through-sleep` keeps waiting. Set `wait_for_reset` to `false` to stop instead. Two homes signed
 into the same ChatGPT account share limits and are not separate subscriptions.
 
+`use_reset_credits` defaults to `false`; enable it to spend one free reset before sleeping when the natural reset is more than `reset_credit_min_hours` (default `12`) away.
+`reset-credit <account> [--credit ID]` previews the earliest-expiring reset; add `--yes` to consume it and show the RPC response and refreshed limits.
+Authentication errors get one retry, then rotation; `needs login` means run `login <account>` to restore that account.
+
 ## Optional desktop-app notifications
 
 Tasks started by the worker do not need a notify hook. For threads created in the Codex desktop app,
@@ -225,8 +229,6 @@ On macOS, that command may be available from the ChatGPT.app bundle listed above
   with CLI versions. Desktop queueing and Computer Use integration depend on installed app support.
 - Codex uses local tools and your existing permissions. Keep task boundaries explicit, and delegate
   only access and actions you intend to authorize.
-- Concurrent processes sharing an account home can race during credential refresh. Reauthenticate
-  with `login <name>` if needed.
 - Automatic account monitoring and reset handling require explicit `accounts`; single-login use has
   no automatic rotation or reset supervisor.
 - PR creation needs `gh` support for the remote. Otherwise Codex is instructed to push the branch and
