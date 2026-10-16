@@ -30,6 +30,7 @@ PYTHON = sys.executable
 # The fake has the same process boundary as Codex: the supervisor must discover
 # the quota in a rollout, interrupt the process group, and create a fresh thread.
 FAKE_CODEX = r'''import datetime
+import fcntl
 import json
 import os
 import signal
@@ -52,6 +53,9 @@ def fixture():
 
 def trace(value):
     value["home"] = str(home)
+    value.setdefault("pid", os.getpid())
+    value.setdefault("ppid", os.getppid())
+    value.setdefault("pgid", os.getpgrp())
     append(trace_path, value)
 
 def emit(value):
@@ -103,6 +107,15 @@ def app_server():
             result = {"account": value.get("account"),
                       "workspaceRouting": {"chatgptAccountId": value["accountId"]}}
         elif method == "account/rateLimits/read":
+            if value.get("clear_quota_when_reset_locked"):
+                journal = Path(os.environ["CODEX_TASK_HOME"]) / "codex-worker-resets.jsonl"
+                if journal.exists():
+                    with journal.open("a") as stream:
+                        try:
+                            fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        except BlockingIOError:
+                            value["primary"]["usedPercent"] = 0
+                            fixture_path.write_text(json.dumps(value))
             current_limits = limits(value)
             trace({"command": "quota-snapshot", "primary": current_limits["primary"]})
             result = {"accountId": value["accountId"],
@@ -336,21 +349,74 @@ class RotationTests(unittest.TestCase):
         self.account(self.other, "B", self.reset + 3600)
 
     def tearDown(self):
-        # Failed assertions must not leave detached supervisors or fake turns.
-        tasks = self.home / "claude-tasks"
-        for path in tasks.glob("*/state.json"):
-            try:
-                state = json.loads(path.read_text())
-                if state.get("pid"):
-                    os.kill(int(state["pid"]), signal.SIGTERM)
-            except (OSError, ValueError):
-                pass
-        for event in self.trace():
-            if event.get("command") == "exec":
+        # Supervisors publish final state after SIGTERM. Wait for every owned
+        # writer and its tools before removing their directories.
+        owned, groups = set(), set()
+
+        def processes():
+            for path in (self.home / "claude-tasks").glob("*/state.json"):
                 try:
-                    os.kill(int(event["pid"]), signal.SIGTERM)
-                except OSError:
+                    state = json.loads(path.read_text())
+                    owned.update(int(state[key]) for key in ("pid", "codex_pid") if state.get(key))
+                except (OSError, ValueError):
                     pass
+            for event in self.trace():
+                if event.get("command") in ("exec", "app-server"):
+                    owned.update(int(event[key]) for key in ("pid", "ppid") if event.get(key))
+                    if event.get("pgid"):
+                        groups.add(int(event["pgid"]))
+            owned.difference_update((0, 1, os.getpid()))
+            groups.difference_update((0, 1, os.getpgrp()))
+            result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat="],
+                                    text=True, capture_output=True, check=True)
+            table = {}
+            for line in result.stdout.splitlines():
+                fields = line.split()
+                if len(fields) == 4:
+                    table[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+            while True:
+                descendants = {pid for pid, (parent, group, _) in table.items()
+                               if parent in owned or group in groups}
+                if descendants <= owned:
+                    break
+                owned.update(descendants)
+            groups.update(group for pid, (_, group, _) in table.items() if pid in owned and group == pid)
+            live = set()
+            for pid in owned:
+                try:
+                    os.waitpid(pid, os.WNOHANG)
+                except (ChildProcessError, ProcessLookupError):
+                    pass
+                if pid in table and not table[pid][2].startswith("Z"):
+                    live.add(pid)
+            return live
+
+        live = set()
+        for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, 3)):
+            signalled, signalled_groups = set(), set()
+            deadline = time.monotonic() + grace
+            while True:
+                live = processes()
+                if not live:
+                    break
+                for group in groups - signalled_groups:
+                    try:
+                        os.killpg(group, sig)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    signalled_groups.add(group)
+                for pid in live - signalled:
+                    try:
+                        os.kill(pid, sig)
+                    except (ProcessLookupError, PermissionError):
+                        pass
+                    signalled.add(pid)
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(0.02)
+            if not live:
+                break
+        self.assertFalse(live, "task processes still running before temporary-directory cleanup: %s" % sorted(live))
         self.tmp.cleanup()
 
     def git(self, *args):
@@ -1540,6 +1606,30 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(any(entry.get("event") == "sleep"
                              for entry in self.state("free-reset-resume")["rotations"]))
 
+    def test_automatic_reset_rechecks_quota_under_lock_and_keeps_the_credit_if_available(self):
+        self.configure(use_reset_credits=True)
+        reset = int(time.time()) + 30 * 3600
+        self.account(self.home, "A", reset, used=99)
+        self.account(self.other, "B", reset + 3600, used=99)
+        credit = self.reset_credit("RateLimitResetCredit_keep_after_fresh_read", reset + 86400)
+        self.reset_credits(self.home, credit, clear_quota_when_reset_locked=True)
+        self.start("fresh-quota-before-consume")
+        output = self.wait("fresh-quota-before-consume")
+        self.assertEqual(self.state("fresh-quota-before-consume")["outcome"], "completed")
+        self.assertIn("Результат A", output)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(self.consume_calls())
+        self.assertFalse(self.reset_journal())
+        snapshots = [event["primary"]["usedPercent"] for event in self.trace()
+                     if event.get("command") == "quota-snapshot" and event["home"] == str(self.home)]
+        self.assertIn(99, snapshots)
+        self.assertIn(0, snapshots)
+        self.assertLess(snapshots.index(99), snapshots.index(0))
+        fixture = json.loads((self.home / "fixture.json").read_text())
+        self.assertEqual(fixture["rateLimitResetCredits"]["credits"][0]["status"], "available")
+        self.assertFalse(any(entry.get("event") == "sleep"
+                             for entry in self.state("fresh-quota-before-consume")["rotations"]))
+
     def test_disabled_free_resets_keep_the_original_sleep(self):
         self.configure(use_reset_credits=False)
         reset = int(time.time()) + 30 * 3600
@@ -2023,6 +2113,23 @@ with open(sys.argv[1], "a+") as journal:
         self.assertTrue(executions[1]["resume"])
         self.assertTrue(executions[3]["resume"])
 
+    def test_auth_exclusion_applies_to_every_home_with_the_same_account_identity(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "auth_error", "error": "Failed to refresh token"}])
+        self.account(self.other, "A", self.reset + 3600)
+        self.start("auth-duplicate-identity")
+        output = self.cli("wait", "auth-duplicate-identity", "--timeout", "10")
+        state = self.state("auth-duplicate-identity")
+        self.assertEqual(state["outcome"], "failed")
+        self.assertIn("auth", state.get("error", "").lower())
+        self.assertIn("run login main", output)
+        self.assertFalse(state.get("sleeping"))
+        self.assertFalse(any(entry.get("event") == "sleep" for entry in state["rotations"]))
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertTrue(all(execution["home"] == str(self.home) for execution in executions))
+        self.assertTrue(executions[1]["resume"])
+
     def test_auth_transition_cap_stops_accounts_that_alternate_available_quota(self):
         worker = self.worker()
         cfg = {"enabled": True, "switch_at": 99, "credits": False, "wait_for_reset": True,
@@ -2068,6 +2175,24 @@ with open(sys.argv[1], "a+") as journal:
         self.assert_sleeping("auth-then-sleep", output, self.reset + 3600, account="second")
         self.assertIn("== account main needs login: run login main", output)
         self.assertEqual(len(self.invocations()), 1)
+
+    def test_explicit_logout_after_auth_excludes_the_account_through_a_quota_sleep(self):
+        self.configure()
+        reset = time.time() + 4
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "auth_error", "account_after": None, "messages": ["Работа до явного выхода"]}])
+        self.account(self.other, "B", reset, used=99, auto_reset=True)
+        self.start("auth-logout-then-wake")
+        first = self.wait("auth-logout-then-wake")
+        self.assert_sleeping("auth-logout-then-wake", first, reset, account="second")
+        self.assertEqual(len(self.invocations()), 1)
+        self.account(self.home, "A", self.reset)
+        output = self.wait("auth-logout-then-wake", through_sleep=True, timeout=10)
+        prompt = self.assert_rotation("auth-logout-then-wake", output)
+        self.assertIn("Работа до явного выхода", prompt)
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertIn("main", self.state("auth-logout-then-wake").get("needs_login", []))
+        self.assertEqual(self.state("auth-logout-then-wake")["outcome"], "completed")
 
     def test_auth_failure_with_every_account_logged_out_fails_clearly(self):
         self.configure()

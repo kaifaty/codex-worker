@@ -383,7 +383,7 @@ def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
 
 
 def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: False,
-                        confirmed=False, pending_only=False, allow_consume=True):
+                        confirmed=False, pending_only=False, allow_consume=True, quota_cfg=None):
     """Resolve a lost reply before selecting another credit, under the same lock."""
     with reset_journal(cancelled) as (entries, record):
         pending = pending_resets(entries, account)
@@ -405,7 +405,9 @@ def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: Fals
                     record(entry, event="result", outcome="consumed (inferred)")
                 return {"credit": credit or entry.get("credit") or {"id": entry["creditId"]},
                         "info": info, "outcome": "consumed (inferred)"}
-        else:
+        if quota_cfg is not None and not exhausted(info, quota_cfg):
+            return {"info": info, "outcome": "available"}
+        if not pending:
             choices = reset_credits(info)
             credit = next((c for c in choices if c["id"] == credit_id), None) if credit_id else next(iter(choices), None)
             if credit is None:
@@ -732,7 +734,7 @@ def record_exhausted(st, infos, cfg, reason):
 
 
 def try_reset_credit(st, infos, cfg, stopped):
-    """Return a fresh snapshot only after a successful consume; never retry here."""
+    """Return fresh quotas after a reset or concurrent quota recovery; never retry here."""
     stamp, _ = earliest_reset(infos, cfg)
     if (not cfg.get("use_reset_credits", False) or stamp is None
             or stamp - time.time() <= cfg.get("reset_credit_min_hours", 12) * 3600
@@ -751,7 +753,9 @@ def try_reset_credit(st, infos, cfg, stopped):
     event = {"event": "reset_credit", "at": time.time(), "account": info["name"],
              "credit_id": credit["id"], "expires_at": credit.get("expiresAt")}
     try:
-        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True)
+        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True, quota_cfg=cfg)
+        if action["outcome"] == "available":
+            return [action["info"] if i["name"] == info["name"] else i for i in infos]
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
         event.update(outcome="error", error=str(exc))
     else:
@@ -767,7 +771,10 @@ def try_reset_credit(st, infos, cfg, stopped):
 def refresh_login_state(st, infos, new_turn=False):
     """Only a fresh probe at the beginning of a turn can clear a login flag."""
     names = list(st.get("needs_login", []))
+    identities = st.setdefault("account_ids", {})
     for info in infos:
+        if info.get("account_id"):
+            identities[info["name"]] = info["account_id"]
         if new_turn and info.get("logged_in") is True and info["name"] in names:
             names.remove(info["name"])
         elif info.get("logged_in") is False and info["name"] not in names:
@@ -776,7 +783,23 @@ def refresh_login_state(st, infos, new_turn=False):
     if names != st.get("needs_login", []):
         st["needs_login"] = names
         save(st)
-    return [i for i in infos if i["name"] not in st.get("auth_excluded", [])]
+    return [i for i in infos if i["name"] not in st.get("auth_excluded", [])
+            and i.get("duplicate") not in st.get("auth_excluded", [])
+            and (i.get("account_id") or identities.get(i["name"])) not in st.get("auth_excluded_ids", [])]
+
+
+def exclude_auth_account(st, account, info):
+    name = account["name"]
+    if name not in st["auth_excluded"]:
+        st["auth_excluded"].append(name)
+    ident = info.get("account_id") or st.get("account_ids", {}).get(name)
+    if ident and ident not in st["auth_excluded_ids"]:
+        st["auth_excluded_ids"].append(ident)
+    names = st.setdefault("needs_login", [])
+    if name not in names:
+        names.append(name)
+        st["rotations"].append({"event": "needs_login", "at": time.time(), "account": name})
+    save(st)
 
 
 def task_snapshots(st, cfg, stopped, new_turn=False):
@@ -784,7 +807,8 @@ def task_snapshots(st, cfg, stopped, new_turn=False):
     if cfg.get("use_reset_credits", False):
         for info in infos:
             if (stopped() or not info.get("logged_in") or info.get("duplicate")
-                    or info["name"] in st.get("auth_excluded", [])):
+                    or info["name"] in st.get("auth_excluded", [])
+                    or info.get("account_id") in st.get("auth_excluded_ids", [])):
                 continue
             action = reset_credit_action(info, slug=st["slug"], cancelled=stopped,
                                          confirmed=True, pending_only=True, allow_consume=False)
@@ -1054,7 +1078,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
     visited = set()
     rotations = 0
     if new_turn:
-        st.update(auth_excluded=[], auth_transitions=0, auth_failures={})
+        st.update(auth_excluded=[], auth_excluded_ids=[], auth_transitions=0, auth_failures={})
         st.pop("reset_reconciled", None)
     account = account_named(cfg, st["account"])
     if cfg["enabled"]:
@@ -1127,14 +1151,9 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
                     prompt = auth_resume_prompt(cfg)
                 save(st)
                 continue
-            if failures[account["name"]] >= 2:
-                st["auth_excluded"].append(account["name"])
-                names = st.setdefault("needs_login", [])
-                if account["name"] not in names:
-                    names.append(account["name"])
-                    st["rotations"].append({"event": "needs_login", "at": time.time(), "account": account["name"]})
+            if failures[account["name"]] >= 2 or current.get("logged_in") is False:
+                exclude_auth_account(st, account, current)
                 infos = refresh_login_state(st, infos)
-                save(st)
             if not infos or capped:
                 names = st.get("needs_login", []) or [a["name"] for a in cfg["accounts"]]
                 st.update(outcome="failed", error="all accounts fail with auth errors; " +
