@@ -47,6 +47,8 @@ SKILL = Path(__file__).resolve().parent.parent
 STATS = Path(__file__).resolve().parent / "codex-stats.py"
 RATE_POLL_SECONDS = 30
 ACCOUNT_TIMEOUT = 20
+ACCOUNT_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_ACCOUNT_RETRY_SECONDS", "300"))
+MAX_ACCOUNT_RETRIES = 6
 SLEEP_STEP = float(os.environ.get("CODEX_TASK_SLEEP_STEP", "60"))
 RESET_MARGIN = float(os.environ.get("CODEX_TASK_RESET_MARGIN", "120"))
 RESET_RETRY_SECONDS = 15 * 60
@@ -175,28 +177,34 @@ def prepare_home(account):
             dest.symlink_to(CODEX_HOME / name)
 
 
+def signal_group(proc, sig):
+    try:
+        os.killpg(proc.pid, sig)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # macOS may reject killpg even while the leader is still alive.
+        if proc.poll() is not None:
+            return False
+        if sig:
+            try:
+                os.kill(proc.pid, sig)
+            except ProcessLookupError:
+                return False
+    return True
+
+
 def terminate(proc):
     """Interrupt the entire exec group, then bound shutdown even if it ignores signals."""
-    def signal_group(sig):
-        try:
-            os.killpg(proc.pid, sig)
-        except ProcessLookupError:
-            return False
-        except PermissionError:
-            # macOS can report EPERM for a group whose leader has already exited.
-            if proc.poll() is not None:
-                return False
-            raise
-        return True
 
     for sig, timeout in ((signal.SIGINT, 10), (signal.SIGTERM, 5), (signal.SIGKILL, 5)):
-        if not signal_group(sig):
+        if not signal_group(proc, sig):
             proc.wait()
             break
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             proc.poll()  # Reap the leader, but also wait for its tool processes.
-            if not signal_group(0):
+            if not signal_group(proc, 0):
                 return
             time.sleep(0.05)
 
@@ -266,22 +274,19 @@ def account_rpc(account, cancelled=lambda: False):
     finally:
         if proc is not None:
             # app-server must be killed at the deadline, not allowed a second grace period.
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except (ProcessLookupError, PermissionError):
-                # macOS reports EPERM for a group whose only member is an unreaped zombie.
-                pass
+            signal_group(proc, signal.SIGKILL)
             proc.wait()
             proc.stdin.close()
             proc.stdout.close()
 
 
 def account_read(account, cancelled=lambda: False):
-    info = dict(account, logged_in=False)
+    info = dict(account, logged_in=None)
     try:
         with account_rpc(account, cancelled) as call:
             result = call("account/read", {})
-            if result.get("account") is None:
+            if result["account"] is None:
+                info["logged_in"] = False
                 return info
             info.update(logged_in=True, account=result["account"],
                         account_id=(result.get("workspaceRouting") or {}).get("chatgptAccountId"))
@@ -291,7 +296,7 @@ def account_read(account, cancelled=lambda: False):
                         ordinary=result.get("ordinaryUsageAllowed"),
                         account_id=result.get("accountId") or info.get("account_id"))
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        info.update(logged_in=False, error=str(exc))
+        info.update(logged_in=None, error=str(exc))
     return info
 
 
@@ -696,12 +701,23 @@ def try_reset_credit(st, infos, cfg, stopped):
     return None
 
 
-def without_login_failures(st, infos):
-    return [i for i in infos if i["name"] not in st.get("needs_login", [])]
+def refresh_login_state(st, infos):
+    """Login flags describe fresh probes; they never blacklist an account."""
+    names = list(st.get("needs_login", []))
+    for info in infos:
+        if info.get("logged_in") is True and info["name"] in names:
+            names.remove(info["name"])
+        elif info.get("logged_in") is False and info["name"] not in names:
+            names.append(info["name"])
+            st["rotations"].append({"event": "needs_login", "at": time.time(), "account": info["name"]})
+    if names != st.get("needs_login", []):
+        st["needs_login"] = names
+        save(st)
+    return infos
 
 
 def no_logged_in_accounts(st, infos):
-    if any(i.get("logged_in") for i in infos):
+    if any(i.get("logged_in") is not False for i in infos):
         return False
     names = st.get("needs_login", []) or [i["name"] for i in infos]
     st.update(outcome="failed", error="No usable logged-in accounts remain; " +
@@ -713,13 +729,11 @@ def no_logged_in_accounts(st, infos):
 
 def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
     """Wait without an exec, re-reading quotas after each wall-clock deadline."""
-    infos = without_login_failures(st, infos)
+    infos = refresh_login_state(st, infos)
     if no_logged_in_accounts(st, infos):
         return None
-    if not cfg["wait_for_reset"]:
-        record_exhausted(st, infos, cfg, reason)
-        return None
     sleep = sleep or time.sleep
+    probe_retries = 0
     wait_started = time.time()
     already_waited = st.get("reset_wait_seconds", 0)
     deadline = wait_started + MAX_RESET_WAIT_SECONDS - already_waited
@@ -736,11 +750,22 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         if remaining <= 0:
             record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
             return None
+        unknown = [i for i in infos if i.get("logged_in") is None]
+        probing = bool(unknown) and probe_retries < MAX_ACCOUNT_RETRIES
+        if unknown and not probing and not any(i.get("logged_in") is True for i in infos):
+            errors = "; ".join(f"{i['name']}: {i.get('error', 'RPC unavailable')}" for i in unknown)
+            st.update(outcome="failed", error=f"Account status is unknown after {MAX_ACCOUNT_RETRIES} retries: {errors}")
+            st.pop("sleeping", None)
+            save(st)
+            return None
+        if not cfg["wait_for_reset"] and not probing:
+            record_exhausted(st, infos, cfg, reason)
+            return None
         # At most one consume attempt before this sleep, even if the result is unknown
         # or the refreshed quota still says exhausted.
-        refreshed = try_reset_credit(st, infos, cfg, cancelled)
+        refreshed = None if unknown else try_reset_credit(st, infos, cfg, cancelled)
         if refreshed is not None:
-            infos = without_login_failures(st, refreshed)
+            infos = refresh_login_state(st, refreshed)
         update_waited()
         if cancelled():
             if not stopped():
@@ -753,6 +778,8 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             chosen = available(infos, cfg)
             if chosen:
                 return chosen
+            unknown = [i for i in infos if i.get("logged_in") is None]
+            probing = bool(unknown) and probe_retries < MAX_ACCOUNT_RETRIES
         if no_logged_in_accounts(st, infos):
             return None
         started = time.time()
@@ -761,8 +788,12 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         until = stamp + RESET_MARGIN if stamp is not None else started + RESET_RETRY_SECONDS
         if until <= started:
             until = started + SLEEP_STEP
+        if probing:
+            until = min(until, started + ACCOUNT_RETRY_SECONDS) if stamp is not None else started + ACCOUNT_RETRY_SECONDS
         until = min(until, deadline)
         sleeping = {"until": until, "account": name, "reason": reason}
+        if probing:
+            sleeping.update(probe=True, probe_attempt=probe_retries + 1, reason="account status unknown (RPC error)")
         st.update(outcome="sleeping", sleeping=sleeping, exhausted=None)
         st["rotations"].append(dict(sleeping, at=started, event="sleep"))
         save(st)
@@ -783,7 +814,11 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         st["outcome"] = "running"
         st["rotations"].append(dict(sleeping, at=time.time(), event="wake"))
         save(st)
-        infos = without_login_failures(st, snapshots(cfg, cancelled, prepare=True))
+        infos = refresh_login_state(st, snapshots(cfg, cancelled, prepare=True))
+        if probing:
+            probe_retries += 1
+        if not any(i.get("logged_in") is None for i in infos):
+            probe_retries = 0
         update_waited()
         if stopped():
             return None
@@ -934,7 +969,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
     auth_failures = 0
     account = account_named(cfg, st["account"])
     if cfg["enabled"]:
-        infos = without_login_failures(st, snapshots(cfg, stopped, prepare=True))
+        infos = refresh_login_state(st, snapshots(cfg, stopped, prepare=True))
         current = next((i for i in infos if i["name"] == st["account"]), {})
         same_account = {i["name"] for i in infos if current.get("account_id")
                         and i.get("account_id") == current["account_id"]}
@@ -964,7 +999,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
     save(st)
 
     def on_limit(local, reason, allow_credits):
-        infos = without_login_failures(st, snapshots(cfg, stopped, prepare=True))
+        infos = refresh_login_state(st, snapshots(cfg, stopped, prepare=True))
         current = next((i for i in infos if i["name"] == account["name"]), {})
         if local and exhausted(local, cfg):
             # The RPC may lag the local rollout; keep its fresh credit balance.
@@ -989,7 +1024,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
             break
         if result == "auth":
             auth_failures += 1
-            infos = snapshots(cfg, stopped, prepare=True)
+            infos = refresh_login_state(st, snapshots(cfg, stopped, prepare=True))
             if stopped():
                 break
             current = next((i for i in infos if i["name"] == account["name"]), {})
@@ -998,14 +1033,6 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
                     prompt = auth_resume_prompt(cfg)
                 save(st)
                 continue
-            if auth_failures >= 2 or not current.get("logged_in"):
-                names = st.setdefault("needs_login", [])
-                if account["name"] not in names:
-                    names.append(account["name"])
-                    st["rotations"].append({"event": "needs_login", "at": time.time(),
-                                            "account": account["name"]})
-                    save(st)
-            infos = without_login_failures(st, infos)
             decision = {"reason": "authentication error", "infos": infos,
                         "chosen": available(infos, cfg, {account["name"]})}
         else:
@@ -1019,7 +1046,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
             visited.clear()
             rotations = 0
         if chosen["name"] == account["name"]:
-            if not reviewing:
+            if not reviewing and st.get("thread"):
                 prompt = reset_resume_prompt(cfg)
             save(st)
             continue
@@ -1180,7 +1207,8 @@ def cmd_wait(a):
     if sleeping:
         if alive(st.get("pid")):
             s = st["sleeping"]
-            print(f"== all accounts at limit; auto-continue at {local_time(s['until'])} "
+            label = "account status unknown; retry at" if s.get("probe") else "all accounts at limit; auto-continue at"
+            print(f"== {label} {local_time(s['until'])} "
                   f"({s['account'] or 'unknown'}); run wait again to follow")
         else:
             print("== paused, supervisor gone; continue with say")
@@ -1324,6 +1352,8 @@ def print_accounts(infos, cfg):
         credits = info.get("limits", {}).get("credits", {})
         if info.get("duplicate"):
             status = "same account as " + info["duplicate"]
+        elif info["logged_in"] is None:
+            status = "unknown (rpc error: " + info.get("error", "unavailable") + ")"
         elif not info["logged_in"]:
             status = "not logged in"
         elif exhausted(info, cfg):
@@ -1345,6 +1375,8 @@ def cmd_reset_credit(a):
     cfg = accounts_config()
     account = account_named(cfg, a.account)
     info = account_read(account)
+    if info.get("logged_in") is None:
+        die(f"account {a.account} status unknown (rpc error: {info.get('error', 'unavailable')})")
     if not info.get("logged_in"):
         die(f"account {a.account} is not logged in: run login {a.account}")
     choices = reset_credits(info)

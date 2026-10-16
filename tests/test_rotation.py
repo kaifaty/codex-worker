@@ -209,6 +209,9 @@ def execute():
         value = fixture()
         if "account_after" in run:
             value["account"] = run["account_after"]
+        if "used_after" in run:
+            value["primary"]["usedPercent"] = run["used_after"]
+        if "account_after" in run or "used_after" in run:
             fixture_path.write_text(json.dumps(value))
         for other_home in run.get("logout_other_homes", []):
             path = Path(other_home) / "fixture.json"
@@ -1347,8 +1350,126 @@ class RotationTests(unittest.TestCase):
         self.assertIn("available", rows["main"])
         self.assertIn("same account as main", rows["second"])
         self.assertIn("not logged in", rows["logged-out"])
-        self.assertIn("not logged in", rows["rpc-error"])
+        self.assertIn("unknown", rows["rpc-error"])
+        self.assertNotIn("not logged in", rows["rpc-error"])
         self.assertFalse(self.invocations())
+
+    def test_account_read_distinguishes_explicit_logout_from_rpc_errors_and_timeouts(self):
+        worker = self.worker()
+        account = {"name": "main", "home": str(self.home)}
+        cases = (("logged-out", [{"account": None}], False),
+                 ("read-error", [RuntimeError("temporary account RPC unavailable")], None),
+                 ("read-timeout", [TimeoutError("account RPC timed out")], None),
+                 ("quota-error", [{"account": {"type": "chatgpt"}},
+                                   RuntimeError("temporary quota RPC unavailable")], None))
+        for name, replies, expected in cases:
+            with self.subTest(case=name):
+                with mock.patch.object(worker, "account_rpc") as account_rpc:
+                    account_rpc.return_value.__enter__.return_value.side_effect = replies
+                    info = worker.account_read(account)
+                self.assertIs(info["logged_in"], expected)
+                if expected is None:
+                    self.assertTrue(info.get("error"))
+                else:
+                    self.assertFalse(info.get("error"))
+        self.assertFalse(self.trace())
+
+    def test_unknown_account_rpc_status_sleeps_then_recovers_without_requiring_login(self):
+        self.env["CODEX_TASK_ACCOUNT_RETRY_SECONDS"] = "4"
+        self.configure()
+        for home in (self.home, self.other):
+            path = home / "fixture.json"
+            fixture = json.loads(path.read_text())
+            fixture["rpc_error"] = True
+            path.write_text(json.dumps(fixture))
+        self.start("unknown-account-recovery")
+        first = self.wait("unknown-account-recovery")
+        state = self.state("unknown-account-recovery")
+        self.assertEqual(state["outcome"], "sleeping")
+        self.assertLessEqual(state["sleeping"]["until"] - time.time(), 4)
+        self.assertFalse(state.get("needs_login"))
+        self.assertFalse(self.invocations())
+        self.assertNotIn("needs login", first)
+        for home in (self.home, self.other):
+            path = home / "fixture.json"
+            fixture = json.loads(path.read_text())
+            fixture.pop("rpc_error")
+            path.write_text(json.dumps(fixture))
+        output = self.wait("unknown-account-recovery", through_sleep=True, timeout=10)
+        state = self.state("unknown-account-recovery")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertIn("Результат A", output)
+        self.assertFalse(state.get("needs_login"))
+
+    def test_unknown_account_status_retries_six_times_at_five_minute_intervals(self):
+        worker = self.worker()
+        self.assertEqual(worker.ACCOUNT_RETRY_SECONDS, 300)
+        self.assertEqual(worker.MAX_ACCOUNT_RETRIES, 6)
+        cfg = {"wait_for_reset": True, "switch_at": 99}
+        clock = [1000.0]
+        sleeps = []
+        st = {"slug": "unknown-account-budget", "account": "main", "thread": "", "rotations": []}
+        unknown = [{"name": "main", "logged_in": None, "error": "temporary account RPC unavailable"},
+                   {"name": "second", "logged_in": None, "error": "temporary account RPC unavailable"}]
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock[0] += seconds
+
+        with mock.patch.object(worker, "SLEEP_STEP", 60), \
+                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.time, "sleep", side_effect=sleep), \
+                mock.patch.object(worker, "save"), \
+                mock.patch.object(worker, "snapshots", return_value=unknown) as snapshots:
+            chosen = worker.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: False)
+        self.assertIsNone(chosen)
+        self.assertEqual(snapshots.call_count, 6)
+        self.assertEqual(sum(sleeps), 6 * 300)
+        self.assertTrue(all(0 < seconds <= 60 for seconds in sleeps))
+        self.assertEqual(st["outcome"], "failed")
+        self.assertIn("6", st["error"])
+        self.assertRegex(st["error"], r"(?i)(temporar|unavailable|unknown|retr)")
+        self.assertFalse(st.get("needs_login"))
+
+    def test_stop_during_unknown_account_retry_does_not_probe_or_require_login(self):
+        worker = self.worker()
+        cfg = {"wait_for_reset": True, "switch_at": 99}
+        clock = [1000.0]
+        stopped = [False]
+        st = {"slug": "unknown-account-stop", "account": "main", "thread": "", "rotations": []}
+        unknown = [{"name": "main", "logged_in": None, "error": "temporary account RPC unavailable"}]
+
+        def sleep(seconds):
+            clock[0] += seconds
+            stopped[0] = True
+
+        with mock.patch.object(worker, "SLEEP_STEP", 60), \
+                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.time, "sleep", side_effect=sleep) as sleeper, \
+                mock.patch.object(worker, "save"), \
+                mock.patch.object(worker, "snapshots") as snapshots:
+            chosen = worker.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: stopped[0])
+        self.assertIsNone(chosen)
+        sleeper.assert_called_once_with(60)
+        snapshots.assert_not_called()
+        self.assertFalse(st.get("needs_login"))
+
+    def test_signal_group_falls_back_to_a_live_leader_on_permission_error(self):
+        worker = self.worker()
+        for live in (True, False):
+            with self.subTest(live=live):
+                proc = mock.Mock(pid=12345)
+                proc.poll.return_value = None if live else 0
+                with mock.patch.object(worker.os, "killpg", side_effect=PermissionError), \
+                        mock.patch.object(worker.os, "kill") as kill:
+                    self.assertIs(worker.signal_group(proc, 0), live)
+                    kill.assert_not_called()
+                    self.assertIs(worker.signal_group(proc, signal.SIGTERM), live)
+                    if live:
+                        kill.assert_called_once_with(proc.pid, signal.SIGTERM)
+                    else:
+                        kill.assert_not_called()
 
     def test_reset_credit_settings_default_to_manual_use_and_twelve_hours(self):
         self.configure()
@@ -1656,6 +1777,26 @@ with open(sys.argv[1], "a+") as journal:
         self.assertEqual(state["thread"], executions[1]["thread"])
         self.assertFalse(state["rotations"])
 
+    def test_auth_before_thread_then_quota_sleep_preserves_the_original_brief(self):
+        self.configure()
+        reset = time.time() + 4
+        self.account(self.home, "A", reset, auto_reset=True, runs=[
+            {"mode": "auth_error", "before_thread": True, "used_after": 99},
+            {"mode": "complete", "reply": "Original brief completed after quota recovery"}])
+        self.account(self.other, "B", self.reset, used=99)
+        self.start("auth-before-thread-sleep")
+        self.assert_sleeping("auth-before-thread-sleep", self.wait("auth-before-thread-sleep"), reset)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(self.state("auth-before-thread-sleep")["threads"])
+        output = self.wait("auth-before-thread-sleep", through_sleep=True, timeout=10)
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertFalse(executions[1]["resume"])
+        self.assertEqual(executions[1]["prompt"], executions[0]["prompt"])
+        self.assertIn(self.brief.read_text().strip(), executions[1]["prompt"])
+        self.assertIn("Original brief completed after quota recovery", output)
+        self.assertEqual(self.state("auth-before-thread-sleep")["outcome"], "completed")
+
     def test_auth_logout_switches_account_and_wait_explains_login(self):
         self.configure()
         self.account(self.home, "A", self.reset, runs=[{
@@ -1669,7 +1810,32 @@ with open(sys.argv[1], "a+") as journal:
         self.assertIn("main", self.state("auth-logout")["needs_login"])
         self.assertEqual(len(self.invocations()), 2)
 
-    def test_second_consecutive_auth_failure_marks_account_and_switches(self):
+    def test_say_reuses_a_logged_in_account_after_needs_login_is_cleared(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "auth_error", "account_after": None, "messages": ["Работа до потери входа"]}])
+        self.start("auth-login-restored")
+        first = self.wait("auth-login-restored")
+        self.assert_rotation("auth-login-restored", first)
+        self.assertIn("main", self.state("auth-login-restored")["needs_login"])
+        self.account(self.home, "A", self.reset)
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        message = "Продолжи на аккаунте с восстановленным входом"
+        self.cli("say", "auth-login-restored", message)
+        output = self.wait("auth-login-restored")
+        state = self.state("auth-login-restored")
+        self.assertEqual(state["account"], "main")
+        self.assertNotIn("main", state.get("needs_login", []))
+        executions = self.invocations()
+        self.assertEqual(len(executions), 3)
+        self.assertEqual(executions[-1]["home"], str(self.home))
+        self.assertFalse(executions[-1]["resume"])
+        self.assertIn(self.brief.read_text().strip(), executions[-1]["prompt"])
+        self.assertIn(message, executions[-1]["prompt"])
+        self.assertIn("Результат A", output)
+        self.assertNotIn("== account main needs login", output)
+
+    def test_second_consecutive_auth_failure_switches_without_marking_a_confirmed_login(self):
         self.configure()
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "auth_error", "error": "Failed to refresh token"},
@@ -1682,8 +1848,8 @@ with open(sys.argv[1], "a+") as journal:
         self.assertEqual(len(executions), 3)
         self.assertEqual(executions[0]["thread"], executions[1]["thread"])
         self.assertTrue(executions[1]["resume"])
-        self.assertIn("== account main needs login: run login main", output)
-        self.assertIn("main", self.state("auth-twice")["needs_login"])
+        self.assertNotIn("== account main needs login: run login main", output)
+        self.assertNotIn("main", self.state("auth-twice").get("needs_login", []))
 
     def test_auth_logout_waits_only_for_the_other_logged_in_account(self):
         self.configure()
