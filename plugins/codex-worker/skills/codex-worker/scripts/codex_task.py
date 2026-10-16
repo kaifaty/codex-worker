@@ -309,8 +309,8 @@ def reset_credits(info):
                   key=lambda c: c.get("expiresAt") if c.get("expiresAt") is not None else float("inf"))
 
 
-def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
-    """Pin the intent to a durable key before sending, including after a lost reply."""
+@contextmanager
+def reset_journal(cancelled=lambda: False):
     CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
     path = CODEX_HOME / "codex-worker-resets.jsonl"
     # Parallel tasks must agree on a key, even if one dies during the RPC.
@@ -324,7 +324,7 @@ def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
             except BlockingIOError:
                 time.sleep(0.05)
         journal.seek(0)
-        key = None
+        entries = []
         last_line = ""
         for line in journal:
             last_line = line
@@ -332,32 +332,90 @@ def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
                 entry = json.loads(line)
             except ValueError:
                 continue
-            if isinstance(entry, dict) and entry.get("creditId") == credit["id"] and entry.get("idempotencyKey"):
-                key = entry["idempotencyKey"]
+            if isinstance(entry, dict):
+                entries.append(entry)
         if cancelled():
             raise RuntimeError("stopped")
         if last_line and not last_line.endswith("\n"):
             journal.write("\n")
-        intent = {"slug": slug, "account": account["name"], "creditId": credit["id"],
-                  "idempotencyKey": key or str(uuid.uuid4())}
 
-        def record(**fields):
-            journal.write(json.dumps(dict(intent, at=time.time(), **fields), ensure_ascii=False) + "\n")
+        def record(entry, **fields):
+            value = dict(entry, at=time.time(), **fields)
+            journal.write(json.dumps(value, ensure_ascii=False) + "\n")
             journal.flush()
             os.fsync(journal.fileno())
+            entries.append(value)
 
-        record(event="attempt")
-        try:
-            with account_rpc(account, cancelled) as call:
-                response = call("account/rateLimitResetCredit/consume",
-                                {"creditId": intent["creditId"], "idempotencyKey": intent["idempotencyKey"]})
-        except (OSError, ValueError, KeyError, RuntimeError) as exc:
-            # An RPC timeout can be returned as an error response too.
-            unknown = not isinstance(exc, RPCError) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
-            record(event="result", outcome="unknown" if unknown else "error", error=str(exc))
-            raise
-        record(event="result", outcome="success", response=response)
-        return response
+        yield entries, record
+
+
+def pending_resets(entries, account):
+    latest = {}
+    for entry in entries:
+        if entry.get("account") == account["name"] and entry.get("creditId") and entry.get("idempotencyKey"):
+            latest[entry["creditId"]] = entry
+    return [entry for entry in latest.values()
+            if entry.get("event") == "attempt" or entry.get("outcome") == "unknown"]
+
+
+def consume_recorded_reset(account, credit, slug, cancelled, entries, record):
+    key = next((entry["idempotencyKey"] for entry in reversed(entries)
+                if entry.get("creditId") == credit["id"] and entry.get("idempotencyKey")), None)
+    intent = {"slug": slug, "account": account["name"], "creditId": credit["id"],
+              "idempotencyKey": key or str(uuid.uuid4()), "credit": credit}
+    record(intent, event="attempt")
+    try:
+        with account_rpc(account, cancelled) as call:
+            response = call("account/rateLimitResetCredit/consume",
+                            {"creditId": intent["creditId"], "idempotencyKey": intent["idempotencyKey"]})
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        unknown = not isinstance(exc, RPCError) or "timed out" in str(exc).lower() or "timeout" in str(exc).lower()
+        record(intent, event="result", outcome="unknown" if unknown else "error", error=str(exc))
+        raise
+    record(intent, event="result", outcome="success", response=response)
+    return response
+
+
+def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
+    """Pin the intent to a durable key before sending, including after a lost reply."""
+    with reset_journal(cancelled) as (entries, record):
+        return consume_recorded_reset(account, credit, slug, cancelled, entries, record)
+
+
+def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: False,
+                        confirmed=False, pending_only=False, allow_consume=True):
+    """Resolve a lost reply before selecting another credit, under the same lock."""
+    with reset_journal(cancelled) as (entries, record):
+        pending = pending_resets(entries, account)
+        if pending_only and not pending:
+            return None
+        info = account_read(account, cancelled)
+        if info.get("logged_in") is not True:
+            if pending_only:
+                return {"info": info, "outcome": "unavailable"}
+            raise RuntimeError(f"account {account['name']} status " +
+                               (f"unknown (rpc error: {info.get('error', 'unavailable')})"
+                                if info.get("logged_in") is None else f"not logged in: run login {account['name']}"))
+        if pending:
+            entry = pending[0]
+            credit = next((c for c in info.get("reset_credits", {}).get("credits", [])
+                           if c.get("id") == entry["creditId"]), None)
+            if credit is None or credit.get("status") != "available":
+                if confirmed:
+                    record(entry, event="result", outcome="consumed (inferred)")
+                return {"credit": credit or entry.get("credit") or {"id": entry["creditId"]},
+                        "info": info, "outcome": "consumed (inferred)"}
+        else:
+            choices = reset_credits(info)
+            credit = next((c for c in choices if c["id"] == credit_id), None) if credit_id else next(iter(choices), None)
+            if credit is None:
+                raise RuntimeError(f"no available free limit reset for {account['name']}" +
+                                   (f" with ID {credit_id}" if credit_id else ""))
+        action = {"credit": credit, "info": info, "outcome": "preview"}
+        if confirmed and allow_consume:
+            action["response"] = consume_recorded_reset(account, credit, slug, cancelled, entries, record)
+            action.update(outcome="success", info=account_read(account, cancelled))
+        return action
 
 
 def normalize_limits(raw):
@@ -680,7 +738,11 @@ def try_reset_credit(st, infos, cfg, stopped):
             or stamp - time.time() <= cfg.get("reset_credit_min_hours", 12) * 3600
             or available(infos, cfg)):
         return None
-    choices = [(credit, info) for info in infos if info.get("logged_in") and not info.get("duplicate")
+    eligible = [i for i in infos if i.get("logged_in") and not i.get("duplicate")]
+    with reset_journal(stopped) as (entries, _):
+        pending = [(entry.get("credit") or {"id": entry["creditId"]}, info)
+                   for info in eligible for entry in pending_resets(entries, info)]
+    choices = pending or [(credit, info) for info in eligible
                for credit in reset_credits(info)]
     if not choices or stopped():
         return None
@@ -689,23 +751,24 @@ def try_reset_credit(st, infos, cfg, stopped):
     event = {"event": "reset_credit", "at": time.time(), "account": info["name"],
              "credit_id": credit["id"], "expires_at": credit.get("expiresAt")}
     try:
-        consume_reset_credit(info, credit, st["slug"], stopped)
+        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True)
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
         event.update(outcome="error", error=str(exc))
     else:
-        event["outcome"] = "success"
+        event.update(outcome=action["outcome"], credit_id=action["credit"]["id"],
+                     expires_at=action["credit"].get("expiresAt"))
     st["rotations"].append(event)
     save(st)
-    if event["outcome"] == "success" and not stopped():
-        return snapshots(cfg, stopped, prepare=True)
+    if event["outcome"] in ("success", "consumed (inferred)") and not stopped():
+        return task_snapshots(st, cfg, stopped)
     return None
 
 
-def refresh_login_state(st, infos):
-    """Login flags describe fresh probes; they never blacklist an account."""
+def refresh_login_state(st, infos, new_turn=False):
+    """Only a fresh probe at the beginning of a turn can clear a login flag."""
     names = list(st.get("needs_login", []))
     for info in infos:
-        if info.get("logged_in") is True and info["name"] in names:
+        if new_turn and info.get("logged_in") is True and info["name"] in names:
             names.remove(info["name"])
         elif info.get("logged_in") is False and info["name"] not in names:
             names.append(info["name"])
@@ -713,7 +776,29 @@ def refresh_login_state(st, infos):
     if names != st.get("needs_login", []):
         st["needs_login"] = names
         save(st)
-    return infos
+    return [i for i in infos if i["name"] not in st.get("auth_excluded", [])]
+
+
+def task_snapshots(st, cfg, stopped, new_turn=False):
+    infos = snapshots(cfg, stopped, prepare=True)
+    if cfg.get("use_reset_credits", False):
+        for info in infos:
+            if (stopped() or not info.get("logged_in") or info.get("duplicate")
+                    or info["name"] in st.get("auth_excluded", [])):
+                continue
+            action = reset_credit_action(info, slug=st["slug"], cancelled=stopped,
+                                         confirmed=True, pending_only=True, allow_consume=False)
+            if action is None:
+                continue
+            info.update(action["info"])
+            if action["outcome"] == "consumed (inferred)":
+                st["reset_reconciled"] = True
+                credit = action["credit"]
+                st["rotations"].append({"event": "reset_credit", "at": time.time(), "account": info["name"],
+                                        "credit_id": credit["id"], "expires_at": credit.get("expiresAt"),
+                                        "outcome": action["outcome"]})
+                save(st)
+    return refresh_login_state(st, infos, new_turn)
 
 
 def no_logged_in_accounts(st, infos):
@@ -763,7 +848,9 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             return None
         # At most one consume attempt before this sleep, even if the result is unknown
         # or the refreshed quota still says exhausted.
-        refreshed = None if unknown else try_reset_credit(st, infos, cfg, cancelled)
+        reconciled = st.pop("reset_reconciled", False)
+        refreshed = None if unknown or reconciled else try_reset_credit(st, infos, cfg, cancelled)
+        st.pop("reset_reconciled", None)
         if refreshed is not None:
             infos = refresh_login_state(st, refreshed)
         update_waited()
@@ -814,7 +901,7 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         st["outcome"] = "running"
         st["rotations"].append(dict(sleeping, at=time.time(), event="wake"))
         save(st)
-        infos = refresh_login_state(st, snapshots(cfg, cancelled, prepare=True))
+        infos = task_snapshots(st, cfg, cancelled)
         if probing:
             probe_retries += 1
         if not any(i.get("logged_in") is None for i in infos):
@@ -961,15 +1048,17 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     return ("completed" if code == 0 and not failed else "failed"), None
 
 
-def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
+def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/review phase, sharing quota, rotation and reset handling."""
     reviewing = st.get("kind") == "review"
     visited = set()
     rotations = 0
-    auth_failures = 0
+    if new_turn:
+        st.update(auth_excluded=[], auth_transitions=0, auth_failures={})
+        st.pop("reset_reconciled", None)
     account = account_named(cfg, st["account"])
     if cfg["enabled"]:
-        infos = refresh_login_state(st, snapshots(cfg, stopped, prepare=True))
+        infos = task_snapshots(st, cfg, stopped, new_turn=new_turn)
         current = next((i for i in infos if i["name"] == st["account"]), {})
         same_account = {i["name"] for i in infos if current.get("account_id")
                         and i.get("account_id") == current["account_id"]}
@@ -999,7 +1088,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
     save(st)
 
     def on_limit(local, reason, allow_credits):
-        infos = refresh_login_state(st, snapshots(cfg, stopped, prepare=True))
+        infos = task_snapshots(st, cfg, stopped)
         current = next((i for i in infos if i["name"] == account["name"]), {})
         if local and exhausted(local, cfg):
             # The RPC may lag the local rollout; keep its fresh credit balance.
@@ -1014,8 +1103,11 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
         return {"reason": reason, "infos": infos, "chosen": chosen}
 
     while not stopped():
+        st.pop("reset_reconciled", None)
         visited.add(account["name"])
         result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit)
+        if result != "auth":
+            st.setdefault("auth_failures", {})[account["name"]] = 0
         if stopped() or result == "stopped":
             st["outcome"] = "stopped"
             break
@@ -1023,20 +1115,34 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
             st["outcome"] = result
             break
         if result == "auth":
-            auth_failures += 1
-            infos = refresh_login_state(st, snapshots(cfg, stopped, prepare=True))
+            failures = st.setdefault("auth_failures", {})
+            failures[account["name"]] = failures.get(account["name"], 0) + 1
+            infos = task_snapshots(st, cfg, stopped)
             if stopped():
                 break
             current = next((i for i in infos if i["name"] == account["name"]), {})
-            if auth_failures == 1 and current.get("logged_in") and not exhausted(current, cfg):
+            capped = st["auth_transitions"] >= 2 * len(cfg["accounts"])
+            if not capped and failures[account["name"]] == 1 and current.get("logged_in") and not exhausted(current, cfg):
                 if not reviewing and st.get("thread"):
                     prompt = auth_resume_prompt(cfg)
                 save(st)
                 continue
+            if failures[account["name"]] >= 2:
+                st["auth_excluded"].append(account["name"])
+                names = st.setdefault("needs_login", [])
+                if account["name"] not in names:
+                    names.append(account["name"])
+                    st["rotations"].append({"event": "needs_login", "at": time.time(), "account": account["name"]})
+                infos = refresh_login_state(st, infos)
+                save(st)
+            if not infos or capped:
+                names = st.get("needs_login", []) or [a["name"] for a in cfg["accounts"]]
+                st.update(outcome="failed", error="all accounts fail with auth errors; " +
+                          "; ".join("run login " + name for name in names))
+                save(st)
+                break
             decision = {"reason": "authentication error", "infos": infos,
                         "chosen": available(infos, cfg, {account["name"]})}
-        else:
-            auth_failures = 0
         chosen = decision["chosen"]
         if not chosen:
             chosen = wait_for_account(st, decision["infos"], cfg, decision["reason"], stopped, sleep)
@@ -1054,8 +1160,9 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
             prompt = handoff(st, current_message=current_message, cfg=cfg)
         st["rotations"].append({"at": time.time(), "from": account["name"], "to": chosen["name"],
                                 "reason": decision["reason"], "thread": ""})
+        if result == "auth":
+            st["auth_transitions"] += 1
         account = account_named(cfg, chosen["name"])
-        auth_failures = 0
         if reviewing:
             st["review_account"] = account["name"]
         else:
@@ -1089,7 +1196,7 @@ def cmd__run(a):
         if st.get("outcome") == "completed" and pending.get("review_after") and not stopped():
             st.update(kind="review", work_completed=True, outcome="running", reset_wait_seconds=0)
             save(st)
-            run_turn(st, cfg, review_prompt(st, cfg), effort, False, stopped, stopped_flag.wait)
+            run_turn(st, cfg, review_prompt(st, cfg), effort, False, stopped, stopped_flag.wait, new_turn=False)
     except (Exception, SystemExit) as exc:
         st.update(outcome="failed", error=str(exc))
         print(f"supervisor failed: {exc}", file=sys.stderr)
@@ -1196,7 +1303,7 @@ def cmd_wait(a):
         elif r.get("event") == "wake":
             print(f"== woke at {local_time(r['at'])} to recheck account limits")
         elif r.get("event") == "reset_credit":
-            if r.get("outcome") == "success":
+            if r.get("outcome") in ("success", "consumed (inferred)"):
                 print(f"== used a free limit reset on {r['account']} ({r['credit_id']}), "
                       f"expires {local_time(r.get('expires_at'))}")
         elif r.get("event") == "needs_login":
@@ -1374,26 +1481,22 @@ def print_accounts(infos, cfg):
 def cmd_reset_credit(a):
     cfg = accounts_config()
     account = account_named(cfg, a.account)
-    info = account_read(account)
-    if info.get("logged_in") is None:
-        die(f"account {a.account} status unknown (rpc error: {info.get('error', 'unavailable')})")
-    if not info.get("logged_in"):
-        die(f"account {a.account} is not logged in: run login {a.account}")
-    choices = reset_credits(info)
-    credit = next((c for c in choices if c["id"] == a.credit), None) if a.credit else next(iter(choices), None)
-    if credit is None:
-        die(f"no available free limit reset for {a.account}" + (f" with ID {a.credit}" if a.credit else ""))
+    try:
+        action = reset_credit_action(account, a.credit, confirmed=a.yes)
+    except (OSError, ValueError, KeyError, RuntimeError) as exc:
+        die(f"free limit reset failed: {exc}")
+    credit = action["credit"]
     print(f"Free limit reset on {a.account}: {credit['id']} ({credit.get('title') or 'Full reset'}), "
           f"expires {local_time(credit.get('expiresAt'))}")
+    if action["outcome"] == "consumed (inferred)":
+        print("consumed (inferred)")
+        print_accounts([action["info"]], cfg)
+        return
     if not a.yes:
         print("Preview only; pass --yes to consume this reset.")
         return
-    try:
-        response = consume_reset_credit(account, credit)
-    except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        die(f"free limit reset failed: {exc}")
-    print(json.dumps(response, ensure_ascii=False, indent=2))
-    print_accounts([account_read(account)], cfg)
+    print(json.dumps(action["response"], ensure_ascii=False, indent=2))
+    print_accounts([action["info"]], cfg)
 
 
 def cmd_login(a):
