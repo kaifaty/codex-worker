@@ -64,15 +64,15 @@ The skill handles these commands for Claude. To run them yourself, set `T` to th
 
 ```sh
 T="$HOME/.claude/skills/codex-worker/scripts/codex_task.py"
-python3 -I "$T" start csv-export --brief brief.md --review
+python3 -I "$T" start csv-export --brief brief.md --review --check "python3 -m unittest tests.test_csv_export"
 python3 -I "$T" wait csv-export
 python3 -I "$T" status csv-export
 ```
 
 Use a brief with the change, context, measurable completion conditions, focused checks, and boundaries.
-The worker creates `codex/csv-export` and an isolated worktree, implements the task, and runs the first
-review in a fresh thread. In Claude Code, `wait` runs as a background Bash command so Claude can resume
-when the turn ends.
+The worker creates `codex/csv-export` and an isolated worktree, implements the task, runs the check,
+and starts the first review in a fresh thread if the check passes. In Claude Code, `wait` runs as a
+background Bash command so Claude can resume when the turn ends.
 
 Check the report and the actual diff. If there are issues, send one follow-up and wait again:
 
@@ -94,9 +94,9 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review]` | Create a worktree and start implementation; `--brief -` reads stdin. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review] [--check CMD]` | Create a worktree and start implementation; `--brief -` reads stdin. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review` for a fresh review afterward. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review`, replace the check with `--check CMD`, or remove it with `--no-check`. |
 | `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, and last message. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
@@ -109,6 +109,18 @@ Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
 `~/.codex/claude-tasks/<slug>/`. Turns continue independently of Claude's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
+
+## Checks after each turn
+
+Pass the brief's Checks command as `start --check "CMD"`. The supervisor runs `/bin/sh -c CMD` in the
+task worktree after every completed implementation turn, including follow-ups. `say --check "CMD"`
+replaces the saved command; `say --no-check` removes it. `--check-timeout SEC` defaults to 1800 seconds.
+Failed, stopped, and paused turns do not run checks.
+
+Output goes to the task's `check.log`. `wait` prints the exit code and duration; on failure or timeout,
+it also prints the last 40 output lines. A failed check skips a requested automatic review. The
+supervisor's result is objective evidence for that command; Claude must still read the actual diff
+and verify the completion conditions.
 
 ## Settings and language
 
@@ -133,6 +145,8 @@ A minimal configuration is:
 | `switch_at` | `99` | Used-percentage threshold for configured accounts, greater than 0 and at most 100. |
 | `credits` | `false` | Allow continuing on credits if no configured account has ordinary usage available. |
 | `wait_for_reset` | `true` | When configured accounts are exhausted, wait for reset and continue; `false` stops instead. |
+| `notify` | Absent | `"macos"` for desktop notifications, or an argv list that receives the event JSON as its final argument. |
+| `notify_events` | All events | Optional list of event types to send. |
 
 A settings file containing only language or other preferences does **not** enable automatic account
 monitoring or rotation. The `accounts` command remains available to inspect the current login.
@@ -144,6 +158,32 @@ Account status labels are always English.
 
 `CODEX_TASK_HOME` can select another main Codex home. Settings, the rules override, task state, and
 worktrees then resolve under that home.
+
+## Task notifications
+
+Notifications work even when Claude's session has ended. For macOS, add to `codex-worker.json`:
+
+```json
+{
+  "notify": "macos"
+}
+```
+
+An argv hook receives one final JSON argument with `event`, `slug`, `repo`, `branch`, `account`, `at`,
+and a short `message`. Event types are `turn_finished` (`outcome`), `paused` (`until`), `woke`,
+`rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`.
+Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
+with `curl`; the appended argument supplies the value for `--data-binary`:
+
+```json
+{
+  "notify": ["curl", "--fail", "--silent", "--show-error", "https://ntfy.sh/YOUR_PRIVATE_TOPIC", "--data-binary"],
+  "notify_events": ["turn_finished", "paused", "check_failed"]
+}
+```
+
+Hooks run asynchronously in a separate process group with no stdin. Their output and launch errors
+go to the task's `notify.log`; a notification failure does not fail the task.
 
 ## Multiple subscriptions
 
@@ -191,8 +231,8 @@ Authentication errors get one retry, then rotation; `needs login` means run `log
 
 ## Optional desktop-app notifications
 
-Tasks started by the worker do not need a notify hook. For threads created in the Codex desktop app,
-the bundled `wait-turn.py` can wait for completion events written by `turn-log.py`.
+For threads created in the Codex desktop app, the bundled `wait-turn.py` can wait for completion
+events written by `turn-log.py`. This optional hook is separate from the task notifications above.
 
 To enable that optional hook, set `notify` in your `~/.codex/config.toml` to the installed script's
 absolute path. For a manual skill installation, replace `<home>` below with your home directory;
