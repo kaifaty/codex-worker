@@ -1,0 +1,14 @@
+{
+  "name": "kaifaty",
+  "description": "Claude Code plugins for delegating implementation to Codex while Claude plans and reviews.",
+  "owner": {
+    "name": "kaifaty"
+  },
+  "plugins": [
+    {
+      "name": "codex-worker",
+      "source": "./plugins/codex-worker",
+      "description": "Let Claude plan and review while Codex implements in an isolated git worktree."
+    }
+  ]
+}
