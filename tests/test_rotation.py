@@ -260,6 +260,8 @@ def execute():
         subprocess.run(["git", "commit", "-qm", "checkpoint from account A"], check=True)
         Path("tracked.txt").write_text("unfinished changes from account A\n")
         Path("pending.txt").write_text("unfinished untracked file\n")
+    for name in run.get("create_files", []):
+        Path(name).write_text("created by fake Codex\n")
     if run["mode"] in ("limit", "usage_error"):
         time.sleep(run.get("limit_after", 0.15))
         value = fixture()
@@ -319,6 +321,7 @@ class RotationTests(unittest.TestCase):
         self.other = self.root / "second-home"
         self.other.mkdir()
         self.trace_path = self.root / "fake-trace.jsonl"
+        self.extra_pids = set()
         self.fake = self.root / "codex"
         self.fake.write_text("#!" + PYTHON + "\n" + FAKE_CODEX)
         self.fake.chmod(0o700)
@@ -351,13 +354,13 @@ class RotationTests(unittest.TestCase):
     def tearDown(self):
         # Supervisors publish final state after SIGTERM. Wait for every owned
         # writer and its tools before removing their directories.
-        owned, groups = set(), set()
+        owned, groups = set(self.extra_pids), set()
 
         def processes():
             for path in (self.home / "claude-tasks").glob("*/state.json"):
                 try:
                     state = json.loads(path.read_text())
-                    owned.update(int(state[key]) for key in ("pid", "codex_pid") if state.get(key))
+                    owned.update(int(state[key]) for key in ("pid", "codex_pid", "check_pid") if state.get(key))
                 except (OSError, ValueError):
                     pass
             for event in self.trace():
@@ -520,6 +523,54 @@ class RotationTests(unittest.TestCase):
     def review_invocations(self):
         return [event for event in self.invocations() if event.get("review")]
 
+    def configure_notify(self, events=None, command=None):
+        path = self.home / "codex-worker.json"
+        legacy = self.home / "claude-accounts.json"
+        source = path if path.exists() else legacy
+        config = json.loads(source.read_text()) if source.exists() else {}
+        self.notify_path = self.root / "notifications.jsonl"
+        if command is None:
+            receiver = self.root / "receive-notification.py"
+            receiver.write_text(
+                "import json, sys\n"
+                "from pathlib import Path\n"
+                "event = json.loads(sys.argv[-1])\n"
+                "with Path(sys.argv[1]).open('a') as stream:\n"
+                "    stream.write(json.dumps(event) + '\\n')\n")
+            command = [PYTHON, str(receiver), str(self.notify_path)]
+        config["notify"] = command
+        if events is not None:
+            config["notify_events"] = events
+        path.write_text(json.dumps(config))
+
+    def notifications(self, slug=None):
+        result = []
+        if self.notify_path.exists():
+            for line in self.notify_path.read_text().splitlines():
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue  # The asynchronous writer may still be appending.
+                if slug is None or event.get("slug") == slug:
+                    result.append(event)
+        return result
+
+    def notification(self, slug, name):
+        self.until(lambda: any(event.get("event") == name for event in self.notifications(slug)))
+        return next(event for event in self.notifications(slug) if event.get("event") == name)
+
+    def process_is_live(self, pid):
+        result = subprocess.run(["ps", "-p", str(pid), "-o", "stat="],
+                                text=True, capture_output=True)
+        return bool(result.stdout.strip()) and not result.stdout.strip().startswith("Z")
+
+    def check_child(self, slug):
+        path = Path(self.state(slug)["worktree"]) / "check-child.pid"
+        self.until(lambda: path.exists() and path.read_text().strip().isdigit())
+        pid = int(path.read_text())
+        self.extra_pids.add(pid)
+        return pid
+
     def until(self, predicate, timeout=5):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -658,6 +709,7 @@ class RotationTests(unittest.TestCase):
 
     def test_settings_without_accounts_skip_monitoring_and_use_english(self):
         (self.home / "codex-worker.json").write_text('{"credits":true,"wait_for_reset":true}')
+        self.configure_notify()
         self.account(self.home, "A", self.reset, used=99)
         self.brief.write_text("Implement a portable task.\nDone when the brief is preserved.\n")
         self.start("single-account", "--review")
@@ -669,6 +721,7 @@ class RotationTests(unittest.TestCase):
             self.assertNotRegex(invocation["prompt"], "[А-Яа-яЁё]")
         self.assertIn((SKILL / "references" / "rules.md").read_text().splitlines()[0],
                       self.invocations()[0]["prompt"])
+        self.notification("single-account", "turn_finished")
 
     def test_login_migrates_legacy_settings_to_new_file(self):
         self.configure()
@@ -796,6 +849,234 @@ class RotationTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertIn(f"{label} {expected - 5}→{expected}", result.stdout)
 
+    def test_check_options_reject_invalid_timeouts_and_conflicting_say_flags(self):
+        for timeout in ("0", "-1", "nan", "inf"):
+            with self.subTest(timeout=timeout):
+                result = subprocess.run(
+                    [PYTHON, "-I", str(SCRIPT), "start", "invalid-check", "--brief", str(self.brief),
+                     "--repo", str(self.repo), "--check", "true", "--check-timeout", timeout],
+                    cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=5)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("positive finite", result.stderr)
+        result = subprocess.run(
+            [PYTHON, "-I", str(SCRIPT), "say", "invalid-check", "Continue", "--check", "true", "--no-check"],
+            cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("not allowed with argument", result.stderr)
+        self.assertFalse(self.invocations(), "invalid options must not launch Codex")
+
+    def test_check_passes_after_completed_work_before_automatic_review(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "create_files": ["done.txt"]},
+            {"mode": "complete", "reply": "Review after objective check"}])
+        command = "test -f done.txt"
+        self.start("check-passed", "--review", "--check", command)
+        output = self.wait("check-passed")
+        state = self.state("check-passed")
+        self.assertEqual(state["check"], command)
+        self.assertEqual(state["check_timeout"], 1800)
+        self.assertEqual(len(state["checks"]), 1, "review must not rerun the working check")
+        check = state["checks"][0]
+        self.assertEqual((check["cmd"], check["exit"], check["outcome"]), (command, 0, "passed"))
+        self.assertGreaterEqual(check["seconds"], 0)
+        self.assertIsInstance(check["at"], (int, float))
+        self.assertRegex(output, r"== check `test -f done\.txt`: passed \(exit 0, \d+(?:\.\d+)? s\)")
+        self.assertTrue((self.home / "claude-tasks" / "check-passed" / "check.log").is_file())
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertLess(output.index("== check `"), output.index("== review by "))
+
+    def test_check_failure_prints_last_forty_lines_and_skips_review(self):
+        self.configure()
+        command = ("i=1; while [ \"$i\" -le 45 ]; do printf 'check-line-%02d\\n' \"$i\"; "
+                   "i=$((i + 1)); done; printf 'failure-stderr\\n' >&2; test -f done.txt")
+        self.start("check-failed", "--review", "--check", command)
+        output = self.wait("check-failed")
+        check = self.state("check-failed")["checks"][-1]
+        self.assertEqual((check["cmd"], check["exit"], check["outcome"]), (command, 1, "failed"))
+        self.assertIn("== check `" + command + "`: FAILED (exit 1, ", output)
+        self.assertIn("check-line-07", output)
+        self.assertIn("check-line-45", output)
+        self.assertIn("failure-stderr", output)
+        self.assertNotIn("check-line-06", output)
+        self.assertIn("== review skipped: check failed", output)
+        self.assertFalse(self.review_invocations())
+        self.assertNotIn("== review by", output)
+
+    def test_check_timeout_kills_the_shell_process_group_and_child(self):
+        self.configure()
+        command = 'sleep 60 & child=$!; echo "$child" > check-child.pid; wait "$child"'
+        self.start("check-timeout", "--review", "--check", command, "--check-timeout", "0.5")
+        child = self.check_child("check-timeout")
+        output = self.wait("check-timeout")
+        state = self.state("check-timeout")
+        self.assertEqual(state["checks"][-1]["outcome"], "timeout")
+        self.assertGreaterEqual(state["checks"][-1]["seconds"], 0.5)
+        self.until(lambda: not self.process_is_live(child))
+        self.assertFalse(state.get("check_pid"))
+        self.assertIn("FAILED", output)
+        self.assertIn("timeout", output)
+        self.assertIn("== review skipped:", output)
+        self.assertFalse(self.review_invocations())
+
+    def test_say_inherits_replaces_and_disables_check_and_timeout(self):
+        self.configure()
+        first = "printf 'first\\n' >> check-runs"
+        second = "printf 'second\\n' >> check-runs"
+        self.start("check-say", "--check", first, "--check-timeout", "7")
+        self.wait("check-say")
+        self.cli("say", "check-say", "Run another working turn")
+        inherited = self.wait("check-say")
+        self.assertIn("== check `" + first + "`: passed", inherited)
+        self.assertEqual(len(self.state("check-say")["checks"]), 2)
+        self.assertEqual(self.state("check-say")["check_timeout"], 7)
+        self.cli("say", "check-say", "Use the replacement check", "--check", second,
+                 "--check-timeout", "9")
+        self.wait("check-say")
+        self.assertEqual(self.state("check-say")["check"], second)
+        self.assertEqual(self.state("check-say")["check_timeout"], 9)
+        self.cli("say", "check-say", "Continue without checking", "--no-check")
+        disabled = self.wait("check-say")
+        self.assertFalse(self.state("check-say").get("check"))
+        self.assertNotIn("== check `", disabled)
+        self.cli("say", "check-say", "The disabled check stays disabled")
+        self.assertNotIn("== check `", self.wait("check-say"))
+        state = self.state("check-say")
+        self.assertEqual(len(state["checks"]), 3)
+        self.assertEqual((Path(state["worktree"]) / "check-runs").read_text().splitlines(),
+                         ["first", "first", "second"])
+
+    def test_stop_during_check_kills_its_group_and_records_stopped(self):
+        self.configure()
+        command = 'sleep 60 & child=$!; echo "$child" > check-child.pid; wait "$child"'
+        self.start("check-stopped", "--review", "--check", command)
+        child = self.check_child("check-stopped")
+        self.until(lambda: bool(self.state("check-stopped").get("check_pid")))
+        self.cli("stop", "check-stopped", timeout=20)
+        self.wait("check-stopped")
+        state = self.state("check-stopped")
+        self.assertEqual(state["outcome"], "stopped")
+        self.assertEqual(state["checks"][-1]["outcome"], "stopped")
+        self.until(lambda: not self.process_is_live(child))
+        self.assertFalse(state.get("check_pid"))
+        self.assertFalse(self.review_invocations())
+
+    def test_explicit_review_does_not_run_a_persisted_check(self):
+        self.configure()
+        self.start("check-explicit-review", "--check", "printf 'checked\\n' >> check-runs")
+        self.wait("check-explicit-review")
+        self.cli("review", "check-explicit-review")
+        output = self.wait("check-explicit-review")
+        state = self.state("check-explicit-review")
+        self.assertEqual(len(state["checks"]), 1)
+        self.assertEqual((Path(state["worktree"]) / "check-runs").read_text(), "checked\n")
+        self.assertNotIn("== check `", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+
+    def test_notify_reports_completed_turn_and_failed_check_with_task_fields(self):
+        self.configure()
+        self.configure_notify()
+        self.start("notify-check", "--check", "test -f done.txt")
+        self.wait("notify-check")
+        finished = self.notification("notify-check", "turn_finished")
+        failed = self.notification("notify-check", "check_failed")
+        self.assertEqual(finished["outcome"], "completed")
+        state = self.state("notify-check")
+        for event in (finished, failed):
+            self.assertEqual(event["repo"], str(self.repo))
+            self.assertEqual(event["branch"], state["branch"])
+            self.assertEqual(event["account"], "main")
+            self.assertIsInstance(event["at"], (int, float))
+            self.assertTrue(event["message"].startswith("notify-check: "))
+            self.assertNotIn("\n", event["message"])
+        self.assertIn("check", finished["message"].lower())
+
+    def test_notify_reports_rotation_pause_wake_and_review(self):
+        self.configure()
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error"}])
+        self.start("notify-rotation")
+        self.wait("notify-rotation")
+        rotated = self.notification("notify-rotation", "rotated")
+        self.assertEqual((rotated["from"], rotated["to"]), ("main", "second"))
+
+        reset = int(time.time()) + 3
+        self.account(self.home, "A", reset, used=99, auto_reset=True)
+        self.account(self.other, "B", reset + 3600, used=99)
+        self.start("notify-sleep", "--review")
+        self.wait("notify-sleep")
+        paused = self.notification("notify-sleep", "paused")
+        self.assertAlmostEqual(paused["until"], reset + 0.1, places=3)
+        self.wait("notify-sleep", timeout=10, through_sleep=True)
+        self.notification("notify-sleep", "woke")
+        self.notification("notify-sleep", "review_done")
+        self.notification("notify-sleep", "turn_finished")
+
+    def test_notify_events_filters_unrequested_event_types(self):
+        self.configure()
+        self.configure_notify(events=["turn_finished"])
+        self.start("notify-filter", "--check", "test -f done.txt")
+        self.wait("notify-filter")
+        self.notification("notify-filter", "turn_finished")
+        self.assertEqual([event["event"] for event in self.notifications("notify-filter")],
+                         ["turn_finished"])
+
+    def test_missing_notify_executable_is_logged_without_failing_work(self):
+        self.configure()
+        missing = str(self.root / "missing-notification-executable")
+        self.configure_notify(command=[missing])
+        self.start("notify-missing")
+        self.wait("notify-missing")
+        self.assertEqual(self.state("notify-missing")["outcome"], "completed")
+        log = self.home / "claude-tasks" / "notify-missing" / "notify.log"
+        self.assertTrue(log.is_file())
+        self.assertIn(missing, log.read_text())
+
+    def test_slow_notify_does_not_block_supervisor_completion(self):
+        self.configure()
+        received = self.root / "slow-notification.json"
+        code = ("import json, os, sys, time; from pathlib import Path; "
+                "event = json.loads(sys.argv[-1]); event['receiver_pid'] = os.getpid(); "
+                "Path(sys.argv[1]).write_text(json.dumps(event)); time.sleep(60)")
+        self.configure_notify(command=[PYTHON, "-c", code, str(received)])
+        self.start("notify-slow")
+        self.wait("notify-slow", timeout=10)
+        self.until(lambda: received.exists() and received.read_text().endswith("}"))
+        event = json.loads(received.read_text())
+        child = event["receiver_pid"]
+        self.extra_pids.add(child)
+        self.assertEqual(event["event"], "turn_finished")
+        self.assertTrue(self.process_is_live(child), "the supervisor must finish before the slow hook")
+
+    def test_notify_reaps_finished_children_without_waiting_for_live_ones(self):
+        worker = self.worker()
+        finished, running = mock.Mock(), mock.Mock()
+        finished.poll.return_value = 0
+        running.poll.return_value = None
+        worker.NOTIFY_PROCESSES[:] = [finished, running]
+        worker.reap_notifications()
+        self.assertEqual(worker.NOTIFY_PROCESSES, [running])
+        finished.poll.assert_called_once_with()
+        running.poll.assert_called_once_with()
+        finished.wait.assert_not_called()
+        running.wait.assert_not_called()
+
+    def test_macos_notify_escapes_quotes_backslashes_and_line_breaks(self):
+        worker = self.worker()
+        state = {"slug": "notify-macos", "repo": str(self.repo),
+                 "branch": "codex/notify-macos", "account": "main", "worktree": str(self.repo)}
+        (self.home / "claude-tasks" / state["slug"]).mkdir(parents=True)
+        with mock.patch.object(worker.subprocess, "Popen") as popen:
+            worker.notify(state, {"notify": "macos"}, "turn_finished",
+                          'completed "quoted" C:\\tmp\nwith newline')
+        popen.assert_called_once()
+        self.assertEqual(popen.call_args.args[0], [
+            "osascript", "-e",
+            'display notification "notify-macos: completed \\"quoted\\" C:\\\\tmp with newline" '
+            'with title "codex-worker"'])
+        self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
+        self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
     def test_review_selects_available_account_and_preserves_working_thread(self):
         self.configure()
         self.start("review-alone")
@@ -897,36 +1178,42 @@ class RotationTests(unittest.TestCase):
     def test_failed_working_turn_does_not_start_automatic_review(self):
         self.configure()
         self.account(self.home, "A", self.reset, runs=[{"mode": "failed"}])
-        self.start("review-failed", "--review")
+        self.start("review-failed", "--review", "--check", "touch unexpected-check")
         output = self.cli("wait", "review-failed", "--timeout", "10")
         self.assertEqual(self.state("review-failed")["outcome"], "failed")
         self.assertIn("fixture task failed", output)
         self.assertEqual(len(self.invocations()), 1)
         self.assertFalse(self.review_invocations())
         self.assertFalse(self.state("review-failed").get("reviews"))
+        self.assertFalse(self.state("review-failed").get("checks"))
+        self.assertFalse((Path(self.state("review-failed")["worktree"]) / "unexpected-check").exists())
         self.assertNotIn("== review by", output)
 
     def test_stopped_working_turn_does_not_start_automatic_review(self):
         self.configure()
         self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}])
-        self.start("review-stopped", "--review")
+        self.start("review-stopped", "--review", "--check", "touch unexpected-check")
         self.until(lambda: bool(self.invocations()))
         self.cli("stop", "review-stopped", timeout=20)
         self.wait("review-stopped")
         self.assertEqual(self.state("review-stopped")["outcome"], "stopped")
         self.assertEqual(len(self.invocations()), 1)
         self.assertFalse(self.review_invocations())
+        self.assertFalse(self.state("review-stopped").get("checks"))
+        self.assertFalse((Path(self.state("review-stopped")["worktree"]) / "unexpected-check").exists())
 
     def test_paused_working_turn_does_not_start_automatic_review(self):
         self.configure(wait_for_reset=False)
         self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error"}])
         self.account(self.other, "B", self.reset + 3600, used=99)
-        self.start("review-paused", "--review")
+        self.start("review-paused", "--review", "--check", "touch unexpected-check")
         output = self.wait("review-paused")
         self.assertEqual(self.state("review-paused")["outcome"], "exhausted")
         self.assertEqual(len(self.invocations()), 1)
         self.assertFalse(self.review_invocations())
         self.assertNotIn("== review by", output)
+        self.assertFalse(self.state("review-paused").get("checks"))
+        self.assertFalse((Path(self.state("review-paused")["worktree"]) / "unexpected-check").exists())
 
     def test_review_requires_idle_task(self):
         self.configure()
@@ -1552,6 +1839,7 @@ class RotationTests(unittest.TestCase):
 
     def test_free_reset_uses_earliest_expiry_across_accounts_and_hands_off_without_sleep(self):
         self.configure(use_reset_credits=True)
+        self.configure_notify()
         reset = int(time.time()) + 30 * 3600
         self.account(self.home, "A", reset, runs=[{
             "mode": "usage_error", "messages": ["Незавершённая работа перед бесплатным сбросом"]}])
@@ -1585,6 +1873,7 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(any(entry.get("event") == "sleep" for entry in state["rotations"]))
         self.assertIn("== used a free limit reset on second (" + credit["id"] + "), expires ", output)
         self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(self.notification("free-reset-switch", "reset_credit_used")["account"], "second")
 
     def test_free_reset_on_current_account_resumes_its_existing_thread(self):
         self.configure(use_reset_credits=True)
@@ -2033,6 +2322,7 @@ with open(sys.argv[1], "a+") as journal:
 
     def test_auth_logout_switches_account_and_wait_explains_login(self):
         self.configure()
+        self.configure_notify()
         self.account(self.home, "A", self.reset, runs=[{
             "mode": "auth_error", "account_after": None, "messages": ["Работа до ошибки входа"],
             "event": "error", "error": "OAuth refresh token was rejected"}])
@@ -2043,6 +2333,7 @@ with open(sys.argv[1], "a+") as journal:
         self.assertIn("== account main needs login: run login main", output)
         self.assertIn("main", self.state("auth-logout")["needs_login"])
         self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(self.notification("auth-logout", "needs_login")["account"], "main")
 
     def test_say_reuses_a_logged_in_account_after_needs_login_is_cleared(self):
         self.configure()

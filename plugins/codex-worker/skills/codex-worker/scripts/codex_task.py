@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review]
-  codex_task.py say <slug> "message" | --file FILE [--review]  follow-up (task must be idle)
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review] [--check CMD] [--check-timeout SEC]
+  codex_task.py say <slug> "message" | --file FILE [--review] [--check CMD | --no-check] [--check-timeout SEC]
   codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
@@ -14,7 +14,7 @@
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
 
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
-credits (false) and wait_for_reset (true). Legacy claude-accounts.json is a fallback.
+credits (false), wait_for_reset (true), notify and notify_events. Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without quota monitoring or rotation.
 State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
 CODEX_TASK_HOME and CODEX_TASK_CODEX override the main home and CLI binary (also for tests).
@@ -35,6 +35,7 @@ import sys
 import threading
 import time
 import uuid
+from collections import deque
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -53,6 +54,7 @@ SLEEP_STEP = float(os.environ.get("CODEX_TASK_SLEEP_STEP", "60"))
 RESET_MARGIN = float(os.environ.get("CODEX_TASK_RESET_MARGIN", "120"))
 RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
+NOTIFY_PROCESSES = []
 
 
 def die(msg):
@@ -100,6 +102,14 @@ def accounts_config():
     cfg.setdefault("reset_credit_min_hours", 12)
     if cfg["language"] not in ("en", "ru"):
         die('language must be "en" or "ru"')
+    notification = cfg.get("notify")
+    if notification is not None and notification != "macos" and not (
+            isinstance(notification, list) and notification and
+            all(isinstance(arg, str) for arg in notification) and notification[0]):
+        die('notify must be "macos" or a nonempty argv list')
+    if "notify_events" in cfg and not (isinstance(cfg["notify_events"], list) and
+                                       all(isinstance(event, str) for event in cfg["notify_events"])):
+        die("notify_events must be a list of event types")
     if not isinstance(cfg["switch_at"], (int, float)) or not 0 < cfg["switch_at"] <= 100:
         die("switch_at must be in (0, 100]")
     if not isinstance(cfg["credits"], bool):
@@ -130,6 +140,39 @@ def accounts_config():
         names.add(name)
         homes.add(str(home))
     return cfg
+
+
+def reap_notifications():
+    """Poll only our notification children; never wait for a slow hook."""
+    NOTIFY_PROCESSES[:] = [proc for proc in NOTIFY_PROCESSES if proc.poll() is None]
+
+
+def notify(st, cfg, event, message, **fields):
+    reap_notifications()
+    cfg = accounts_config() if cfg is None else cfg
+    setting = cfg.get("notify")
+    if setting is None or ("notify_events" in cfg and event not in cfg["notify_events"]):
+        return
+    message = st["slug"] + ": " + " ".join(message.splitlines())
+    payload = dict(event=event, slug=st["slug"], repo=st["repo"], branch=st["branch"],
+                   account=st["account"], at=time.time(), message=message)
+    payload.update(fields)
+    if setting == "macos":
+        escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+        args = ["osascript", "-e", f'display notification "{escaped}" with title "codex-worker"']
+    else:
+        args = list(setting) + [json.dumps(payload, ensure_ascii=False)]
+    try:
+        with (TASKS / st["slug"] / "notify.log").open("ab", buffering=0) as log:
+            try:
+                proc = subprocess.Popen(args, cwd=st["worktree"], stdin=subprocess.DEVNULL,
+                                        stdout=log, stderr=log, start_new_session=True)
+            except (OSError, ValueError) as exc:
+                log.write(f"{event}: notification launch failed: {exc}\n".encode("utf-8", errors="replace"))
+            else:
+                NOTIFY_PROCESSES.append(proc)
+    except OSError as exc:
+        print(f"notification log failed: {exc}", file=sys.stderr)
 
 
 def rules_path(cfg=None):
@@ -506,6 +549,7 @@ def load(slug):
                               if st.get("thread") else []))
     st.setdefault("rotations", [])
     st.setdefault("reviews", [])
+    st.setdefault("checks", [])
     return st
 
 
@@ -552,11 +596,13 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.update(pending={"prompt": prompt, "effort": effort, "current_message": current_message,
                        "review_after": review_after}, kind=kind, work_completed=False,
               review_start=len(st.get("reviews", [])), turn_started=time.time(),
+              check_start=len(st.get("checks", [])),
               turns=st.get("turns", 0) + 1, rotation_start=len(st["rotations"]),
               event_start=len(events(st)), exhausted=None, outcome="running", reset_wait_seconds=0)
     st.pop("sleeping", None)
     st.pop("turn_finished", None)
     st.pop("error", None)
+    st.pop("review_skipped", None)
     with (d / "stderr.log").open("a") as errors:
         proc = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "_run", st["slug"]],
                                 cwd=st["worktree"], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors,
@@ -731,6 +777,7 @@ def record_exhausted(st, infos, cfg, reason):
     st["exhausted"] = {"at": time.time(), "reset": stamp, "account": name, "reason": reason}
     st["outcome"] = "exhausted"
     save(st)
+    notify(st, cfg, "paused", f"paused: {reason}", until=stamp)
 
 
 def try_reset_credit(st, infos, cfg, stopped):
@@ -764,6 +811,8 @@ def try_reset_credit(st, infos, cfg, stopped):
     st["rotations"].append(event)
     save(st)
     if event["outcome"] in ("success", "consumed (inferred)") and not stopped():
+        notify(st, cfg, "reset_credit_used", f"used a free limit reset on {info['name']}",
+               account=info["name"])
         return task_snapshots(st, cfg, stopped)
     return None
 
@@ -780,6 +829,7 @@ def refresh_login_state(st, infos, new_turn=False):
         elif info.get("logged_in") is False and info["name"] not in names:
             names.append(info["name"])
             st["rotations"].append({"event": "needs_login", "at": time.time(), "account": info["name"]})
+            notify(st, None, "needs_login", f"{info['name']} needs login", account=info["name"])
     if names != st.get("needs_login", []):
         st["needs_login"] = names
         save(st)
@@ -799,6 +849,7 @@ def exclude_auth_account(st, account, info):
     if name not in names:
         names.append(name)
         st["rotations"].append({"event": "needs_login", "at": time.time(), "account": name})
+        notify(st, None, "needs_login", f"{name} needs login", account=name)
     save(st)
 
 
@@ -822,6 +873,8 @@ def task_snapshots(st, cfg, stopped, new_turn=False):
                                         "credit_id": credit["id"], "expires_at": credit.get("expiresAt"),
                                         "outcome": action["outcome"]})
                 save(st)
+                notify(st, cfg, "reset_credit_used", f"used a free limit reset on {info['name']}",
+                       account=info["name"])
     return refresh_login_state(st, infos, new_turn)
 
 
@@ -908,6 +961,7 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         st.update(outcome="sleeping", sleeping=sleeping, exhausted=None)
         st["rotations"].append(dict(sleeping, at=started, event="sleep"))
         save(st)
+        notify(st, cfg, "paused", f"paused until {local_time(until)}: {sleeping['reason']}", until=until)
         try:
             while not stopped():
                 left = until - time.time()
@@ -925,6 +979,7 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         st["outcome"] = "running"
         st["rotations"].append(dict(sleeping, at=time.time(), event="wake"))
         save(st)
+        notify(st, cfg, "woke", "woke to recheck account limits")
         infos = task_snapshots(st, cfg, cancelled)
         if probing:
             probe_retries += 1
@@ -1077,6 +1132,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
     reviewing = st.get("kind") == "review"
     visited = set()
     rotations = 0
+    rotation = None
     if new_turn:
         st.update(auth_excluded=[], auth_excluded_ids=[], auth_transitions=0, auth_failures={})
         st.pop("reset_reconciled", None)
@@ -1101,6 +1157,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
             prompt = handoff(st, current_message=current_message, cfg=cfg)
             st["rotations"].append({"at": time.time(), "from": st["account"], "to": chosen["name"],
                                     "reason": limit_reason(current, cfg), "thread": ""})
+            rotation = st["rotations"][-1]
             rotations += 1
             visited.add(st["account"])
             st["thread"] = ""
@@ -1110,6 +1167,9 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
     if reviewing:
         st["review_account"] = account["name"]
     save(st)
+    if rotation is not None:
+        notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
+               **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
     def on_limit(local, reason, allow_credits):
         infos = task_snapshots(st, cfg, stopped)
@@ -1179,6 +1239,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
             prompt = handoff(st, current_message=current_message, cfg=cfg)
         st["rotations"].append({"at": time.time(), "from": account["name"], "to": chosen["name"],
                                 "reason": decision["reason"], "thread": ""})
+        rotation = st["rotations"][-1]
         if result == "auth":
             st["auth_transitions"] += 1
         account = account_named(cfg, chosen["name"])
@@ -1188,6 +1249,51 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
             st.update(account=account["name"], thread="")
         rotations += 1
         save(st)
+        notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
+               **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
+
+
+def run_check(st, stopped):
+    """Run the saved check after work, owning and reaping its process group."""
+    if stopped():
+        return None
+    started = time.monotonic()
+    proc = None
+    outcome = "failed"
+    code = None
+    with (TASKS / st["slug"] / "check.log").open("wb") as log:
+        try:
+            proc = subprocess.Popen(["/bin/sh", "-c", st["check"]], cwd=st["worktree"],
+                                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
+            st["check_pid"] = proc.pid
+            save(st)
+            deadline = started + st.get("check_timeout", 1800)
+            while proc.poll() is None:
+                if stopped():
+                    outcome = "stopped"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    outcome = "timeout"
+                    break
+                time.sleep(min(0.1, remaining))
+            else:
+                outcome = "passed" if proc.returncode == 0 else "failed"
+        except OSError as exc:
+            log.write(f"check launch failed: {exc}\n".encode("utf-8", errors="replace"))
+        finally:
+            if proc is not None:
+                signal_group(proc, signal.SIGKILL)
+                code = proc.wait()
+            st.pop("check_pid", None)
+    if stopped():
+        outcome = "stopped"
+        st["outcome"] = "stopped"
+    result = {"cmd": st["check"], "exit": code, "seconds": round(time.monotonic() - started, 3),
+              "at": time.time(), "outcome": outcome}
+    st.setdefault("checks", []).append(result)
+    save(st)
+    return result
 
 
 def cmd__run(a):
@@ -1195,6 +1301,7 @@ def cmd__run(a):
     def stop(signum, frame):
         stopped_flag.set()
     def stopped():
+        reap_notifications()
         return stopped_flag.is_set()
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -1206,13 +1313,24 @@ def cmd__run(a):
         time.sleep(0.01)
     else:
         return
+    cfg = None
+    check = None
     try:
         cfg = accounts_config()
         pending = st.pop("pending")
         effort = pending["effort"]
         run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
                  stopped, stopped_flag.wait)
-        if st.get("outcome") == "completed" and pending.get("review_after") and not stopped():
+        if st.get("kind") != "review" and st.get("outcome") == "completed" and st.get("check") and not stopped():
+            check = run_check(st, stopped)
+            if check and check["outcome"] in ("failed", "timeout"):
+                notify(st, cfg, "check_failed", f"check {check['outcome']} on {st['account']}",
+                       outcome=check["outcome"])
+                if pending.get("review_after"):
+                    st["review_skipped"] = "check " + check["outcome"]
+                    save(st)
+        if (st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
+                and (check is None or check["outcome"] == "passed")):
             st.update(kind="review", work_completed=True, outcome="running", reset_wait_seconds=0)
             save(st)
             run_turn(st, cfg, review_prompt(st, cfg), effort, False, stopped, stopped_flag.wait, new_turn=False)
@@ -1226,6 +1344,15 @@ def cmd__run(a):
         st.update(pid=None, turn_finished=time.time())
         st.pop("pending", None)
         save(st)
+        if cfg is not None:
+            if st.get("kind") == "review":
+                notify(st, cfg, "review_done", f"review {st['outcome']} on {st.get('review_account', st['account'])}",
+                       outcome=st["outcome"], account=st.get("review_account", st["account"]))
+            message = f"turn {st['outcome']} on {st['account']}"
+            if check is not None:
+                message += ", check " + check["outcome"]
+            notify(st, cfg, "turn_finished", message, outcome=st["outcome"])
+        reap_notifications()
 
 
 def cmd_start(a):
@@ -1257,7 +1384,8 @@ def cmd_start(a):
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
-          "rotations": [], "reviews": [], "created": time.time(), "turns": 0}
+          "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
+          "created": time.time(), "turns": 0}
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review)
     for _ in range(300):
@@ -1283,6 +1411,12 @@ def cmd_say(a):
     if not msg or not msg.strip():
         die("empty message")
     cfg = accounts_config()
+    if a.no_check:
+        st["check"] = None
+    elif a.check is not None:
+        st["check"] = a.check
+    if a.check_timeout is not None:
+        st["check_timeout"] = a.check_timeout
     with (TASKS / a.slug / "messages.jsonl").open("a") as f:
         f.write(json.dumps({"at": time.time(), "text": msg}, ensure_ascii=False) + "\n")
     # If no thread was created (all accounts exhausted on start), retain the brief too.
@@ -1353,6 +1487,17 @@ def cmd_wait(a):
             print("(Codex did not run this turn)")
         else:
             print(last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
+    for check in st.get("checks", [])[st.get("check_start", 0):]:
+        label = {"passed": "passed", "stopped": "stopped"}.get(check["outcome"], "FAILED")
+        reason = "timeout, " if check["outcome"] == "timeout" else ""
+        print(f"== check `{check['cmd']}`: {label} ({reason}exit {check['exit']}, {check['seconds']:.0f} s)")
+        if check["outcome"] in ("failed", "timeout"):
+            path = d / "check.log"
+            if path.exists():
+                with path.open(encoding="utf-8", errors="replace") as output:
+                    print("".join(deque(output, maxlen=40)).rstrip())
+    if st.get("review_skipped"):
+        print("== review skipped: " + st["review_skipped"])
     if st.get("kind") == "review":
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         if reviews:
@@ -1537,6 +1682,16 @@ def cmd_login(a):
     os.execvpe(binary, [binary, "login"] + ([] if a.browser else ["--device-auth"]), account_env(account))
 
 
+def check_timeout(value):
+    try:
+        seconds = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("check timeout must be a positive finite number")
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise argparse.ArgumentTypeError("check timeout must be a positive finite number")
+    return seconds
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -1548,12 +1703,18 @@ def main():
     s.add_argument("--effort", default=None, help="default: model_reasoning_effort from ~/.codex/config.toml")
     s.add_argument("--parallel", action="store_true")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
+    s.add_argument("--check", help="shell command to run after completed work turns; saved for follow-ups")
+    s.add_argument("--check-timeout", type=check_timeout, default=1800, help="check timeout in seconds (default: 1800)")
     s = sub.add_parser("say")
     s.add_argument("slug")
     s.add_argument("message", nargs="?")
     s.add_argument("--file")
     s.add_argument("--effort", default=None)
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
+    checks = s.add_mutually_exclusive_group()
+    checks.add_argument("--check", help="replace the saved check command")
+    checks.add_argument("--no-check", action="store_true", help="remove the saved check command")
+    s.add_argument("--check-timeout", type=check_timeout, default=None, help="replace the saved check timeout")
     s = sub.add_parser("review")
     s.add_argument("slug")
     s.add_argument("--effort", default=None)

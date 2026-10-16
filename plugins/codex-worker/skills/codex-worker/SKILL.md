@@ -70,9 +70,9 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--review]` (base defaults to the remote's default branch) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --review --check "<command from Checks>"` (base defaults to the remote's default branch) |
 | Wait for the turn | `wait <slug>` as a **background** Bash command: it re-invokes you when Codex's turn ends and prints its final message, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review` (only when idle), then `wait` again |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check` |
 | First review | `review <slug> [--effort E]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a successful turn |
 | Look | `status [<slug>]` — account, state, PR, commits, last message |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
@@ -85,6 +85,16 @@ The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug
 `~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
+
+The supervisor runs the saved check in the worktree after each completed implementation turn, before
+automatic review. `--check-timeout SEC` defaults to 1800; output goes to the task's `check.log`.
+Failure or timeout skips the requested review, and `wait` shows the result and the last 40 output
+lines. Failed, stopped, and paused turns do not run checks.
+
+The user can configure task notifications with `notify` in `~/.codex/codex-worker.json`: `"macos"` or
+an argv list receiving the event JSON as its final argument. `notify_events` optionally filters event
+types. Hooks run asynchronously and write output or launch errors to the task's `notify.log`; see the
+README for examples.
 
 ## Multiple subscriptions
 
@@ -132,16 +142,17 @@ Authentication errors get one retry, then rotation; when `wait` says `needs logi
 ## The loop
 
 1. Write the brief to a temporary file outside the repository, such as the session scratchpad or a
-   temporary directory, so it cannot enter a checkout commit. Run `start --review`, then `wait` in the
-   background. Tell the user in a line what went to Codex and that you will report back; don't sit and
-   poll.
-2. When `wait` returns: read Codex's report and the first review it ran in a fresh thread (for a turn
-   started without `--review`, run `review` and `wait` again). The report and the findings are claims,
-   not proof.
+   temporary directory, so it cannot enter a checkout commit. Run `start --review --check "<command
+   from Checks>"`, then `wait` in the background. Tell the user in a line what went to Codex and that
+   you will report back; don't sit and poll.
+2. When `wait` returns: read the check result, Codex's report, and the first review it ran in a fresh
+   thread. The supervisor's check result is objective evidence that the command passed or failed;
+   the report and findings are claims. If the check failed, send a fix request before requesting a
+   review. For a successful turn started without `--review`, run `review` and `wait` again.
 3. Check every finding against the actual diff (`gh pr diff <n>` or
    `git -C <worktree> diff <base>`), then review the parts the findings did not cover for real failures.
    Follow the repo's review rules; use `/code-review` for big or risky PRs if available. Check its
-   numbers against the "Done when" list.
+   numbers against the "Done when" list. A passing check does not replace reading the diff.
 4. Found problems → one `say` with all of them, each with what's wrong, what to do and how it is checked.
    Same stop rule: after two rounds on the same point, take it to the user.
 5. Good → merge per the repo's rules, then `clean`. Report to the user: what Codex did, what you checked,
