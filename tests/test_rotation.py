@@ -1067,20 +1067,26 @@ class RotationTests(unittest.TestCase):
     def test_review_and_scout_default_to_their_own_thirty_minute_budget(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
         self.configure(language="en", max_turn_minutes=1000)
-        checkpoint = self.work_result("partial", summary="Review stopped at a safe checkpoint.")
+        work = self.work_result()
+        checkpoint = self.review_result()
+        checkpoint["summary"] = "Review incomplete: found two defects before the time budget expired."
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": work},
             {"mode": "hold"}, {"mode": "complete", "reply": checkpoint},
             {"mode": "hold"}, {"mode": "complete", "reply": "Scouting checkpoint"}])
         self.start("cap-review-default", "--review")
         review_output = self.wait("cap-review-default", timeout=12)
-        self.assertEqual(self.state("cap-review-default")["outcome"], "budget_exhausted")
+        state = self.state("cap-review-default")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["result"], work, "review wrap-up must preserve the work result")
+        self.assertEqual(state["wrapup"]["result"], checkpoint)
+        self.assertEqual(state["reviews"][-1]["result"], checkpoint)
         executions = self.invocations()
         self.assertEqual(len(executions), 3)
         self.assertTrue(executions[1]["review"])
         self.assertTrue(executions[2]["resume"])
         self.assertEqual(executions[2]["thread"], executions[1]["thread"])
-        self.assert_output_schema(executions[2], "cap-review-default")
+        self.assert_output_schema(executions[2], "cap-review-default", review=True)
         self.assertIn(checkpoint["summary"], review_output)
         self.assertIn("== turn stopped: time budget 30 min exhausted", review_output)
         self.cli("scout", "cap-scout-default", "Inspect the current configuration")
@@ -1092,6 +1098,64 @@ class RotationTests(unittest.TestCase):
         self.assert_scout_read_only(executions[4])
         self.assertIn("Scouting checkpoint", scout_output)
         self.assertIn("== turn stopped: time budget 30 min exhausted", scout_output)
+
+    def test_review_budget_before_rotated_thread_started_does_not_resume_previous_review(self):
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.configure(language="en", max_review_minutes=2)
+        work = self.work_result()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": work},
+            {"mode": "usage_error", "limit_after": 0.05}])
+        gate = self.root / "release-rotated-review-before-thread"
+        self.account(self.other, "B", self.reset, runs=[
+            {"mode": "hold", "rollout_gate": str(gate)},
+            {"mode": "complete", "reply": self.review_result()}])
+        self.start("cap-review-before-thread", "--review")
+        self.until(lambda: any(event.get("command") == "rollout-waiting"
+                               and event["home"] == str(self.other) for event in self.trace()))
+        output = self.wait("cap-review-before-thread", timeout=12)
+        state = self.state("cap-review-before-thread")
+        executions = self.invocations()
+        self.assertFalse(gate.exists(), "the replacement review must never publish thread.started")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["wrapup"]["outcome"], "not_run")
+        self.assertIsNone(state["wrapup"]["result"])
+        self.assertEqual(state["result"], work)
+        self.assertEqual(state["review_account"], "second")
+        self.assertEqual(len(executions), 3, "no wrap-up may resume a previous account's review")
+        self.assertEqual([event["review"] for event in executions], [False, True, True])
+        self.assertFalse(any(event["resume"] for event in executions))
+        self.assertEqual(executions[-1]["home"], str(self.other))
+        self.assertEqual(len(state["reviews"]), 1)
+        self.assertEqual(state["reviews"][0]["thread"], executions[1]["thread"])
+        self.assertNotEqual(state["reviews"][0]["thread"], executions[2]["thread"])
+        self.assertTrue(all(not self.process_is_live(event["pid"]) for event in executions))
+        self.assertIn("== turn stopped: time budget 2 min exhausted", output)
+
+    def test_wrap_up_prompts_use_the_schema_for_work_or_review_in_both_languages(self):
+        worker = self.worker()
+        reasons = [
+            {"outcome": "budget_exhausted", "minutes": 30},
+            {"outcome": "stuck", "command": "fixture-check", "count": 3,
+             "exit_code": 7, "output_sha256": "a" * 64}]
+        for language in ("en", "ru"):
+            for reason in reasons:
+                with self.subTest(language=language, reason=reason["outcome"]):
+                    cfg = {"language": language}
+                    work = worker.wrapup_prompt({"kind": "work"}, reason, cfg)
+                    review = worker.wrapup_prompt({"kind": "review"}, reason, cfg)
+                    self.assertIn("work result schema" if language == "en" else "схеме работы", work)
+                    self.assertIn("partial" if reason["outcome"] == "budget_exhausted" else "blocked", work)
+                    if reason["outcome"] == "budget_exhausted":
+                        self.assertIn("Commit what works and push" if language == "en" else
+                                      "Закоммить то, что работает, и запушь", work)
+                    self.assertIn("review schema" if language == "en" else "схеме ревью", review)
+                    for field in ("JSON", "findings", "verdict", "defects", "summary"):
+                        self.assertIn(field, review)
+                    self.assertIn("incomplete" if language == "en" else "не завершено", review)
+                    self.assertNotIn("work result schema" if language == "en" else "схеме работы", review)
+                    self.assertNotIn("status partial", review)
+                    self.assertNotIn("status blocked", review)
 
     def test_configured_review_budget_is_independent_of_work_and_applies_to_scout(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
@@ -1949,6 +2013,22 @@ class RotationTests(unittest.TestCase):
         self.assertRegex(prompt.lower(), r"tolerance|tolerances")
         self.assertIn("mock", prompt.lower())
         self.assertEqual(self.notification("guarded-counts", "turn_finished")["guarded_changed"], 1)
+
+    def test_disabled_test_markers_ignore_prose_and_match_test_annotations(self):
+        pattern = self.worker().DISABLED_TEST
+        for line in ("only P3 remains", "Contend only for the reset journal lock",
+                     "skip the step", "skipped = True", "xfail = False"):
+            with self.subTest(line=line):
+                self.assertIsNone(pattern.search(line))
+        for line in ("@unittest.skip('reason')", "@unittest.skipIf(True, 'reason')",
+                     "@unittest.skipUnless(False, 'reason')", "@unittest.expectedFailure",
+                     "self.skipTest('reason')", "@pytest.mark.skip", "@pytest.mark.skipif(True)",
+                     "@pytest.mark.xfail", "pytestmark = pytest.mark.skip(reason='fixture')",
+                     "pytest.param(1, marks=pytest.mark.xfail)", "pytest.skip('reason')", "it.skip('case', fn)",
+                     "it.only('case', fn)", "xit('case', fn)", "xdescribe('suite', fn)",
+                     "@Disabled", "@Ignore", "t.Skip('reason')"):
+            with self.subTest(line=line):
+                self.assertIsNotNone(pattern.search(line))
 
     def test_guarded_deleted_files_and_added_skips_have_separate_warnings(self):
         self.configure(language="en")

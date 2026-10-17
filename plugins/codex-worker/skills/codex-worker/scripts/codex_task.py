@@ -902,7 +902,11 @@ def guarded_path(path, st, paths):
             or any(fnmatch.fnmatchcase(path, pattern.removeprefix("./")) for pattern in st.get("guards", [])))
 
 
-DISABLED_TEST = re.compile(r"\b(?:skip|skipif|xfail|only)\b|@unittest\.skip\w*|@Disabled\b|\bt\.Skip\(", re.I)
+DISABLED_TEST = re.compile(
+    r"@unittest\.(?:skip\w*|expectedFailure)\b|\bself\.skipTest\s*\("
+    r"|\bpytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.skip\s*\("
+    r"|\.(?:skip|only)\s*\(|\b(?:xit|xdescribe)\s*\("
+    r"|@(?:Disabled|Ignore)\b|\bt\.Skip\s*\(", re.I)
 
 
 def guarded_changes(st):
@@ -1417,32 +1421,41 @@ def turn_stop_message(reason):
 
 def wrapup_prompt(st, reason, cfg):
     ru = cfg.get("language", "en") == "ru"
+    reviewing = st.get("kind") == "review"
     if reason["outcome"] == "budget_exhausted":
         prompt = ("Время хода вышло. " if ru else "The turn's time budget has expired. ")
         if st.get("kind") not in ("review", "scout"):
             prompt += ("Закоммить то, что работает, и запушь. " if ru else
                        "Commit what works and push it. ")
-        prompt += ("Коротко подведи итог со status partial и списком оставшегося в remaining. " if ru else
-                   "Give a short final result with status partial and a list of remaining work in remaining. ")
+        if not reviewing:
+            prompt += ("Коротко подведи итог со status partial и списком оставшегося в remaining. " if ru else
+                       "Give a short final result with status partial and a list of remaining work in remaining. ")
     else:
         prompt = ((f"Команда {reason['command']!r} упала одинаково {reason['count']} раз "
                    f"(exit_code {reason['exit_code']}, SHA-256 хвоста вывода {reason['output_sha256']}). "
-                   "Остановись. Короткий итог со status blocked: приложи числа и что пробовал. ") if ru else
+                   "Остановись. Приложи числа и что пробовал. ") if ru else
                   (f"Command {reason['command']!r} failed identically {reason['count']} times "
                    f"(exit_code {reason['exit_code']}, output tail SHA-256 {reason['output_sha256']}). "
-                   "Stop. Give a short final result with status blocked, numerical evidence and what you tried. "))
+                   "Stop. Report numerical evidence and what you tried. "))
+        if not reviewing:
+            prompt += "Короткий итог со status blocked. " if ru else "Give a short final result with status blocked. "
     prompt += ("На сворачивание не больше 10 минут; не продолжай реализацию и не запускай ревью. " if ru else
                "You have at most 10 minutes to wrap up; do not continue implementation or start a review. ")
     if st.get("kind") in ("review", "scout"):
         prompt += ("Режим только чтения: не меняй файлы, не коммить и не пушь. " if ru else
                    "Stay read-only: do not change files, commit or push. ")
-    if st.get("kind") != "scout":
+    if reviewing:
+        prompt += (("Ответь JSON по схеме ревью: в findings верни находки, найденные к этому моменту; "
+                    "verdict defects, если находки есть, иначе clean. В summary отметь, что ревью не завершено.") if ru else
+                   ("Return JSON matching the review schema: include findings found so far in findings; "
+                    "use verdict defects if any findings exist, otherwise clean. In summary state that the review is incomplete."))
+    elif st.get("kind") != "scout":
         prompt += "Ответь JSON по схеме работы." if ru else "Return JSON matching the work result schema."
     return prompt
 
 
 def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
-            control=None, wrapup=False):
+            control=None, wrapup=False, wrapup_thread=None):
     """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
     d = TASKS / st["slug"]
     prepare_home(account)
@@ -1450,8 +1463,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                                      else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
                                      cfg.get("repeat_limit", 3))
-    thread = ((st.get("reviews") or [{}])[-1].get("thread", "") if wrapup and reviewing
-              else "" if reviewing else st.get("thread", ""))
+    thread = wrapup_thread if wrapup else "" if reviewing else st.get("thread", "")
     review_entry = None
     last = d / ("review.md" if reviewing else "last.md")
     if last.exists():
@@ -1469,8 +1481,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     if st.get("kind") == "scout" or (reviewing and wrapup):
         args += ["-c", 'sandbox_mode="read-only"']
     if st.get("kind") != "scout":
-        schema = d / ("review-schema.json" if reviewing and not wrapup else "result-schema.json")
-        schema.write_text(json.dumps(REVIEW_SCHEMA if reviewing and not wrapup else RESULT_SCHEMA, indent=2), encoding="utf-8")
+        schema = d / ("review-schema.json" if reviewing else "result-schema.json")
+        schema.write_text(json.dumps(REVIEW_SCHEMA if reviewing else RESULT_SCHEMA, indent=2), encoding="utf-8")
         args += ["--output-schema", str(schema)]
     args += effort_args(effort) + [prompt]
     path = rollout_path(account["home"], thread) if thread else None
@@ -1601,7 +1613,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                 st.pop("codex_pid", None)
                 message = last.read_text(encoding="utf-8").strip() if last.exists() else final_message
                 if wrapup:
-                    st["wrapup"]["result"] = parse_result(message)
+                    st["wrapup"]["result"] = parse_result(message, reviewing=reviewing)
                 elif review_entry is not None:
                     review_entry["finished"] = time.time()
                     review_entry["result"] = parse_result(message, reviewing=True)
@@ -1618,7 +1630,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     return ("completed" if code == 0 and not failed else "failed"), None
 
 
-def wrapup_turn(st, cfg, account, effort, stopped, reason):
+def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     """Publish the typed stop and allow exactly one short resume on its thread."""
     st["turn_stop"] = dict(reason, at=time.time())
     st["outcome"] = reason["outcome"]
@@ -1626,7 +1638,7 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason):
     st["wrapup"] = {"outcome": "not_run", "result": None}
     save(st)
     notify(st, cfg, reason["outcome"], turn_stop_message(reason), account=account["name"], **reason)
-    thread = ((st.get("reviews") or [{}])[-1].get("thread") if st.get("kind") == "review"
+    thread = ((review_entry or {}).get("thread") if st.get("kind") == "review"
               else st.get("thread"))
     if not thread or stopped():
         return
@@ -1635,7 +1647,7 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason):
     try:
         result, _ = monitor(st, cfg, account, wrapup_prompt(st, reason, cfg), effort, stopped,
                             lambda *args: None, control=TurnControl(10, cfg.get("repeat_limit", 3)),
-                            wrapup=True)
+                            wrapup=True, wrapup_thread=thread)
         st["wrapup"]["outcome"] = result
     except (Exception, SystemExit) as exc:
         st["wrapup"].update(outcome="failed", error=str(exc))
@@ -1645,6 +1657,8 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason):
         last.unlink(missing_ok=True)
     if st.get("kind") not in ("review", "scout"):
         st["result"] = st["wrapup"]["result"]
+    elif review_entry is not None and st["wrapup"]["outcome"] == "completed":
+        review_entry.update(result=st["wrapup"]["result"], finished=time.time())
     st["outcome"] = "stopped" if stopped() else reason["outcome"]
     save(st)
 
@@ -1714,6 +1728,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
     while not stopped():
         st.pop("reset_reconciled", None)
         visited.add(account["name"])
+        review_start = len(st.get("reviews", []))
         result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control)
         if result in ("auth", "limit") and control.expired(time.monotonic()):
             result = "budget_exhausted"
@@ -1724,7 +1739,9 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
             break
         if result in ("budget_exhausted", "stuck"):
             reason = dict(control.reason, active_seconds=round(control.elapsed, 3))
-            wrapup_turn(st, cfg, account, effort, stopped, reason)
+            reviews = st.get("reviews", [])[review_start:]
+            wrapup_turn(st, cfg, account, effort, stopped, reason,
+                        review_entry=reviews[-1] if reviews else None)
             break
         if result in ("completed", "failed") or not cfg["enabled"]:
             st["outcome"] = result
@@ -2223,8 +2240,6 @@ def cmd_wait(a):
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
     if st.get("turn_stop"):
         print("== turn stopped: " + turn_stop_message(st["turn_stop"]))
-    if st.get("kind") == "review" and st.get("wrapup"):
-        print("\n".join(result_lines(st["wrapup"]["result"], "(no wrap-up result)")))
     d = TASKS / a.slug
     if st.get("kind") != "review" or st.get("work_completed"):
         last = d / "last.md"
@@ -2280,7 +2295,7 @@ def cmd_wait(a):
             if result is None:
                 print(heading)
                 if st.get("kind") == "review" and st.get("wrapup"):
-                    print("(review interrupted; see wrap-up above)")
+                    print("(review interrupted; no wrap-up result)")
                 else:
                     print("== result: unknown (unstructured final message)")
                     review = d / "review.md"
