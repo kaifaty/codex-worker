@@ -686,6 +686,62 @@ class RotationTests(unittest.TestCase):
             self.assertIn(str(self.repo), status)
             self.assertNotIn("codex/scout-current", status)
 
+    def test_scout_accepts_question_before_or_after_options(self):
+        question = "Where is the configuration loaded?"
+        repo_args = ("--repo", str(self.repo))
+        cases = ((question,) + repo_args,
+                 repo_args + (question,),
+                 ("--effort", "low", question) + repo_args)
+        for index, args in enumerate(cases):
+            with self.subTest(args=args):
+                slug = "scout-args-%s" % index
+                self.cli("scout", slug, *args)
+                self.wait(slug)
+                invocation = self.invocations()[-1]
+                self.assertIn(question, invocation["prompt"])
+                self.assertEqual(invocation["cwd"], str(self.repo))
+                self.assertEqual(self.state(slug)["worktree"], str(self.repo))
+                self.assert_scout_read_only(invocation)
+                if "--effort" in args:
+                    self.assertIn('model_reasoning_effort="low"', invocation["argv"])
+
+    def test_scout_requires_exactly_one_question_source_before_creating_a_task(self):
+        question_file = self.root / "scout-question.md"
+        question_file.write_text("Where is the configuration loaded?\n")
+        conflict = "argument --file: not allowed with argument question"
+        cases = ((("--repo", str(self.repo)), "one of the arguments question --file is required"),
+                 (("Where is the configuration loaded?", "--file", str(question_file)), conflict),
+                 (("--file", str(question_file), "Where is the configuration loaded?"), conflict))
+        for index, (args, expected_error) in enumerate(cases):
+            with self.subTest(args=args):
+                slug = "scout-invalid-args-%s" % index
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "scout", slug] + list(args),
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True,
+                                        timeout=15)
+                self.assertEqual(result.returncode, 2)
+                self.assertIn(expected_error, result.stderr)
+                self.assertEqual(self.invocations(), [])
+                self.assertFalse((self.home / "claude-tasks" / slug).exists())
+
+    def test_say_accepts_positional_and_file_messages_on_the_existing_thread(self):
+        self.start("say-question-sources")
+        self.wait("say-question-sources")
+        thread = self.state("say-question-sources")["thread"]
+        message = self.root / "followup.md"
+        message.write_text("Continue with the file-supplied followup.\n")
+        cases = (("Continue with the positional followup.",), ("--file", str(message)))
+        for args in cases:
+            with self.subTest(args=args):
+                self.cli("say", "say-question-sources", *args)
+                self.wait("say-question-sources")
+                invocation = self.invocations()[-1]
+                self.assertTrue(invocation["resume"])
+                self.assertEqual(invocation["thread"], thread)
+                expected = message.read_text().strip() if args[0] == "--file" else args[0]
+                self.assertIn(expected, invocation["prompt"])
+                self.assertEqual(self.state("say-question-sources")["kind"], "work")
+        self.assertEqual(len(self.invocations()), 3)
+
     def test_scout_file_keeps_another_tasks_worktree_and_uses_russian_rules(self):
         self.configure(language="ru")
         self.start("scout-owner")

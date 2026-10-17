@@ -1788,11 +1788,11 @@ def main():
     s.add_argument("--check-timeout", type=check_timeout, default=1800, help="check timeout in seconds (default: 1800)")
     s = sub.add_parser("scout", help="answer a code question in an existing directory, read-only")
     s.add_argument("slug")
-    question = s.add_mutually_exclusive_group(required=True)
-    question.add_argument("question", nargs="?")
-    question.add_argument("--file")
+    s.add_argument("question", nargs="?")
+    s.add_argument("--file")
     s.add_argument("--repo", default=".")
     s.add_argument("--effort", default=None)
+    scout_parser = s
     s = sub.add_parser("say")
     s.add_argument("slug")
     s.add_argument("message", nargs="?")
@@ -1825,7 +1825,16 @@ def main():
     s = sub.add_parser("login", help="sign in interactively to an isolated account home")
     s.add_argument("name")
     s.add_argument("--browser", action="store_true", help="use browser login instead of device auth")
-    a = p.parse_args()
+    if sys.argv[1:2] == ["scout"]:
+        # Intermixed parsing is supported on the scout parser, not on subparsers as a group.
+        a = scout_parser.parse_intermixed_args(sys.argv[2:])
+        a.cmd = "scout"
+        if a.question is None and a.file is None:
+            scout_parser.error("one of the arguments question --file is required")
+        if a.question is not None and a.file is not None:
+            scout_parser.error("argument --file: not allowed with argument question")
+    else:
+        a = p.parse_args()
     if a.cmd in ("start", "scout", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):
         global CODEX
         CODEX = resolve_codex()
