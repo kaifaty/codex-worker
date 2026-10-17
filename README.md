@@ -135,6 +135,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | `review <slug> [--effort E] [--review-angles LIST]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
+| `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` | Summarize persistent costs and outcomes by task, account, and period (default: seven days). |
 | `accounts` | Show login, plan, limits, reset times, credits, and availability in English. |
 | `login <name> [--browser]` | Have the human sign in to an account; writes `codex-worker.json`. |
 | `stop <slug>` | Interrupt the task; send the next instructions with `say`. |
@@ -144,6 +145,12 @@ Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
 `~/.codex/claude-tasks/<slug>/`. Turns continue independently of Claude's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
+
+The supervisor keeps numeric stage telemetry in `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
+(default `~/.codex/`); `clean` preserves it. Use `report` to compare review findings, check success,
+fix rounds to clean review, tokens, and weekly-window usage before changing rounds or angle defaults.
+Quota sleeps are excluded from active time; weekly usage omits reset crossings and can include other
+activity on a shared account. `--json` exposes the same metrics for external reports; dates use UTC.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
 add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and

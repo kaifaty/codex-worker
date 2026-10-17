@@ -82,6 +82,7 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 | First review | `review <slug> [--effort E] [--review-angles LIST]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a `done` result and a passing check, or an unstructured result for compatibility |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
+| Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` — persistent stage totals and tasks ordered by weekly-window usage, then tokens |
 | Accounts | `accounts` — logins, plans, limits, reset times and credits |
 | Sign in | `login <name> [--browser]` — human signs in with a device code, or in the browser |
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
@@ -91,6 +92,17 @@ The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug
 `~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
+
+Use `report` to check whether fix rounds and review angles pay for their cost before changing defaults.
+The supervisor appends numeric counters and identifiers to `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
+(by default `~/.codex/`), without prompts, messages, or command output; `clean` preserves this journal.
+Reports cover the last seven days by default; date filters start at UTC midnight. Turns include work,
+fixes, wrap-ups, individual review angles, and scouts; active time also includes checks and excludes
+quota sleeps. Weekly usage sums positive within-stage account deltas, omitting reset crossings;
+shared account activity can affect these estimates. Missing rollout measurements remain null in the
+journal and contribute no measured usage. The rounds-to-clean distribution counts each task's first
+clean review round, requiring all completed angles in that round to be clean and no interrupted
+angles; model refusals follow the supervisor's merged verdict.
 
 ## Optional workspace sandbox
 

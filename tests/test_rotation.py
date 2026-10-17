@@ -216,11 +216,16 @@ def execute():
     signal.signal(signal.SIGTERM, interrupted)
     trace(dict(invocation, thread=thread, mode=run["mode"], journal_before=journal_records()))
 
-    def rollout_limits():
+    def rollout_limits(initial=False):
+        if run.get("omit_rollout"):
+            return
         current = fixture()
         raw = limits(current)
         if "rollout_used" in run:
             raw["primary"] = dict(raw["primary"], usedPercent=run["rollout_used"])
+        used_key = "weekly_used_before" if initial else "weekly_used_after"
+        if used_key in run:
+            raw["primary"] = dict(raw["primary"], usedPercent=run[used_key])
         windows = {}
         for name in ("primary", "secondary"):
             window = raw[name]
@@ -229,15 +234,18 @@ def execute():
                               "resets_at": window["resetsAt"]} if window else None)
         windows["credits"] = raw["credits"]
         windows["rate_limit_reached_type"] = raw["rateLimitReachedType"]
+        usage_key = "token_usage_before" if initial else "token_usage_after"
+        usage = run.get(usage_key, {"total_tokens": 12})
         append(rollout, {"timestamp": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                          "type": "event_msg", "payload": {"type": "token_count",
-                         "info": {"total_token_usage": {"total_tokens": 12}},
+                         "info": {"total_token_usage": usage},
                          "rate_limits": windows}})
 
     def message(text):
         emit({"type": "item.completed", "item": {"id": str(uuid.uuid4()),
               "type": "agent_message", "text": text}})
-        append(rollout, {"type": "event_msg", "payload": {"type": "agent_message", "message": text}})
+        if not run.get("omit_rollout"):
+            append(rollout, {"type": "event_msg", "payload": {"type": "agent_message", "message": text}})
 
     def auth_failure():
         value = fixture()
@@ -275,7 +283,7 @@ def execute():
             time.sleep(0.02)
         if stopped[0]:
             return 130
-    rollout_limits()
+    rollout_limits(initial=True)
     # Publish the ready fixture before the supervisor starts looking for its rollout.
     emit({"type": "thread.started", "thread_id": thread})
     emit({"type": "turn.started"})
@@ -353,6 +361,9 @@ def execute():
     message(reply)
     if output:
         output.write_text(reply + "\n")
+    if any(key in run for key in ("token_usage_before", "token_usage_after",
+                                 "weekly_used_before", "weekly_used_after")):
+        rollout_limits()
     emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}})
     return 0
 
@@ -619,6 +630,15 @@ class RotationTests(unittest.TestCase):
             except ValueError:
                 pass
         return entries
+
+    def telemetry_journal(self):
+        path = self.home / "codex-worker-log.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def telemetry_usage(self, input_tokens, cached_input_tokens, output_tokens, reasoning_output_tokens):
+        return {"input_tokens": input_tokens, "cached_input_tokens": cached_input_tokens,
+                "output_tokens": output_tokens, "reasoning_output_tokens": reasoning_output_tokens,
+                "total_tokens": input_tokens + output_tokens}
 
     def worker(self):
         with mock.patch.dict(os.environ, self.env), mock.patch.object(sys, "dont_write_bytecode", True):
@@ -1330,6 +1350,14 @@ class RotationTests(unittest.TestCase):
                             event.get("pid") == executions[0]["pid"] for event in self.trace()))
         self.assertEqual(self.notification("time-cap", "turn_finished")["outcome"], "budget_exhausted")
         self.assertEqual(self.notification("time-cap", "budget_exhausted")["outcome"], "budget_exhausted")
+        telemetry = self.telemetry_journal()
+        self.assertEqual([(row["phase"], row["outcome"]) for row in telemetry],
+                         [("work", "budget_exhausted"), ("wrapup", "completed"), ("check", "passed")])
+        self.assertEqual(telemetry[1]["result_status"], "partial")
+        self.assertEqual([row["round"] for row in telemetry], [0, 0, 0])
+        report = json.loads(self.cli("report", "--slug", "time-cap", "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"budget_exhausted": 1})
+        self.assertEqual(report["summary"]["result_status"], {"partial": 1})
 
     def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
@@ -1972,6 +2000,10 @@ class RotationTests(unittest.TestCase):
         self.assertRegex(lower, r"not (?:inspect|read|look)|haven't (?:inspect|read|look)|did not (?:inspect|read|look)")
         self.assertIn(reply, output)
         self.assert_scout_output(output)
+        telemetry = self.telemetry_journal()
+        self.assertEqual([(row["kind"], row["phase"], row["outcome"]) for row in telemetry],
+                         [("scout", "scout", "completed")])
+        self.assertIsNone(telemetry[0]["result_status"])
         self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
         self.assertEqual(self.git("branch", "--list", "codex/scout-current"), "")
@@ -2823,6 +2855,12 @@ class RotationTests(unittest.TestCase):
         self.assertEqual((Path(state["worktree"]) / "tests/test_a.py").read_text(), changes["tests/test_a.py"])
         self.assertFalse((Path(state["worktree"]) / "tests/test_removed.py").exists())
         self.assertTrue((Path(state["worktree"]) / "tests/test_new.py").is_file())
+        telemetry = self.telemetry_journal()
+        self.assertEqual([(row["phase"], row["outcome"]) for row in telemetry],
+                         [("work", "completed"), ("check", "passed"),
+                          ("base_check", "failed"), ("review", "completed")])
+        self.assertEqual(telemetry[2]["check_outcome"], "failed")
+        self.assertGreaterEqual(telemetry[2]["check_seconds"], 0)
 
     def test_base_check_skips_absolute_task_paths_and_still_reviews(self):
         self.configure(language="en")
@@ -3589,11 +3627,22 @@ class RotationTests(unittest.TestCase):
         concurrency = self.review_result()
         concurrency["findings"] = concurrency["findings"][1:]
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "complete", "reply": self.work_result()},
-            {"mode": "complete", "reply": correctness},
-            {"mode": "usage_error"}])
+            {"mode": "complete", "reply": self.work_result(),
+             "token_usage_before": self.telemetry_usage(100, 20, 10, 1),
+             "token_usage_after": self.telemetry_usage(150, 40, 30, 5),
+             "weekly_used_before": 10, "weekly_used_after": 12},
+            {"mode": "complete", "reply": correctness,
+             "token_usage_before": self.telemetry_usage(1000, 200, 100, 20),
+             "token_usage_after": self.telemetry_usage(1100, 250, 120, 25),
+             "weekly_used_before": 12, "weekly_used_after": 14},
+            {"mode": "usage_error", "token_usage_before": self.telemetry_usage(2000, 400, 200, 40),
+             "token_usage_after": self.telemetry_usage(2030, 410, 210, 42),
+             "weekly_used_before": 14, "weekly_used_after": 99}])
         self.account(self.other, "B", self.reset + 3600, runs=[
-            {"mode": "complete", "reply": concurrency}])
+            {"mode": "complete", "reply": concurrency,
+             "token_usage_before": self.telemetry_usage(5000, 1000, 500, 100),
+             "token_usage_after": self.telemetry_usage(5200, 1100, 550, 115),
+             "weekly_used_before": 20, "weekly_used_after": 23}])
 
         self.start("angles-rotate")
         self.wait("angles-rotate")
@@ -3619,6 +3668,24 @@ class RotationTests(unittest.TestCase):
         self.assertIn("== review angle concurrency by second (", output)
         self.assertIn(correctness["findings"][0]["title"], output)
         self.assertIn(concurrency["findings"][0]["title"], output)
+        self.until(lambda: len(self.telemetry_journal()) == 3)
+        rows = self.telemetry_journal()
+        self.assertEqual([row["phase"] for row in rows], ["work", "review", "review"])
+        self.assertEqual([row["angle"] for row in rows], [None, "correctness", "concurrency"])
+        rotated = rows[-1]
+        self.assertEqual((rotated["rotations"], rotated["account"], rotated["thread"]),
+                         (1, "second", reviews[-1]["thread"]))
+        self.assertEqual(rotated["tokens"], {"input": 230, "cached_input": 110,
+                                              "output": 60, "reasoning": 17})
+        self.assertEqual([entry["account"] for entry in rotated["usage"]], ["main", "second"])
+        self.assertEqual([entry["thread"] for entry in rotated["usage"]],
+                         [reviews[1]["thread"], reviews[2]["thread"]])
+        report = json.loads(self.cli("report", "--slug", "angles-rotate", "--json"))
+        self.assertEqual(report["summary"]["turns"], 3)
+        self.assertEqual(report["summary"]["tokens"]["total"], 480)
+        self.assertEqual(report["summary"]["weekly_used_percent"], 92)
+        self.assertEqual({row["account"]: (row["turns"], row["tokens"]["total"], row["weekly_used_percent"])
+                          for row in report["accounts"]}, {"main": (3, 230, 89), "second": (1, 250, 3)})
 
     def test_model_cybersecurity_refusal_before_or_after_thread_does_not_rotate(self):
         self.configure()
@@ -5836,6 +5903,341 @@ with open(sys.argv[1], "a+") as journal:
         sleeper.assert_called_once_with(1)
         save.assert_called_once()
         self.assertIsNone(save.call_args[0][0].get("pid"))
+
+    def test_telemetry_records_work_checks_reviews_and_fix_with_rollout_deltas(self):
+        self.configure(language="en")
+        decisions = [{"id": "F1", "decision": "fixed", "note": "Handle empty input."},
+                     {"id": "F2", "decision": "rejected", "note": "The final token is a sentinel."}]
+        usages = [(self.telemetry_usage(100, 40, 10, 5), self.telemetry_usage(150, 60, 30, 10)),
+                  (self.telemetry_usage(1000, 300, 100, 50), self.telemetry_usage(1100, 350, 120, 60)),
+                  (self.telemetry_usage(150, 60, 30, 10), self.telemetry_usage(230, 100, 50, 17)),
+                  (self.telemetry_usage(500, 200, 50, 20), self.telemetry_usage(540, 210, 60, 22))]
+        replies = [self.work_result(), self.review_result(),
+                   self.work_result(findings=decisions), self.review_result(False)]
+        windows = [(10, 12), (12, 13), (13, 15), (15, 16)]
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": reply, "token_usage_before": usage[0],
+             "token_usage_after": usage[1], "weekly_used_before": window[0],
+             "weekly_used_after": window[1]}
+            for reply, usage, window in zip(replies, usages, windows)])
+        self.start("telemetry-fix", "--review", "--fix-rounds", "1", "--check", "true")
+        self.wait("telemetry-fix")
+        self.until(lambda: len(self.telemetry_journal()) == 6)
+        rows = self.telemetry_journal()
+        self.assertEqual([(row["phase"], row["round"], row["outcome"]) for row in rows],
+                         [("work", 0, "completed"), ("check", 0, "passed"),
+                          ("review", 0, "completed"), ("fix", 1, "completed"),
+                          ("check", 1, "passed"), ("review", 1, "completed")])
+        fields = {"v", "at", "slug", "repo", "kind", "phase", "round", "angle", "account",
+                  "thread", "started", "finished", "active_seconds", "sleep_seconds", "outcome",
+                  "result_status", "verdict", "findings", "decisions", "check_outcome",
+                  "check_seconds", "rotations", "tokens", "weekly_used_before", "weekly_used_after"}
+        for row in rows:
+            self.assertTrue(fields <= set(row), row)
+            self.assertEqual((row["v"], row["slug"], row["repo"]), (1, "telemetry-fix", "repo"))
+            self.assertIsInstance(row["at"], (int, float))
+            self.assertLessEqual(row["started"], row["finished"])
+            self.assertGreaterEqual(row["active_seconds"], 0)
+            self.assertEqual(row["sleep_seconds"], 0)
+            self.assertEqual(row["rotations"], 0)
+        model_rows = [row for row in rows if row["phase"] not in ("check", "base_check")]
+        self.assertEqual([row["tokens"] for row in model_rows], [
+            {"input": 50, "cached_input": 20, "output": 20, "reasoning": 5},
+            {"input": 100, "cached_input": 50, "output": 20, "reasoning": 10},
+            {"input": 80, "cached_input": 40, "output": 20, "reasoning": 7},
+            {"input": 40, "cached_input": 10, "output": 10, "reasoning": 2}])
+        self.assertEqual([(row["weekly_used_before"], row["weekly_used_after"]) for row in model_rows],
+                         windows)
+        self.assertEqual([row["kind"] for row in model_rows], ["work", "review", "work", "review"])
+        self.assertEqual([row["account"] for row in model_rows], ["main"] * 4)
+        self.assertEqual([row["angle"] for row in model_rows if row["phase"] == "review"],
+                         ["correctness", "correctness"])
+        self.assertEqual([row["verdict"] for row in model_rows if row["phase"] == "review"],
+                         ["defects", "clean"])
+        self.assertEqual([row["findings"] for row in model_rows if row["phase"] == "review"], [2, 0])
+        self.assertEqual(model_rows[2]["decisions"], {"fixed": 1, "rejected": 1})
+        self.assertEqual([row["result_status"] for row in model_rows if row["kind"] == "work"],
+                         ["done", "done"])
+        for row in (rows[1], rows[4]):
+            self.assertEqual(row["check_outcome"], "passed")
+            self.assertGreaterEqual(row["check_seconds"], 0)
+        raw = (self.home / "codex-worker-log.jsonl").read_text()
+        self.assertNotIn(self.work_result()["summary"], raw)
+        self.assertNotIn(self.review_result()["findings"][0]["title"], raw)
+        self.assertNotIn(decisions[1]["note"], raw)
+        self.assertNotIn(self.brief.read_text().splitlines()[0], raw)
+
+    def test_telemetry_excludes_subscription_sleep_from_active_time(self):
+        self.configure(language="en")
+        reset = time.time() + 5
+        self.account(self.home, "A", reset, auto_reset=True, runs=[
+            {"mode": "usage_error", "limit_after": 0.1},
+            {"mode": "complete", "delay": 0.2, "reply": self.work_result()}])
+        self.account(self.other, "B", self.reset, used=99)
+        self.start("telemetry-sleep")
+        self.wait("telemetry-sleep", timeout=12, through_sleep=True)
+        self.until(lambda: len(self.telemetry_journal()) == 1)
+        row = self.telemetry_journal()[0]
+        elapsed = row["finished"] - row["started"]
+        self.assertEqual((row["phase"], row["outcome"]), ("work", "completed"))
+        self.assertGreater(row["sleep_seconds"], 0.5)
+        self.assertLess(row["active_seconds"], elapsed - 0.5)
+        self.assertAlmostEqual(row["active_seconds"] + row["sleep_seconds"], elapsed, delta=0.1)
+
+    def test_telemetry_missing_rollout_and_unwritable_journal_do_not_fail_work(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "omit_rollout": True, "reply": self.work_result()}])
+        self.start("telemetry-no-rollout")
+        self.wait("telemetry-no-rollout")
+        self.until(lambda: len(self.telemetry_journal()) == 1)
+        row = self.telemetry_journal()[0]
+        self.assertEqual(row["tokens"], {"input": None, "cached_input": None,
+                                         "output": None, "reasoning": None})
+        self.assertIsNone(row["weekly_used_before"])
+        self.assertIsNone(row["weekly_used_after"])
+        journal = self.home / "codex-worker-log.jsonl"
+        journal.unlink()
+        journal.mkdir()  # A directory is unwritable as a JSONL file even when tests run as root.
+        self.start("telemetry-unwritable")
+        self.wait("telemetry-unwritable")
+        self.assertEqual(self.state("telemetry-unwritable")["outcome"], "completed")
+        stderr = self.home / "claude-tasks" / "telemetry-unwritable" / "stderr.log"
+        self.assertIn("codex-worker-log.jsonl", stderr.read_text())
+        self.assertNotIn("Traceback", stderr.read_text())
+
+    def test_clean_preserves_telemetry_and_report_skips_unreadable_lines(self):
+        self.configure(language="en")
+        self.start("telemetry-clean")
+        self.wait("telemetry-clean")
+        self.until(lambda: len(self.telemetry_journal()) == 1)
+        path = self.home / "codex-worker-log.jsonl"
+        before = path.read_bytes()
+        self.cli("clean", "telemetry-clean")
+        self.assertEqual(path.read_bytes(), before)
+        self.assertFalse((self.home / "claude-tasks" / "telemetry-clean").exists())
+        with path.open("a") as stream:
+            stream.write("{broken JSON\nnull\n[1, 2]\n")
+        report = json.loads(self.cli("report", "--repo", "repo", "--json"))
+        self.assertEqual(report["summary"]["tasks"], 1)
+        self.assertEqual(report["summary"]["turns"], 1)
+        self.assertEqual(report["tasks"][0]["slug"], "telemetry-clean")
+        self.assertIn("telemetry-clean", self.cli("report", "--repo", "repo"))
+
+    def test_report_aggregates_cost_reviews_rounds_resets_and_filters(self):
+        now = time.time()
+        recent = now - 86400
+        rows = []
+
+        def add(slug, phase, seconds, tokens=None, account="main", weekly=(None, None),
+                round_number=0, outcome="completed", status=None, verdict=None, findings=0,
+                angle=None, repo="repo", at=None, turn=1):
+            timestamp = recent + len(rows) if at is None else at
+            rows.append({"v": 1, "at": timestamp, "slug": slug, "repo": repo,
+                         "kind": "review" if phase == "review" else "work", "phase": phase,
+                         "turn": turn, "round": round_number, "angle": angle, "account": account,
+                         "thread": slug + "-thread", "started": timestamp - seconds,
+                         "finished": timestamp, "active_seconds": seconds, "sleep_seconds": 0,
+                         "outcome": outcome, "result_status": status, "verdict": verdict,
+                         "findings": findings, "decisions": {"fixed": 0, "rejected": 0},
+                         "check_outcome": outcome if phase == "check" else None,
+                         "check_seconds": seconds if phase == "check" else None, "rotations": 0,
+                         "tokens": dict(zip(("input", "cached_input", "output", "reasoning"), tokens))
+                         if tokens is not None else {"input": None, "cached_input": None,
+                                                     "output": None, "reasoning": None},
+                         "weekly_used_before": weekly[0], "weekly_used_after": weekly[1]})
+
+        add("alpha", "work", 120, (100, 40, 20, 5), weekly=(10, 12), status="done")
+        add("alpha", "check", 30, outcome="passed")
+        add("alpha", "review", 60, (50, 10, 10, 4), weekly=(12, 13), verdict="defects",
+            findings=2, angle="correctness")
+        add("alpha", "fix", 120, (100, 80, 20, 5), weekly=(13, 15), round_number=1, status="done")
+        add("alpha", "check", 20, round_number=1, outcome="failed")
+        add("alpha", "review", 60, (50, 20, 10, 4), weekly=(15, 16), round_number=1,
+            verdict="clean", angle="correctness")
+        add("beta", "review", 20, (10, 5, 2, 1), account="second", weekly=(2, 3),
+            verdict="clean", angle="correctness")
+        add("beta", "review", 20, (10, 5, 2, 1), account="second", weekly=(3, 4),
+            verdict="defects", findings=1, angle="performance")
+        add("beta", "work", 60, (200, 100, 40, 10), account="second", weekly=(95, 2),
+            outcome="budget_exhausted", status="partial", turn=2)
+        add("old", "work", 600, (1000, 500, 200, 20), weekly=(1, 5),
+            outcome="failed", status="blocked", at=now - 8 * 86400)
+        add("other-repo", "work", 60, (5, 0, 1, 0), weekly=(20, 30), status="done", repo="other")
+        path = self.home / "codex-worker-log.jsonl"
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--repo", "repo", "--json"))
+        summary = report["summary"]
+        self.assertEqual((summary["tasks"], summary["turns"]), (2, 7))
+        self.assertAlmostEqual(summary["active_hours"], 510 / 3600)
+        self.assertEqual(summary["tokens"], {"input": 520, "cached_input": 260, "output": 104,
+                                             "reasoning": 30, "total": 624, "cached_input_fraction": 0.5})
+        self.assertEqual(summary["weekly_used_percent"], 8)
+        self.assertEqual(summary["checks"], {"total": 2, "passed": 1, "pass_fraction": 0.5})
+        self.assertEqual(summary["reviews"], {"total": 4, "with_defects": 2, "defect_fraction": 0.5,
+                                              "findings": 3, "average_findings": 0.75})
+        self.assertEqual(summary["fix_rounds_to_clean"], {"1": 1})
+        self.assertEqual(summary["outcomes"], {"completed": 1, "budget_exhausted": 1})
+        self.assertEqual(summary["result_status"], {"done": 1, "partial": 1})
+        self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
+                         {"main": 6, "second": 2})
+        self.assertEqual([row["slug"] for row in report["tasks"]], ["alpha", "beta"])
+        self.assertEqual([(row["turns"], row["rounds"], row["tokens"]["total"], row["weekly_used_percent"],
+                           row["last_verdict"]) for row in report["tasks"]],
+                         [(4, 1, 360, 6, "clean"), (3, 0, 264, 2, "defects")])
+        self.assertAlmostEqual(report["tasks"][0]["active_minutes"], 410 / 60)
+        self.assertEqual(report["filters"], {"repo": "repo", "slug": None})
+        month = json.loads(self.cli("report", "--since", "30d", "--repo", "repo", "--json"))
+        self.assertEqual(month["summary"]["tasks"], 3)
+        self.assertEqual(month["summary"]["tokens"]["total"], 1824)
+        self.assertEqual(month["summary"]["weekly_used_percent"], 12)
+        date = datetime.datetime.fromtimestamp(now - 2 * 86400, datetime.timezone.utc).date().isoformat()
+        dated = json.loads(self.cli("report", "--since", date, "--repo", "repo", "--json"))
+        self.assertEqual(dated["summary"], summary)
+        beta = json.loads(self.cli("report", "--slug", "beta", "--json"))
+        self.assertEqual(beta["summary"]["tasks"], 1)
+        self.assertEqual(beta["summary"]["weekly_used_percent"], 2)
+        self.assertEqual(beta["tasks"][0]["slug"], "beta")
+        unfiltered = json.loads(self.cli("report", "--json"))
+        self.assertEqual(unfiltered["summary"]["tasks"], 3)
+        self.assertEqual(unfiltered["summary"]["weekly_used_percent"], 18)
+        text = self.cli("report", "--repo", "repo")
+        self.assertIn("alpha", text)
+        self.assertIn("beta", text)
+        self.assertLess(text.index("alpha"), text.index("beta"))
+
+    def test_report_review_verdict_ignores_refused_angles_but_requires_completed_review(self):
+        now = time.time()
+        rows = []
+        cases = {
+            "partly-clean": [("completed", "clean"), ("refused", None)],
+            "partly-defects": [("completed", "defects"), ("refused", None)],
+            "all-refused": [("refused", None), ("refused", None)],
+            "partly-failed": [("completed", "clean"), ("failed", None)],
+            "partly-incomplete": [("completed", "clean"), ("completed", None)],
+            "partly-stopped": [("completed", "clean"), ("stopped", "clean")],
+        }
+        for slug, angles in cases.items():
+            for index, (outcome, verdict) in enumerate(angles):
+                rows.append({"v": 1, "at": now - 100 + len(rows), "repo": "repo", "slug": slug,
+                             "phase": "review", "kind": "review", "turn": 1, "round": 0,
+                             "angle": ("correctness", "concurrency")[index],
+                             "outcome": outcome, "verdict": verdict,
+                             "findings": 1 if verdict == "defects" else 0})
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual({row["slug"]: row["last_verdict"] for row in report["tasks"]},
+                         {"partly-clean": "clean", "partly-defects": "defects", "all-refused": None,
+                          "partly-failed": None, "partly-incomplete": None, "partly-stopped": None})
+        self.assertEqual(report["summary"]["fix_rounds_to_clean"], {"0": 1})
+        self.assertEqual(report["summary"]["reviews"]["total"], 5)
+        self.assertEqual(report["summary"]["reviews"]["with_defects"], 1)
+        self.assertEqual({row["slug"]: row["outcome"] for row in report["tasks"]},
+                         {"partly-clean": "completed", "partly-defects": "completed", "all-refused": "refused",
+                          "partly-failed": "failed", "partly-incomplete": "completed", "partly-stopped": "stopped"})
+
+    def test_report_latest_work_result_clears_stale_status_and_review_preserves_it(self):
+        now = time.time()
+        cases = {
+            "failed-work": [("work", "work", "failed", None)],
+            "failed-fix": [("fix", "work", "failed", None)],
+            "untyped-work": [("work", "work", "completed", None)],
+            "scout": [("scout", "scout", "completed", None)],
+            "review-check": [("review", "review", "completed", None),
+                             ("check", "work", "failed", None)],
+            "work-wrapup": [("wrapup", "work", "completed", "partial")],
+            "untyped-work-wrapup": [("wrapup", "work", "completed", None)],
+            "review-wrapup": [("wrapup", "review", "completed", None)],
+            "scout-wrapup": [("wrapup", "scout", "completed", None)],
+        }
+        rows = []
+        for slug, stages in cases.items():
+            for phase, kind, outcome, status in [("work", "work", "completed", "done")] + stages:
+                rows.append({"v": 1, "at": now - 100 + len(rows), "repo": "repo", "slug": slug,
+                             "phase": phase, "kind": kind, "outcome": outcome, "result_status": status})
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual({row["slug"]: row["result_status"] for row in report["tasks"]},
+                         {"failed-work": None, "failed-fix": None, "untyped-work": None, "scout": None,
+                          "review-check": "done", "work-wrapup": "partial", "untyped-work-wrapup": None,
+                          "review-wrapup": "done", "scout-wrapup": "done"})
+        self.assertEqual(report["summary"]["result_status"], {"done": 3, "partial": 1})
+
+    def test_report_stopped_checks_override_model_outcome_and_failures_preserve_it(self):
+        now = time.time()
+        cases = {
+            "stopped-check": ("check", "stopped", "stopped"),
+            "failed-check": ("check", "failed", "failed"),
+            "timeout-check": ("check", "timeout", "timeout"),
+            "stopped-base": ("base_check", "stopped", "failed"),
+            "marked-stopped": ("check", "completed", "stopped"),
+            "recovered": ("check", "stopped", "stopped"),
+        }
+        rows = []
+        for slug, (phase, outcome, check_outcome) in cases.items():
+            stages = [{"phase": "work", "outcome": "completed", "result_status": "done"},
+                      {"phase": phase, "outcome": outcome, "check_outcome": check_outcome}]
+            if slug == "recovered":
+                stages.append({"phase": "work", "outcome": "completed", "result_status": "done"})
+            for stage in stages:
+                rows.append(dict(stage, v=1, at=now - 100 + len(rows), repo="repo", slug=slug, kind="work"))
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual({row["slug"]: row["outcome"] for row in report["tasks"]},
+                         {"stopped-check": "stopped", "failed-check": "completed", "timeout-check": "completed",
+                          "stopped-base": "stopped", "marked-stopped": "stopped", "recovered": "completed"})
+        self.assertEqual(report["summary"]["outcomes"], {"completed": 3, "stopped": 3})
+
+    def test_telemetry_rollout_usage_keeps_independent_counters_and_ignores_malformed_records(self):
+        worker = self.worker()
+        path = self.root / "telemetry-rollout.jsonl"
+
+        def token_count(usage=None, rates=None):
+            payload = {"type": "token_count"}
+            if usage is not None:
+                payload["info"] = {"total_token_usage": usage}
+            if rates is not None:
+                payload["rate_limits"] = rates
+            return {"type": "event_msg", "payload": payload}
+
+        historical = token_count(self.telemetry_usage(900, 800, 90, 50),
+                                 {"primary": {"used_percent": 99, "window_minutes": 10080}})
+        path.write_text(json.dumps(historical) + "\n")
+        offset = path.stat().st_size
+        records = [token_count({"input_tokens": 100}), None, [], {"payload": []},
+                   token_count(self.telemetry_usage(125, 40, 10, 5), {
+                       "primary": {"used_percent": 90, "window_minutes": 300},
+                       "secondary": {"used_percent": 10, "window_minutes": 10080}}),
+                   token_count(rates={"primary": {"used_percent": 12, "window_minutes": 10080}}),
+                   token_count(self.telemetry_usage(150, 60, 30, 10)),
+                   token_count({"input_tokens": True, "cached_input_tokens": -1,
+                                "output_tokens": "bad", "reasoning_output_tokens": float("inf")},
+                               {"primary": {"used_percent": 101, "window_minutes": 10080}})]
+        with path.open("a") as stream:
+            stream.write("{unreadable JSON\n")
+            stream.write("\n".join(json.dumps(record) for record in records) + "\n")
+        first, last = worker.rollout_usage(path, offset)
+        self.assertEqual(first, {"tokens": {"input": 100, "cached_input": 40, "output": 10,
+                                             "reasoning": 5}, "weekly": 10})
+        self.assertEqual(last, {"tokens": {"input": 150, "cached_input": 60, "output": 30,
+                                            "reasoning": 10}, "weekly": 12})
+        self.assertEqual(worker.rollout_usage(self.root / "missing-rollout.jsonl"), (None, None))
+        phase = worker.PhaseTelemetry({"slug": "rollout-fallback"}, "work")
+        before = {"tokens": {"input": None, "cached_input": None, "output": 5, "reasoning": None},
+                  "weekly": 7}
+        phase.add_usage("main", "thread", before, path, offset)
+        self.assertEqual(phase.usage[0]["tokens"], {"input": 50, "cached_input": 20,
+                                                    "output": 25, "reasoning": 5})
+        self.assertEqual((phase.usage[0]["weekly_used_before"], phase.usage[0]["weekly_used_after"]), (10, 12))
+        usage_only = self.root / "usage-only-rollout.jsonl"
+        usage_only.write_text("\n".join(json.dumps(token_count(usage)) for usage in
+                                       [self.telemetry_usage(100, 40, 10, 5),
+                                        self.telemetry_usage(150, 60, 30, 10)]) + "\n")
+        phase.add_usage("main", "thread", before, usage_only, 0)
+        self.assertEqual((phase.usage[1]["weekly_used_before"], phase.usage[1]["weekly_used_after"]), (7, 7))
 
     def test_stats_and_clean_include_review_threads_and_account_homes(self):
         self.configure()
