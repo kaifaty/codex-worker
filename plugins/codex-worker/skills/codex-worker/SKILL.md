@@ -106,9 +106,11 @@ not run checks. Inside an automatic fix cycle, an incomplete result stops immedi
 
 The supervisor guards test directories (`tests/`, `test/`, `__tests__/`, `spec/`), test filenames
 (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`), and CI paths (`.github/workflows/`,
-`.gitlab-ci.yml`, `.forgejo/workflows/`). It also guards existing repository paths named in the saved
-check command and patterns passed with repeatable `start --guard "GLOB"`; these patterns persist in
-task state. After a work turn, `wait` prints `guarded files changed` with each changed file's added and
+`.gitlab-ci.yml`, `.forgejo/workflows/`). It also guards existing relative repository paths in top-level
+check tokens (including `NAME=path` and `--opt=path`) and patterns passed with repeatable
+`start --guard "GLOB"`; discovered paths and patterns persist in task state, even after deletion.
+Add paths inside `sh -c '…'` through `--guard`, since nested shell commands are not inspected.
+After a work turn, `wait` prints `guarded files changed` with each changed file's added and
 deleted line counts across the base-to-HEAD diff and uncommitted changes. It separately flags deleted
 guarded files and added `skip`/`xfail`/`only` markers. Review prompts name the files and ask the reviewer
 to look for removed assertions, skips, wider tolerances, and mocks replacing the code under test.
@@ -120,6 +122,8 @@ the same command, then removes the worktree. The check record includes the base 
 code, and duration. `wait` prints `== base tests: passed/FAILED` with a log tail. Failure is a signal
 to examine: a legitimate behavior change can explain it, and review still runs. This option persists
 across turns; `say --no-base-check` disables it.
+Use relative paths with `--base-check`: a command containing the task worktree's absolute path
+produces `== base tests: skipped (…)` and is not rerun.
 
 Use `start --review --fix-rounds 2 --check "<command from Checks>"` by default. `--fix-rounds N` on
 `start` or `say` accepts 0–5, defaults to 0, and requires `--review`. Each round sends the review's

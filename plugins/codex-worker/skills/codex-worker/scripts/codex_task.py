@@ -838,117 +838,23 @@ def scout_prompt(question, cfg=None):
     return question.rstrip() + "\n\n" + rules
 
 
-SHELL_WORD = re.compile(r"""(?:[^\s;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\.)+""")
-SHELL_NAMES = {"sh", "bash", "dash", "zsh", "ksh"}
-
-
-def shell_literal_prefix(raw):
-    """Decode a shell word up to its first expansion, retaining the quote context."""
-    literal, quote, index = [], "", 0
-    while index < len(raw):
-        char = raw[index]
-        if char == quote:
-            quote = ""
-        elif char in "\"'" and not quote:
-            quote = char
-        elif char == "\\" and quote != "'" and index + 1 < len(raw):
-            following = raw[index + 1]
-            if not quote or following in '$`"\\\n':
-                if following != "\n":
-                    literal.append(following)
-                index += 2
-                continue
-            literal.append(char)
-        elif quote != "'" and (char in "$`" or (not quote and char in "*?[")):
-            break
-        else:
-            literal.append(char)
-        index += 1
-    return "".join(literal), quote, index
-
-
-def shell_script_words(command):
-    """Locate literal command arguments of shell -c invocations, not string data."""
-    at_command, shell, command_flag, end_options = True, False, False, False
-    wrapper, option_value = "", False
-    previous, comment_end = 0, -1
-    for match in SHELL_WORD.finditer(command):
-        if match.start() < comment_end:
-            continue
-        gap = command[previous:match.start()].replace("\\\n", "")
-        previous = match.end()
-        if re.search(r"[;&|()\n]", gap):
-            at_command, shell, command_flag, end_options = True, False, False, False
-            wrapper, option_value = "", False
-        raw = match.group()
-        if raw.startswith("#"):
-            newline = command.find("\n", match.end())
-            comment_end = len(command) if newline < 0 else newline
-            continue
-        value, quote, consumed = shell_literal_prefix(raw)
-        literal = consumed == len(raw) and not quote
-        if option_value:
-            option_value = False
-            continue
-        if at_command:
-            if literal and raw == value and value in ("!", "if", "then", "elif", "else", "while", "until", "do", "{"):
-                continue
-            assignment = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", value)
-            if assignment and (raw.startswith(assignment[0]) or wrapper == "env"):
-                continue
-            if literal and value in ("env", "command", "exec"):
-                wrapper = value
-                continue
-            if wrapper and literal and value.startswith("-"):
-                if wrapper == "command" and value in ("-v", "-V"):
-                    at_command = False
-                option_value = ((wrapper == "env" and value in ("-u", "--unset", "-C", "--chdir"))
-                                or (wrapper == "exec" and value == "-a"))
-                continue
-            shell = literal and Path(value).name in SHELL_NAMES
-            at_command = False
-        elif shell:
-            if not end_options and literal and value.startswith("-"):
-                if value == "--":
-                    end_options = True
-                elif value in ("-o", "-O", "--rcfile", "--init-file"):
-                    option_value = True
-                elif not value.startswith("--") and "c" in value[1:]:
-                    command_flag = True
-                continue
-            if command_flag:
-                yield match, value if literal else None
-            shell = False
-
-
-def check_commands(command, depth=0):
-    """Inspect nested literal shell scripts without evaluating their expansions."""
-    yield command
-    if depth < 16:
-        for _, script in shell_script_words(command):
-            if script is not None:
-                yield from check_commands(script, depth + 1)
-
-
 def check_paths(st):
-    """Read literal repository paths from the shell command without executing it."""
+    """Remember existing relative paths from top-level check command tokens."""
     paths = set(st.get("check_paths", []))
     root = Path(st["worktree"])
     try:
-        tokens = []
-        for command in check_commands(st.get("check") or ""):
-            lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-            lexer.whitespace_split = True
-            tokens.extend(lexer)
+        tokens = shlex.split(st.get("check") or "", posix=True)
     except ValueError:
-        return sorted(paths)
+        tokens = []
+    candidates = []
     for token in tokens:
-        candidate = token
+        candidates.append(token)
         if "=" in token:
             name, value = token.split("=", 1)
-            if token.startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-                candidate = value
-        if not candidate:
+            if token.startswith("--") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                candidates.append(value)
+    for candidate in candidates:
+        if not candidate or Path(candidate).is_absolute():
             continue
         path = Path(os.path.abspath(root / candidate))
         try:
@@ -962,7 +868,8 @@ def check_paths(st):
             continue
         if exists:
             paths.add(relative)
-    return sorted(paths)
+    st["check_paths"] = sorted(paths)
+    return st["check_paths"]
 
 
 def guarded_path(path, st, paths):
@@ -1077,8 +984,11 @@ def review_prompt(st, cfg=None):
                      "Do not rerun the full test suite. Run only targeted checks to confirm a specific finding.\n"))
         if check.get("base_check"):
             base = check["base_check"]
-            context += (f"Base tests: {base['outcome']} (exit {base['exit']}, {base['seconds']:.0f} s).\n"
-                        + base.get("tail", "") + "\n")
+            if base["outcome"] == "skipped":
+                context += f"Base tests: skipped ({base['reason']}).\n"
+            else:
+                context += (f"Base tests: {base['outcome']} (exit {base['exit']}, {base['seconds']:.0f} s).\n"
+                            + base.get("tail", "") + "\n")
             context += (("Это сигнал для ревью; причиной может быть законная смена поведения.\n") if ru else
                         ("This is review evidence; a legitimate behavior change may explain a failure.\n"))
     rejected = []
@@ -1695,48 +1605,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
 
-def relocate_check_command(command, source, target, depth=0):
-    """Move absolute path arguments into the base worktree, preserving shell syntax."""
-    source = Path(os.path.abspath(source))
-    target = Path(os.path.abspath(target))
-    if depth > 16:
-        raise ValueError("base check shell nesting exceeds 16 levels")
-    scripts = {}
-    for match, script in shell_script_words(command):
-        if script is None:
-            raise ValueError("base check cannot safely relocate an expanded shell -c command")
-        relocated = relocate_check_command(script, source, target, depth + 1)
-        if relocated != script:
-            scripts[match.start()] = shlex.quote(relocated)
-
-    def relocate(match):
-        raw = match.group()
-        if match.start() in scripts:
-            return scripts[match.start()]
-        # Decode only the literal prefix. Keep expansions and their quote
-        # context intact, rather than turning $variables or globs into text.
-        token, quote, index = shell_literal_prefix(raw)
-        prefix, candidate = "", token
-        if not token.startswith("/") and "=" in token:
-            prefix, candidate = token.split("=", 1)
-            prefix += "="
-        if not candidate.startswith("/"):
-            return raw
-        try:
-            relative = Path(os.path.normpath(candidate)).relative_to(source)
-        except ValueError:
-            return raw
-        rebased = str(target / relative) + ("/" if candidate.endswith("/") else "")
-        if prefix and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=", prefix) and raw.startswith(prefix):
-            replacement = prefix + shlex.quote(rebased)
-        else:
-            replacement = shlex.quote(prefix + rebased)
-        return replacement + quote + raw[index:]
-
-    return SHELL_WORD.sub(relocate, command)
-
-
-def execute_check(st, stopped, cwd, filename, command=None):
+def execute_check(st, stopped, cwd, filename):
     """Run the saved check after work, owning and reaping its process group."""
     if stopped():
         return None
@@ -1746,7 +1615,7 @@ def execute_check(st, stopped, cwd, filename, command=None):
     code = None
     with (TASKS / st["slug"] / filename).open("wb") as log:
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", st["check"] if command is None else command], cwd=cwd,
+            proc = subprocess.Popen(["/bin/sh", "-c", st["check"]], cwd=cwd,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             st["check_pid"] = proc.pid
             save(st)
@@ -1780,9 +1649,11 @@ def execute_check(st, stopped, cwd, filename, command=None):
 
 
 def run_check(st, stopped):
+    check_paths(st)
     result = execute_check(st, stopped, st["worktree"], "check.log")
     if result is None:
         return None
+    check_paths(st)
     st.setdefault("checks", []).append(result)
     save(st)
     return result
@@ -1790,6 +1661,8 @@ def run_check(st, stopped):
 
 def run_base_check(st, stopped):
     """Check task HEAD with the base's guarded files, leaving the task untouched."""
+    if st["worktree"] in st["check"]:
+        return {"outcome": "skipped", "reason": "check command uses the task worktree's absolute path"}
     started = time.monotonic()
     log = TASKS / st["slug"] / "base-check.log"
     log.write_text("", encoding="utf-8")
@@ -1811,8 +1684,7 @@ def run_base_check(st, stopped):
                                     "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
                                    input="\0".join(sorted(guarded)) + "\0", text=True,
                                    cwd=worktree, check=True, capture_output=True)
-                command = relocate_check_command(st["check"], st["worktree"], worktree)
-                execution = execute_check(st, stopped, worktree, "base-check.log", command=command)
+                execution = execute_check(st, stopped, worktree, "base-check.log")
                 if execution is not None:
                     result = {key: execution[key] for key in ("outcome", "exit", "seconds")}
                     if result["outcome"] == "stopped":
@@ -1821,7 +1693,7 @@ def run_base_check(st, stopped):
                 if (worktree / ".git").exists():
                     subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
                                    cwd=st["worktree"], check=True, capture_output=True)
-    except (OSError, ValueError, subprocess.CalledProcessError, SystemExit) as exc:
+    except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
         detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         if isinstance(detail, bytes):
             detail = detail.decode("utf-8", errors="replace")
@@ -2023,7 +1895,7 @@ def cmd_start(a):
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
           "created": time.time(), "turns": 0}
-    st["check_paths"] = check_paths(st)
+    check_paths(st)
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
@@ -2088,8 +1960,8 @@ def cmd_say(a):
         st["check_paths"] = []
     elif a.check is not None:
         st["check"] = a.check
-        st["check_paths"] = []
-        st["check_paths"] = check_paths(st)
+    if st.get("check"):
+        check_paths(st)
     if a.no_base_check:
         st["base_check"] = False
     if a.check_timeout is not None:
@@ -2166,7 +2038,11 @@ def cmd_wait(a):
         else:
             raw = last.read_text().strip() if last.exists() else last_message(st) or "(no final message)"
             print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
-    for line in guarded_lines(guarded_changes(st)):
+    previous_paths = set(st.get("check_paths", []))
+    changes = guarded_changes(st)
+    if not alive(st.get("pid")) and set(st.get("check_paths", [])) - previous_paths:
+        save(st)
+    for line in guarded_lines(changes):
         print(line)
     for number, entry in enumerate(st.get("rounds", []), 1):
         findings = (entry.get("review") or {}).get("findings", [])
@@ -2191,9 +2067,12 @@ def cmd_wait(a):
             print(check.get("tail", check_tail(st)))
         if check.get("base_check"):
             base = check["base_check"]
-            label = "passed" if base["outcome"] == "passed" else "FAILED"
-            reason = "timeout, " if base["outcome"] == "timeout" else ""
-            print(f"== base tests: {label} ({reason}exit {base['exit']}, {base['seconds']:.0f} s)")
+            if base["outcome"] == "skipped":
+                print(f"== base tests: skipped ({base['reason']})")
+            else:
+                label = "passed" if base["outcome"] == "passed" else "FAILED"
+                reason = "timeout, " if base["outcome"] == "timeout" else ""
+                print(f"== base tests: {label} ({reason}exit {base['exit']}, {base['seconds']:.0f} s)")
             if base.get("tail"):
                 print(base["tail"])
     if st.get("review_skipped"):

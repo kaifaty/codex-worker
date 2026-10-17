@@ -1548,13 +1548,37 @@ class RotationTests(unittest.TestCase):
 
     def test_check_paths_find_assignments_options_and_literal_equals_paths(self):
         files = {"scripts/verify.sh": "exit 0\n", "scripts/check=literal.sh": "exit 0\n",
-                 "config/check.toml": "enabled = true\n"}
+                 "verify=literal.sh": "exit 0\n", "config/check.toml": "enabled = true\n"}
         self.commit_fixture(files)
-        command = ('CHECK_SCRIPT=scripts/verify.sh; EMPTY=; sh "$CHECK_SCRIPT" '
-                   '--config=config/check.toml scripts/check=literal.sh')
+        command = ('CHECK_SCRIPT=scripts/verify.sh EMPTY= sh "$CHECK_SCRIPT" '
+                   '--config=config/check.toml scripts/check=literal.sh verify=literal.sh')
         paths = self.worker().check_paths({"worktree": str(self.repo), "check": command})
         self.assertEqual(paths, sorted(files))
         self.assertNotIn(".", paths, "an empty assignment must not guard every repository file")
+
+    def test_check_paths_only_inspect_relative_top_level_tokens(self):
+        self.commit_fixture({"scripts/verify.sh": "exit 0\n"})
+        worker = self.worker()
+        for command in ("sh -c 'sh scripts/verify.sh'",
+                        "sh " + shlex.quote(str(self.repo / "scripts/verify.sh")),
+                        "sh scripts/verify.sh 'unterminated"):
+            with self.subTest(command=command):
+                state = {"worktree": str(self.repo), "check": command}
+                self.assertEqual(worker.check_paths(state), [])
+
+    def test_check_paths_save_union_and_remember_deleted_files(self):
+        self.commit_fixture({"scripts/first.sh": "exit 0\n", "scripts/second.sh": "exit 0\n"})
+        worker = self.worker()
+        state = {"worktree": str(self.repo), "check": "sh scripts/first.sh"}
+        self.assertEqual(worker.check_paths(state), ["scripts/first.sh"])
+        self.assertEqual(state["check_paths"], ["scripts/first.sh"])
+        state["check"] = "sh scripts/second.sh"
+        self.assertEqual(worker.check_paths(state), ["scripts/first.sh", "scripts/second.sh"])
+        (self.repo / "scripts/first.sh").unlink()
+        (self.repo / "scripts/second.sh").unlink()
+        state["check"] = "sh 'unterminated"
+        self.assertEqual(worker.check_paths(state), ["scripts/first.sh", "scripts/second.sh"])
+        self.assertEqual(state["check_paths"], ["scripts/first.sh", "scripts/second.sh"])
 
     def test_check_assignment_script_is_guarded_restored_and_reviewed(self):
         self.configure(language="en")
@@ -1564,7 +1588,7 @@ class RotationTests(unittest.TestCase):
             {"mode": "complete", "write_files": {"scripts/verify.sh": "exit 0\n"},
              "commit_files": ["scripts/verify.sh"]},
             {"mode": "complete", "reply": self.review_result(False)}])
-        command = 'CHECK_SCRIPT=scripts/verify.sh; sh "$CHECK_SCRIPT"'
+        command = "CHECK_SCRIPT=scripts/verify.sh sh -c 'sh \"$CHECK_SCRIPT\"'"
         self.start("guarded-assignment", "--review", "--check", command, "--base-check")
         output = self.wait("guarded-assignment")
         state = self.state("guarded-assignment")
@@ -1645,154 +1669,36 @@ class RotationTests(unittest.TestCase):
         self.assertFalse((Path(state["worktree"]) / "tests/test_removed.py").exists())
         self.assertTrue((Path(state["worktree"]) / "tests/test_new.py").is_file())
 
-    def test_base_check_relocates_absolute_test_and_environment_paths(self):
+    def test_base_check_skips_absolute_task_paths_and_still_reviews(self):
         self.configure(language="en")
-        slug = "guarded-absolute"
-        test_name = "tests/test a'quoted.py"
-        base_test = ("import os\nfrom pathlib import Path\n"
-                     "print('restored absolute test ran', flush=True)\n"
-                     "assert Path(os.environ['TASK_VALUE']).read_text() == 'expected\\n', 'base input not restored'\n"
-                     "assert Path(os.environ['TASK_VALUE']).parent == Path(__file__).resolve().parents[1], 'environment path not relocated'\n"
-                     "assert Path('src/a.txt').read_text() == 'expected\\n', 'base assertion failed'\n")
-        self.commit_fixture({test_name: base_test, "value.txt": "expected\n", "src/a.txt": "expected\n"})
+        self.commit_fixture({"tests/test_a.py": "assert False, 'base assertion'\n"})
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "complete", "write_files": {
-                test_name: "print('weakened absolute test passed')\n", "value.txt": "broken\n", "src/a.txt": "broken\n"},
-             "commit_files": [test_name, "value.txt", "src/a.txt"]},
+            {"mode": "complete", "write_files": {"tests/test_a.py": "print('weakened test passed')\n"},
+             "commit_files": ["tests/test_a.py"]},
             {"mode": "complete", "reply": self.review_result(False)}])
+        slug = "guarded-absolute"
         worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
-        command = ("TASK_VALUE=" + shlex.quote(str(worktree / "value.txt")) + " " + shlex.quote(PYTHON)
-                   + " -I \\\n" + shlex.quote(str(worktree / test_name)) + " && printf 'check completed\\n'")
+        command = shlex.quote(PYTHON) + " -I " + shlex.quote(str(worktree / "tests/test_a.py"))
+        reason = "check command uses the task worktree's absolute path"
         self.start(slug, "--review", "--check", command, "--base-check")
         output = self.wait(slug)
         state = self.state(slug)
         check = state["checks"][-1]
         self.assertEqual(state["check"], command, "the saved command must remain unchanged")
         self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
-        self.assertEqual((check["base_check"]["outcome"], check["base_check"]["exit"]), ("failed", 1))
-        self.assertIn("restored absolute test ran", output)
-        self.assertIn("base assertion failed", output)
-        self.assertIn("== base tests: FAILED", output)
+        self.assertEqual(check["base_check"], {"outcome": "skipped", "reason": reason})
+        self.assertIn("== base tests: skipped (" + reason + ")", output)
         self.assertEqual(len(self.review_invocations()), 1)
-        self.assertIn("Base tests: failed", self.review_invocations()[0]["prompt"])
-        self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
-        self.assertEqual((worktree / "value.txt").read_text(), "broken\n")
-        self.assertIn("weakened absolute test", (worktree / test_name).read_text())
-
-    def test_base_check_relocates_nested_shell_commands(self):
-        self.configure(language="en")
-        self.configure_notify()
-        test_name = "tests/test nested'a.py"
-        original = "print('restored nested base test', flush=True)\nassert False, 'nested base assertion'\n"
-        changed = "print('weakened nested test')\n"
-        self.commit_fixture({test_name: original})
-        runs = []
-        for _ in range(2):
-            runs.extend([{"mode": "complete", "write_files": {test_name: changed}, "commit_files": [test_name]},
-                         {"mode": "complete", "reply": self.review_result(False)}])
-        self.account(self.home, "A", self.reset, runs=runs)
-        for depth in (1, 2):
-            with self.subTest(depth=depth):
-                slug = "guarded-nested-" + str(depth)
-                worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
-                command = shlex.quote(PYTHON) + " -I " + shlex.quote(str(worktree / test_name))
-                for _ in range(depth):
-                    command = "sh -c " + shlex.quote(command)
-                self.start(slug, "--review", "--check", command, "--base-check")
-                output = self.wait(slug)
-                state = self.state(slug)
-                check = state["checks"][-1]
-                self.assertEqual(state["check"], command)
-                self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
-                self.assertEqual((check["base_check"]["outcome"], check["base_check"]["exit"]), ("failed", 1))
-                self.assertIn("restored nested base test", check["base_check"]["tail"])
-                self.assertIn("nested base assertion", check["base_check"]["tail"])
-                self.assertNotIn("weakened nested test", check["base_check"]["tail"])
-                self.assertIn("== base tests: FAILED", output)
-                self.assertEqual(len(self.review_invocations()), depth)
-                self.assertEqual(self.notification(slug, "turn_finished")["guarded_changed"], 1)
-                self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
-                self.assertEqual((worktree / test_name).read_text(), changed)
-
-    def test_nested_shell_relocation_preserves_flags_wrappers_and_string_data(self):
-        worker = self.worker()
-        source, target = self.root / "task 'source", self.root / "base 'target"
-        script = "scripts/verify nested's.sh"
-        for directory, label in ((source, "original"), (target, "base")):
-            (directory / "scripts").mkdir(parents=True)
-            (directory / script).write_text("printf '" + label + " check\\n'\n")
-        body = "sh " + shlex.quote(str(source / script))
-        display = "sh -c " + shlex.quote(body)
-        wrappers = ("sh -c ", "/bin/sh -ec ", "command sh -o errexit -c ",
-                    "env NESTED_CHECK=1 /bin/sh -e -c ",
-                    'ASSIGNED_VALUE="$NESTED_MARK" sh -c ',
-                    'env ASSIGNED_VALUE="$NESTED_MARK" sh -c ',
-                    "env 'ASSIGNED_VALUE=literal' sh -c ",
-                    'env "ASSIGNED_VALUE=$NESTED_MARK" sh -c ')
-        invocations = [wrapper + shlex.quote(body) for wrapper in wrappers]
-        invocations.append("sh -c " + shlex.quote(invocations[0]))
-        invocations.append("if true; then " + invocations[0] + "; fi")
-        invocations.append("check_fn() { " + invocations[0] + "; }; check_fn")
-        for invocation in invocations:
-            with self.subTest(invocation=invocation):
-                command = invocation + " && printf '%s\\n' " + shlex.quote(display)
-                relocated = worker.relocate_check_command(command, source, target)
-                result = subprocess.run(["/bin/sh", "-c", relocated], cwd=target, env=self.env,
-                                        text=True, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "base check\n" + display + "\n")
-                self.assertIn(script, worker.check_paths({"check": command, "worktree": str(source)}))
-        assigned_body = "CHECK_SCRIPT=" + shlex.quote(str(source / script)) + '; sh "$CHECK_SCRIPT"'
-        self.assertIn(script, worker.check_paths({"check": "sh -c " + shlex.quote(assigned_body),
-                                                 "worktree": str(source)}))
-
-    def test_base_check_reports_expanded_nested_command_as_unverified(self):
-        self.configure(language="en")
-        self.commit_fixture({"tests/test_a.py": "assert False, 'original base test'\n"})
-        self.account(self.home, "A", self.reset, runs=[
-            {"mode": "complete", "write_files": {"tests/test_a.py": "print('weakened test')\n"},
-             "commit_files": ["tests/test_a.py"]},
-            {"mode": "complete", "reply": self.review_result(False)}])
-        slug = "guarded-expanded-shell"
-        worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
-        command = "CHECK_NAME=test_a.py; sh -c \"" + PYTHON + " -I " + str(worktree / "tests") + "/$CHECK_NAME\""
-        self.start(slug, "--review", "--check", command, "--base-check")
-        output = self.wait(slug)
-        check = self.state(slug)["checks"][-1]
-        self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
-        self.assertEqual(check["base_check"]["outcome"], "failed")
-        self.assertIsNone(check["base_check"]["exit"])
-        self.assertIn("cannot safely relocate an expanded shell -c command", check["base_check"]["tail"])
-        self.assertIn("== base tests: FAILED", output)
-        self.assertEqual(len(self.review_invocations()), 1)
-        self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
-
-    def test_relocated_check_preserves_shell_operators_options_and_external_paths(self):
-        worker = self.worker()
-        source = self.root / "task original'quoted"
-        target = self.root / "base temporary'quoted"
-        sibling = self.root / (source.name + "-sibling")
-        for directory in (source, target, sibling):
-            directory.mkdir()
-        script = "import sys\nfrom pathlib import Path\nprint(Path(sys.argv[1].split('=', 1)[1]).read_text().strip())\n"
-        for directory, value in ((source, "original"), (target, "base"), (sibling, "external")):
-            (directory / "check script.py").write_text(script)
-            (directory / "value.txt").write_text(value + "\n")
-        for argument in (shlex.quote(str(source / "check script.py")),
-                         "\\\n" + shlex.quote(str(source / "check script.py")),
-                         '"' + str(source) + '/$CHECK_NAME"', shlex.quote(str(source)) + "/check*.py"):
-            with self.subTest(argument=argument):
-                command = ("CHECK_NAME='check script.py'; " + shlex.quote(PYTHON) + " -I " + argument
-                           + " --input=" + shlex.quote(str(source / "value.txt"))
-                           + " | cat > " + shlex.quote(str(source / "result.txt"))
-                           + " && cat " + shlex.quote(str(sibling / "value.txt")))
-                relocated = worker.relocate_check_command(command, source, target)
-                result = subprocess.run(["/bin/sh", "-c", relocated], cwd=target, env=self.env,
-                                        text=True, capture_output=True, timeout=5)
-                self.assertEqual(result.returncode, 0, result.stderr)
-                self.assertEqual(result.stdout, "external\n")
-                self.assertEqual((target / "result.txt").read_text(), "base\n")
-                self.assertFalse((source / "result.txt").exists())
+        prompt = self.review_invocations()[0]["prompt"]
+        self.assertIn("Base tests: skipped", prompt)
+        self.assertIn(reason, prompt)
+        self.assertNotIn("== review skipped:", output)
+        self.assertFalse((self.home / "claude-tasks" / slug / "base-check.log").exists())
+        worktrees = self.git("worktree", "list", "--porcelain")
+        paths = {line[len("worktree "):] for line in worktrees.splitlines() if line.startswith("worktree ")}
+        self.assertEqual(paths, {str(self.repo), state["worktree"]})
+        self.assertNotIn("detached", worktrees)
+        self.assertIn("weakened test", (worktree / "tests/test_a.py").read_text())
 
     def test_say_disables_base_check_and_keeps_it_disabled(self):
         self.configure(language="en")
@@ -1876,6 +1782,33 @@ class RotationTests(unittest.TestCase):
         self.assertIn("== guarded files changed: scripts/verify.sh (+0 −1)", output)
         self.assertIn("== guarded files deleted: scripts/verify.sh", output)
         self.assertEqual(self.state("guarded-deleted-check")["checks"][-1]["outcome"], "passed")
+
+    def test_new_check_path_stays_guarded_after_later_turn_deletes_it(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"scripts/verify.sh": "exit 0\n"},
+             "commit_files": ["scripts/verify.sh"]},
+            {"mode": "complete", "remove_files": ["scripts/verify.sh"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        slug = "guarded-later-deleted-check"
+        self.start(slug, "--check", "test ! -e scripts/verify.sh || sh scripts/verify.sh")
+        self.wait(slug)
+        self.assertEqual(self.state(slug)["check_paths"], ["scripts/verify.sh"])
+        self.notification(slug, "turn_finished")
+        self.cli("say", slug, "Remove the generated check script", "--review")
+        output = self.wait(slug)
+        state = self.state(slug)
+        self.assertEqual(state["check_paths"], ["scripts/verify.sh"])
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertIn("== guarded files changed: scripts/verify.sh (+1 −1)", output)
+        self.assertIn("== guarded files deleted: scripts/verify.sh", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertIn("scripts/verify.sh", self.review_invocations()[0]["prompt"])
+        self.until(lambda: len([event for event in self.notifications(slug)
+                                if event["event"] == "turn_finished"]) == 2)
+        finished = [event for event in self.notifications(slug) if event["event"] == "turn_finished"]
+        self.assertEqual(finished[-1]["guarded_changed"], 1)
 
     def test_base_check_timeout_prints_tail_reviews_and_removes_worktree(self):
         self.configure(language="en")

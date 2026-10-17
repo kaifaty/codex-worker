@@ -165,16 +165,18 @@ evidence for that command; Claude must still read the actual diff and verify the
 
 `wait` names changed guarded files with added/deleted line counts, including uncommitted changes, and
 separately flags deleted files and added test-skip markers. Guards cover standard test and CI paths,
-existing repository paths in the saved check command, and saved, repeatable `start --guard "GLOB"`
-patterns. Review prompts list those files and ask whether checks were weakened; read them in full.
+existing relative repository paths in top-level check tokens (including `NAME=path` and `--opt=path`),
+and saved, repeatable `start --guard "GLOB"` patterns. Discovered paths stay guarded after deletion.
+Review prompts list those files and ask whether checks were weakened; read them in full.
+Add paths inside `sh -c '…'` through `--guard`, since nested shell commands are not inspected.
 
 For refactoring or optimization that should preserve behavior, add `start --base-check`. After a
 passing check, the supervisor reruns the command in a temporary detached worktree at the task's
 `HEAD`, with guarded files restored from the base (new files removed, deleted files restored), then
 removes that worktree. `wait` shows `== base tests: passed/FAILED` and a log tail. Failure is advisory:
 review still runs. The setting persists until `say --no-base-check` disables it.
-Literal `sh -c` commands are inspected recursively; a command expanded by the outer shell produces
-an explicit base-check failure when its paths cannot be safely relocated.
+Use relative paths with `--base-check`: a command containing the task worktree's absolute path
+produces `== base tests: skipped (…)` and is not rerun.
 
 ## Settings and language
 
