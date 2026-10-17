@@ -88,6 +88,27 @@ remove the worktree and archive its threads:
 python3 -I "$T" clean csv-export
 ```
 
+## Read code with a scout
+
+Before writing a brief about unfamiliar code, ask a scout a focused question. It reads the current
+directory on your ChatGPT subscription and returns a concise report with `file:line` references,
+verified facts, assumptions, relevant tests, and what it did not inspect. Check key facts by reading
+only the cited lines.
+
+```sh
+python3 -I "$T" scout csv-path "Where are export filters applied, and which tests cover them?" --repo .
+python3 -I "$T" wait csv-path
+python3 -I "$T" say csv-path "Does the same path handle empty results?"
+python3 -I "$T" wait csv-path
+python3 -I "$T" clean csv-path
+```
+
+Use `--file Q.md` instead of a quoted question, and `--effort E` to override reasoning effort.
+Scouts enforce a read-only sandbox in the existing checkout or worktree; they create no branch or
+worktree. Run scouts alongside implementation tasks or in parallel, one question per scout, without
+`--parallel`. Follow up with `say`; checks and reviews are not available for scouts. `clean` removes
+the scout's state and logs and archives its threads, leaving the inspected directory untouched.
+
 ## Commands
 
 Run all commands as `python3 -I "$T" <command>`.
@@ -95,6 +116,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | Command | Purpose |
 |---|---|
 | `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review] [--check CMD]` | Create a worktree and start implementation; `--brief -` reads stdin. |
+| `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
 | `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review`, replace the check with `--check CMD`, or remove it with `--no-check`. |
 | `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
@@ -140,7 +162,7 @@ A minimal configuration is:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated handoff, review, and reset-continuation prompts. Claude writes the brief in the user's configured language. |
+| `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated scout, handoff, review, and reset-continuation prompts. Claude writes the brief in the user's configured language. |
 | `accounts` | Absent | Explicit account list; its presence enables automatic limit monitoring and rotation. Without it, tasks use the existing `~/.codex` login. |
 | `switch_at` | `99` | Used-percentage threshold for configured accounts, greater than 0 and at most 100. |
 | `credits` | `false` | Allow continuing on credits if no configured account has ordinary usage available. |
@@ -154,7 +176,8 @@ monitoring or rotation. The `accounts` command remains available to inspect the 
 English standing rules are in `references/rules.md`; Russian rules are in `references/rules.ru.md`.
 If `~/.codex/codex-worker-rules.md` exists, it replaces both. Use this file for other languages or your
 own working rules. The worker substitutes `{branch}` and `{base}` in the selected rules.
-Account status labels are always English.
+Scouts use their own read-only instructions instead of these task rules. Account status labels are
+always English.
 
 `CODEX_TASK_HOME` can select another main Codex home. Settings, the rules override, task state, and
 worktrees then resolve under that home.
@@ -169,7 +192,7 @@ Notifications work even when Claude's session has ended. For macOS, add to `code
 }
 ```
 
-An argv hook receives one final JSON argument with `event`, `slug`, `repo`, `branch`, `account`, `at`,
+An argv hook receives one final JSON argument with `event`, `kind`, `slug`, `repo`, `branch`, `account`, `at`,
 and a short `message`. Event types are `turn_finished` (`outcome`), `paused` (`until`), `woke`,
 `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`.
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic

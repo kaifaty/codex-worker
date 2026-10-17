@@ -631,6 +631,226 @@ class RotationTests(unittest.TestCase):
         self.assertIn("== commits on ", output)
         return state
 
+    def assert_scout_read_only(self, invocation):
+        argv = invocation["argv"]
+        self.assertIn('sandbox_mode="read-only"', argv)
+        index = argv.index('sandbox_mode="read-only"')
+        self.assertGreater(index, 0)
+        self.assertEqual(argv[index - 1], "-c")
+
+    def assert_scout_output(self, output):
+        for section in ("commits on", "== uncommitted", "== check `", "== review"):
+            self.assertNotIn(section, output)
+
+    def test_scout_reads_current_checkout_with_english_rules_and_prints_brief(self):
+        (self.home / "config.toml").write_text('sandbox_mode = "danger-full-access"\n')
+        (self.home / "codex-worker-rules.md").write_text("TASK-RULES-MUST-NOT-REACH-SCOUT\n")
+        question = "Where does tracked.txt enter the application?"
+        reply = "Verified: tracked.txt:1 is fixture input. Tests: tests/test_rotation.py:1."
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": reply}])
+        (self.repo / "tracked.txt").write_text("Current uncommitted checkout contents\n")
+        (self.repo / "pending.txt").write_text("Keep this untracked file\n")
+        branches = self.git("branch", "--format=%(refname)")
+        worktrees = self.git("worktree", "list", "--porcelain")
+
+        self.cli("scout", "scout-current", question, "--effort", "high")
+        output = self.wait("scout-current")
+        state = self.state("scout-current")
+        invocation = self.invocations()[0]
+        self.assertEqual(state["kind"], "scout")
+        self.assertEqual(state["worktree"], str(self.repo))
+        self.assertEqual(state["effort"], "high")
+        self.assertEqual(invocation["cwd"], str(self.repo))
+        self.assert_scout_read_only(invocation)
+        self.assertIn('model_reasoning_effort="high"', invocation["argv"])
+        prompt = invocation["prompt"]
+        self.assertIn(question, prompt)
+        self.assertNotIn("TASK-RULES-MUST-NOT-REACH-SCOUT", prompt)
+        self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+        lower = prompt.lower()
+        self.assertRegex(lower, r"(?:do not|never|don't)[^\n]*(?:change|edit|modify)")
+        for rule in ("commit", "push", "300", "file:line", "test", "assum"):
+            self.assertIn(rule, lower)
+        self.assertRegex(lower, r"verified|checked|confirmed")
+        self.assertRegex(lower, r"introduction|preamble")
+        self.assertRegex(lower, r"not (?:inspect|read|look)|haven't (?:inspect|read|look)|did not (?:inspect|read|look)")
+        self.assertIn(reply, output)
+        self.assert_scout_output(output)
+        self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+        self.assertEqual(self.git("branch", "--list", "codex/scout-current"), "")
+        self.assertEqual((self.repo / "tracked.txt").read_text(), "Current uncommitted checkout contents\n")
+        self.assertTrue((self.repo / "pending.txt").is_file())
+        for status in (self.cli("status"), self.cli("status", "scout-current")):
+            self.assertIn("scout", status)
+            self.assertIn(str(self.repo), status)
+            self.assertNotIn("codex/scout-current", status)
+
+    def test_scout_file_keeps_another_tasks_worktree_and_uses_russian_rules(self):
+        self.configure(language="ru")
+        self.start("scout-owner")
+        self.wait("scout-owner")
+        target = Path(self.state("scout-owner")["worktree"])
+        (target / "tracked.txt").write_text("Uncommitted work in the other task\n")
+        question = self.root / "question.md"
+        question.write_text("Как читается tracked.txt в текущем каталоге?\n")
+        (self.home / "codex-worker-rules.md").write_text("SCOUT-MUST-SKIP-CUSTOM-TASK-RULES\n")
+        branches = self.git("branch", "--format=%(refname)")
+        worktrees = self.git("worktree", "list", "--porcelain")
+
+        self.cli("scout", "scout-file", "--file", str(question), "--repo", str(target))
+        self.assert_scout_output(self.wait("scout-file"))
+        state = self.state("scout-file")
+        invocation = self.invocations()[-1]
+        self.assertEqual(state["kind"], "scout")
+        self.assertEqual(state["worktree"], str(target))
+        self.assertEqual(invocation["cwd"], str(target))
+        self.assert_scout_read_only(invocation)
+        prompt = invocation["prompt"]
+        self.assertIn(question.read_text().strip(), prompt)
+        self.assertNotIn("SCOUT-MUST-SKIP-CUSTOM-TASK-RULES", prompt)
+        for rule in ("300", "файл:строка", "провер", "предполож", "тест"):
+            self.assertIn(rule, prompt.lower())
+        self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+        self.assertEqual(self.git("branch", "--list", "codex/scout-file"), "")
+        self.cli("clean", "scout-file")
+        self.assertTrue((self.home / "claude-tasks" / "scout-owner").is_dir())
+        self.assertTrue(target.is_dir())
+        self.assertEqual((target / "tracked.txt").read_text(), "Uncommitted work in the other task\n")
+        self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+        self.assertFalse((self.home / "claude-tasks" / "scout-file").exists())
+        self.assertIn(state["thread"], [event.get("thread") for event in self.trace()
+                                       if event.get("command") == "archive"])
+
+    def test_scout_say_resumes_the_same_read_only_thread(self):
+        self.configure()
+        self.cli("scout", "scout-say", "Find the input reader")
+        self.wait("scout-say")
+        thread = self.state("scout-say")["thread"]
+        self.cli("say", "scout-say", "Which tests cover its empty-input case?", "--effort", "low")
+        self.assert_scout_output(self.wait("scout-say"))
+        first, followup = self.invocations()
+        self.assertFalse(first["resume"])
+        self.assertTrue(followup["resume"])
+        self.assertEqual(followup["thread"], thread)
+        self.assertIn("Which tests cover its empty-input case?", followup["prompt"])
+        self.assertIn('model_reasoning_effort="low"', followup["argv"])
+        self.assertEqual(self.state("scout-say")["kind"], "scout")
+        for invocation in (first, followup):
+            self.assert_scout_read_only(invocation)
+
+    def test_scout_and_working_task_can_start_in_either_order_without_parallel(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}])
+        self.start("work-before-scout")
+        self.cli("scout", "scout-after-work", "Read the active task's context")
+        self.assertTrue(self.process_is_live(self.state("work-before-scout")["pid"]))
+        self.assertTrue(self.process_is_live(self.state("scout-after-work")["pid"]))
+        self.cli("stop", "work-before-scout", timeout=20)
+        self.wait("work-before-scout")
+        self.start("work-after-scout")
+        self.assertTrue(self.process_is_live(self.state("scout-after-work")["pid"]))
+        self.assertTrue(self.process_is_live(self.state("work-after-scout")["pid"]))
+        self.cli("stop", "work-after-scout", timeout=20)
+        self.wait("work-after-scout")
+        self.cli("stop", "scout-after-work", timeout=20)
+        self.assert_scout_output(self.wait("scout-after-work"))
+
+    def test_scout_rejects_checks_and_reviews_without_starting_a_turn(self):
+        self.configure()
+        self.cli("scout", "scout-no-writes", "Find the parser")
+        self.wait("scout-no-writes")
+        state = self.state("scout-no-writes")
+        count = len(self.invocations())
+        for args in (("say", "scout-no-writes", "Run tests", "--check", "touch forbidden-check"),
+                     ("say", "scout-no-writes", "Set timeout", "--check-timeout", "5"),
+                     ("say", "scout-no-writes", "Review it", "--review"),
+                     ("review", "scout-no-writes")):
+            with self.subTest(args=args):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
+                                        env=self.env, text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("scout", (result.stdout + result.stderr).lower())
+                self.assertEqual(len(self.invocations()), count)
+                self.assertEqual(self.state("scout-no-writes"), state)
+        self.assertFalse((self.home / "claude-tasks" / "scout-no-writes" / "messages.jsonl").exists())
+        self.assertFalse((self.repo / "forbidden-check").exists())
+
+    def test_scout_rotation_hands_off_only_question_and_conversation_and_clean_archives(self):
+        self.configure()
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": "OLD-SCOUT-OUTPUT-OUTSIDE-LAST-THREE"},
+            {"mode": "complete", "reply": "Earlier followup result"},
+            {"mode": "usage_error", "messages": ["Scout finding one", "Scout finding two", "Scout finding three"]}])
+        question = "Which function validates the input before dispatch?"
+        first_followup = "Trace the empty input path"
+        second_followup = "Confirm whether all callers use that validation"
+        branches = self.git("branch", "--format=%(refname)")
+        worktrees = self.git("worktree", "list", "--porcelain")
+        self.cli("scout", "scout-rotate", question)
+        self.wait("scout-rotate")
+        self.cli("say", "scout-rotate", first_followup)
+        self.wait("scout-rotate")
+        self.cli("say", "scout-rotate", second_followup)
+        output = self.wait("scout-rotate")
+        prompt = self.assert_rotation("scout-rotate", output)
+        self.assert_scout_output(output)
+        self.assertIn(question, prompt)
+        self.assertIn(first_followup, prompt)
+        self.assertIn(second_followup, prompt)
+        self.assertLess(prompt.index(first_followup), prompt.index(second_followup))
+        for message in ("Scout finding one", "Scout finding two", "Scout finding three"):
+            self.assertIn(message, prompt)
+        self.assertNotIn("OLD-SCOUT-OUTPUT-OUTSIDE-LAST-THREE", prompt)
+        for excluded in ("git status", "git diff", "git log", "worktree", "commits (", "коммиты ("):
+            self.assertNotIn(excluded, prompt.lower())
+        for invocation in self.invocations():
+            self.assert_scout_read_only(invocation)
+            self.assertEqual(invocation["cwd"], str(self.repo))
+        for event in (self.notification("scout-rotate", "turn_finished"),
+                      self.notification("scout-rotate", "rotated")):
+            self.assertEqual(event["kind"], "scout")
+        state = self.state("scout-rotate")
+        self.assertEqual(state["kind"], "scout")
+        self.cli("clean", "scout-rotate")
+        archived = [(event["home"], event["thread"]) for event in self.trace()
+                    if event.get("command") == "archive"]
+        homes = {"main": self.home, "second": self.other}
+        self.assertCountEqual(archived, [(str(homes[entry["account"]]), entry["thread"])
+                                        for entry in state["threads"]])
+        self.assertFalse((self.home / "claude-tasks" / "scout-rotate").exists())
+        self.assertTrue(self.repo.is_dir())
+        self.assertEqual((self.repo / "tracked.txt").read_text(), "initial\n")
+        self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
+        self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
+
+    def test_scout_sleep_resumes_read_only_and_reports_its_kind(self):
+        self.configure()
+        self.configure_notify()
+        self.cli("scout", "scout-sleep", "Which tests cover the configuration reader?")
+        self.wait("scout-sleep")
+        thread = self.state("scout-sleep")["thread"]
+        reset = int(time.time()) + 3
+        self.account(self.home, "A", reset, used=99, auto_reset=True)
+        self.account(self.other, "B", reset + 3600, used=99)
+        followup = "Read the missing-file handling too"
+        self.cli("say", "scout-sleep", followup)
+        paused = self.wait("scout-sleep")
+        self.assertEqual(self.state("scout-sleep")["outcome"], "sleeping")
+        self.assert_scout_output(paused)
+        self.assert_scout_output(self.wait("scout-sleep", timeout=10, through_sleep=True))
+        invocation = self.invocations()[-1]
+        self.assertTrue(invocation["resume"])
+        self.assertEqual(invocation["thread"], thread)
+        self.assertIn(followup, invocation["prompt"])
+        self.assert_scout_read_only(invocation)
+        self.assertEqual(self.state("scout-sleep")["kind"], "scout")
+        for name in ("paused", "woke", "turn_finished"):
+            self.assertEqual(self.notification("scout-sleep", name)["kind"], "scout")
+
     def test_binary_resolution_env_bundle_path_and_install_error(self):
         worker = self.worker()
         bundle = self.root / "bundled-codex"

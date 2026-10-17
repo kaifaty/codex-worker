@@ -2,6 +2,7 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
   codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review] [--check CMD] [--check-timeout SEC]
+  codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
   codex_task.py say <slug> "message" | --file FILE [--review] [--check CMD | --no-check] [--check-timeout SEC]
   codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
@@ -155,7 +156,7 @@ def notify(st, cfg, event, message, **fields):
         return
     message = st["slug"] + ": " + " ".join(message.splitlines())
     payload = dict(event=event, slug=st["slug"], repo=st["repo"], branch=st["branch"],
-                   account=st["account"], at=time.time(), message=message)
+                   kind=st.get("kind", "work"), account=st["account"], at=time.time(), message=message)
     payload.update(fields)
     if setting == "macos":
         escaped = message.replace("\\", "\\\\").replace('"', '\\"')
@@ -577,7 +578,7 @@ def running_tasks(exclude=""):
     out = []
     for p in TASKS.glob("*/state.json"):
         st = json.loads(p.read_text())
-        if st["slug"] != exclude and alive(st.get("pid")):
+        if st["slug"] != exclude and st.get("kind") != "scout" and alive(st.get("pid")):
             out.append(st["slug"])
     return out
 
@@ -590,7 +591,7 @@ def main_repo(path):
 
 def spawn(st, prompt, effort=None, current_message=False, kind="work", review_after=False):
     d = TASKS / st["slug"]
-    for name in (("last.md", "review.md") if kind == "work" else ("review.md",)):
+    for name in (("review.md",) if kind == "review" else ("last.md", "review.md")):
         last = d / name
         if last.exists():
             last.unlink()
@@ -671,10 +672,16 @@ def rollout_limits(path):
 def handoff(st, current_message=False, cfg=None):
     cfg = accounts_config() if cfg is None else cfg
     ru = cfg.get("language", "en") == "ru"
+    scouting = st.get("kind") == "scout"
     d = TASKS / st["slug"]
     prompt = (d / "brief.md").read_text().rstrip() + ("\n\n## Продолжение\n\n" if ru else "\n\n## Continuation\n\n")
     has_threads = bool(st.get("threads") or st.get("thread"))
-    if has_threads:
+    if has_threads and scouting:
+        prompt += (("Предыдущий разведчик остановился из-за лимита подписки. "
+                    "Продолжи изучение вопроса с учётом его сообщений ниже.\n\n") if ru else
+                   ("The previous scout stopped because its subscription reached its limit. "
+                    "Continue investigating the question using its messages below.\n\n"))
+    elif has_threads:
         prompt += (("Предыдущий исполнитель остановился посреди работы, потому что у его подписки кончился лимит.\n"
                     "Его коммиты и незакоммиченные правки в этом worktree — отправная точка. "
                     "Не начинай заново и не откатывай сделанную работу.\n\n") if ru else
@@ -692,16 +699,37 @@ def handoff(st, current_message=False, cfg=None):
                 prompt += f"\n### {heading}\n\n{text}\n"
             else:
                 prompt += f"\n{n}. {text}\n"
-    prompt += f"\n{'Коммиты' if ru else 'Commits'} (git log --oneline {st['base']}..HEAD):\n"
-    prompt += sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")
-    prompt += ("\n\nСостояние worktree (git status --short):\n" if ru else "\n\nWorktree status (git status --short):\n")
-    prompt += sh(["git", "status", "--short"], cwd=st["worktree"], check=False) or ("(чисто)" if ru else "(clean)")
+    if not scouting:
+        prompt += f"\n{'Коммиты' if ru else 'Commits'} (git log --oneline {st['base']}..HEAD):\n"
+        prompt += sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")
+        prompt += ("\n\nСостояние worktree (git status --short):\n" if ru else "\n\nWorktree status (git status --short):\n")
+        prompt += sh(["git", "status", "--short"], cwd=st["worktree"], check=False) or ("(чисто)" if ru else "(clean)")
     if has_threads:
-        prompt += (("\n\nПоследние сообщения предыдущего исполнителя:\n" if ru else "\n\nLatest messages from the previous worker:\n")
-                   + "\n\n".join(thread_messages(st)[-3:])[-4000:])
-    prompt += (f"\n\nСначала посмотри git status и git diff {st['base']}, потом продолжай работу.\n" if ru else
-               f"\n\nFirst inspect git status and git diff {st['base']}, then continue the task.\n")
+        label = (("Последние сообщения предыдущего разведчика" if ru else "Latest messages from the previous scout")
+                 if scouting else ("Последние сообщения предыдущего исполнителя" if ru else "Latest messages from the previous worker"))
+        prompt += f"\n\n{label}:\n" + "\n\n".join(thread_messages(st)[-3:])[-4000:]
+    if not scouting:
+        prompt += (f"\n\nСначала посмотри git status и git diff {st['base']}, потом продолжай работу.\n" if ru else
+                   f"\n\nFirst inspect git status and git diff {st['base']}, then continue the task.\n")
     return prompt
+
+
+def scout_prompt(question, cfg=None):
+    cfg = accounts_config() if cfg is None else cfg
+    if cfg.get("language", "en") == "ru":
+        rules = ("Ты разведчик: изучи код и ответь на вопрос Claude.\n"
+                 "Файлы не меняй, ничего не коммить и не пушь.\n"
+                 "Ответ — примерно до 300 слов, если вопрос не просит иного; без вступления.\n"
+                 "Каждый факт подкрепи ссылкой файл:строка. "
+                 "Отдельно отметь, что проверено, а что предположение.\n"
+                 "Назови тесты, которые покрывают эту область. Скажи, чего не смотрел.")
+    else:
+        rules = ("You are a scout: investigate the code and answer Claude's question.\n"
+                 "Do not change files, commit, or push.\n"
+                 "Keep the answer to about 300 words unless the question asks otherwise; no introduction.\n"
+                 "Cite file:line for every fact. Separate verified findings from assumptions.\n"
+                 "Name the tests covering this area. State what you did not inspect.")
+    return question.rstrip() + "\n\n" + rules
 
 
 def review_prompt(st, cfg=None):
@@ -1023,6 +1051,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         args += ["resume", thread, "--json", "-o", str(last)]
     else:
         args += ["--json", "-C", st["worktree"], "-o", str(last)]
+    if st.get("kind") == "scout":
+        args += ["-c", 'sandbox_mode="read-only"']
     args += effort_args(effort) + [prompt]
     path = rollout_path(account["home"], thread) if thread else None
     previous_size = path.stat().st_size if path else 0
@@ -1129,7 +1159,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
 
 
 def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
-    """Run one work/review phase, sharing quota, rotation and reset handling."""
+    """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
     reviewing = st.get("kind") == "review"
     visited = set()
     rotations = 0
@@ -1322,7 +1352,7 @@ def cmd__run(a):
         effort = pending["effort"]
         run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
                  stopped, stopped_flag.wait)
-        if st.get("kind") != "review" and st.get("outcome") == "completed" and st.get("check") and not stopped():
+        if st.get("kind") not in ("review", "scout") and st.get("outcome") == "completed" and st.get("check") and not stopped():
             check = run_check(st, stopped)
             if check and check["outcome"] in ("failed", "timeout"):
                 notify(st, cfg, "check_failed", f"check {check['outcome']} on {st['account']}",
@@ -1330,7 +1360,7 @@ def cmd__run(a):
                 if pending.get("review_after"):
                     st["review_skipped"] = "check " + check["outcome"]
                     save(st)
-        if (st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
+        if (st.get("kind") != "scout" and st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
                 and (check is None or check["outcome"] == "passed")):
             st.update(kind="review", work_completed=True, outcome="running", reset_wait_seconds=0)
             save(st)
@@ -1410,8 +1440,41 @@ def require_idle(st):
         die(f"{st['slug']} is still running a turn; wait for it (or stop it) first")
 
 
+def cmd_scout(a):
+    if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
+        die("slug: 2-41 chars of a-z, 0-9 and '-'")
+    cfg = accounts_config()
+    if (TASKS / a.slug).exists():
+        die(f"task {a.slug!r} exists; pick another slug or clean it")
+    question = Path(a.file).read_text() if a.file else a.question
+    if not question or not question.strip():
+        die("empty scout question")
+    directory = Path(a.repo).expanduser().resolve()
+    if not directory.is_dir():
+        die(f"scout directory does not exist: {directory}")
+    d = TASKS / a.slug
+    d.mkdir(parents=True)
+    prompt = scout_prompt(question, cfg)
+    (d / "brief.md").write_text(prompt)
+    st = {"slug": a.slug, "kind": "scout", "repo": str(directory), "worktree": str(directory), "branch": "",
+          "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
+          "rotations": [], "reviews": [], "checks": [], "created": time.time(), "turns": 0}
+    save(st)
+    proc = spawn(st, prompt, a.effort, kind="scout")
+    for _ in range(300):
+        st = load(a.slug)
+        if st["thread"] or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
+            break
+        time.sleep(0.1)
+    print(f"started scout {a.slug}: account {st['account']}, thread {st['thread'] or '?'}, pid {st.get('pid')}\n  directory {directory}")
+    print(f"  wait: {Path(__file__)} wait {a.slug}   (run it as a background command)")
+
+
 def cmd_say(a):
     st = load(a.slug)
+    scouting = st.get("kind") == "scout"
+    if scouting and (a.check is not None or a.review or a.check_timeout is not None):
+        die("scout is read-only; say --check, --check-timeout and --review are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -1427,12 +1490,15 @@ def cmd_say(a):
         f.write(json.dumps({"at": time.time(), "text": msg}, ensure_ascii=False) + "\n")
     # If no thread was created (all accounts exhausted on start), retain the brief too.
     prompt = msg if st.get("thread") else handoff(st, current_message=True, cfg=cfg)
-    spawn(st, prompt, a.effort or st.get("effort"), current_message=True, review_after=a.review)
+    spawn(st, prompt, a.effort or st.get("effort"), current_message=True,
+          kind="scout" if scouting else "work", review_after=a.review)
     print(f"sent to {a.slug} (turn {st['turns']}), pid {st['pid']}")
 
 
 def cmd_review(a):
     st = load(a.slug)
+    if st.get("kind") == "scout":
+        die("scout is read-only; review is not supported")
     require_idle(st)
     cfg = accounts_config()
     spawn(st, review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
@@ -1493,7 +1559,8 @@ def cmd_wait(a):
             print("(Codex did not run this turn)")
         else:
             print(last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
-    for check in st.get("checks", [])[st.get("check_start", 0):]:
+    checks = [] if st.get("kind") == "scout" else st.get("checks", [])[st.get("check_start", 0):]
+    for check in checks:
         label = {"passed": "passed", "stopped": "stopped"}.get(check["outcome"], "FAILED")
         reason = "timeout, " if check["outcome"] == "timeout" else ""
         print(f"== check `{check['cmd']}`: {label} ({reason}exit {check['exit']}, {check['seconds']:.0f} s)")
@@ -1519,6 +1586,8 @@ def cmd_wait(a):
         print("== errors:", json.dumps(failed[-1], ensure_ascii=False)[:500])
     if st.get("error"):
         print("== supervisor error:", st["error"])
+    if st.get("kind") == "scout":
+        return
     print(f"== commits on {st['branch']}:")
     print(sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)")
     dirty = sh(["git", "status", "--short"], cwd=st["worktree"], check=False)
@@ -1534,16 +1603,21 @@ def describe(st, detail):
     else:
         state = "running" if supervisor_alive else "idle"
     reviewing = st.get("kind") == "review"
+    scouting = st.get("kind") == "scout"
     account, thread = st["account"], st.get("thread", "")
     if reviewing:
         account, thread = st.get("review_account", "?"), ""
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         if reviews:
             account, thread = reviews[-1]["account"], reviews[-1]["thread"]
-    line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {st['branch']}  "
-            f"account {account}  thread {thread[:13]}" + ("  review" if reviewing else ""))
+    location = st["worktree"] if scouting else st["branch"]
+    label = "  scout" if scouting else ("  review" if reviewing else "")
+    line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {location}  "
+            f"account {account}  thread {thread[:13]}" + label)
     if not detail:
         return line
+    if scouting:
+        return line + "\nlast message:\n" + (last_message(st) or "(none)")
     pr = (sh(["gh", "pr", "list", "--head", st["branch"], "--state", "all", "--json", "number,state,url",
               "--jq", '.[] | "\\(.number) \\(.state) \\(.url)"'], cwd=st["worktree"], check=False)
           if shutil.which("gh") else "")
@@ -1602,12 +1676,13 @@ def cmd_clean(a):
     st = load(a.slug)
     if alive(st.get("pid")):
         die("still running; stop it first")
-    repo, wt = st["repo"], st["worktree"]
-    if Path(wt).exists():
-        sh(["git", "worktree", "remove", "--force", wt], cwd=repo)
-        shutil.rmtree(Path(wt).parent, ignore_errors=True)
-    if not a.keep_branch:
-        subprocess.run(["git", "branch", "-D", st["branch"]], cwd=repo, capture_output=True)
+    if st.get("kind") != "scout":
+        repo, wt = st["repo"], st["worktree"]
+        if Path(wt).exists():
+            sh(["git", "worktree", "remove", "--force", wt], cwd=repo)
+            shutil.rmtree(Path(wt).parent, ignore_errors=True)
+        if not a.keep_branch:
+            subprocess.run(["git", "branch", "-D", st["branch"]], cwd=repo, capture_output=True)
     cfg = accounts_config()
     for entry in st["threads"] + st["reviews"]:
         account = account_named(cfg, entry["account"])
@@ -1711,6 +1786,13 @@ def main():
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
     s.add_argument("--check", help="shell command to run after completed work turns; saved for follow-ups")
     s.add_argument("--check-timeout", type=check_timeout, default=1800, help="check timeout in seconds (default: 1800)")
+    s = sub.add_parser("scout", help="answer a code question in an existing directory, read-only")
+    s.add_argument("slug")
+    question = s.add_mutually_exclusive_group(required=True)
+    question.add_argument("question", nargs="?")
+    question.add_argument("--file")
+    s.add_argument("--repo", default=".")
+    s.add_argument("--effort", default=None)
     s = sub.add_parser("say")
     s.add_argument("slug")
     s.add_argument("message", nargs="?")
@@ -1744,7 +1826,7 @@ def main():
     s.add_argument("name")
     s.add_argument("--browser", action="store_true", help="use browser login instead of device auth")
     a = p.parse_args()
-    if a.cmd in ("start", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):
+    if a.cmd in ("start", "scout", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):
         global CODEX
         CODEX = resolve_codex()
     globals()["cmd_" + a.cmd.replace("-", "_")](a)
