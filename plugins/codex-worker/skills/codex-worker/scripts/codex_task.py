@@ -2126,7 +2126,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             if reviews:
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
-                      "account": st.get("review_account", st["account"]),
+                      "account": st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"]),
                       "started": started, "finished": time.time()}
             if outcome == "refused":
                 record["refusal"] = st.get("refusal", "")
@@ -2146,7 +2146,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
         st.pop("review_angle", None)
         if st.get("outcome") != "refused":
             st.pop("refusal", None)
-        account = st.get("review_account") or st["account"]
+        account = st.get("review_account") or (records[-1]["account"] if records else st["account"])
         outcome = "stopped" if stopped() else st["outcome"]
         notify(st, cfg, "review_done", f"review {outcome} on {account}",
                outcome=outcome, account=account, angles=[entry["angle"] for entry in records],
