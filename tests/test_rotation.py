@@ -266,6 +266,8 @@ def execute():
         Path("pending.txt").write_text("unfinished untracked file\n")
     for name in run.get("create_files", []):
         Path(name).write_text("created by fake Codex\n")
+    for name in run.get("remove_files", []):
+        Path(name).unlink(missing_ok=True)
     if run["mode"] in ("limit", "usage_error"):
         time.sleep(run.get("limit_after", 0.15))
         value = fixture()
@@ -650,7 +652,8 @@ class RotationTests(unittest.TestCase):
         result = {"status": status, "summary": "Implemented the typed final result.",
                   "checks": [{"command": "python3 -I tests/test_rotation.py", "outcome": "passed",
                               "details": "3 tests passed, 0 failed"}],
-                  "pr": "https://example.test/pull/42", "questions": [], "remaining": []}
+                  "pr": "https://example.test/pull/42", "questions": [], "remaining": [],
+                  "findings": []}
         result.update(changes)
         return result
 
@@ -693,6 +696,9 @@ class RotationTests(unittest.TestCase):
         choices = (["clean", "defects"] if review else
                    ["done", "partial", "blocked", "needs_decision"])
         self.assertCountEqual(properties[field]["enum"], choices)
+        if not review:
+            decision = properties["findings"]["items"]["properties"]["decision"]
+            self.assertCountEqual(decision["enum"], ["fixed", "rejected"])
 
     def test_typed_work_result_prints_summary_checks_pr_and_persists_for_status(self):
         self.configure()
@@ -759,6 +765,10 @@ class RotationTests(unittest.TestCase):
                            self.work_result(checks=[{"command": "check", "outcome": "passed"}]),
                            self.work_result(checks=[{"command": "check", "outcome": "passed",
                                                     "details": "1 passed", "extra": "unexpected"}]),
+                           self.work_result(findings=[{"id": "F1", "decision": "ignored", "note": "No change"}]),
+                           self.work_result(findings=[{"id": "F1", "decision": "fixed"}]),
+                           self.work_result(findings=[{"id": "F1", "decision": "fixed", "note": "Done",
+                                                       "extra": "unexpected"}]),
                            self.work_result(questions="Choose the API")]
         for number, result in enumerate(invalid_results):
             with self.subTest(result=result):
@@ -1040,6 +1050,8 @@ class RotationTests(unittest.TestCase):
         for args in (("say", "scout-no-writes", "Run tests", "--check", "touch forbidden-check"),
                      ("say", "scout-no-writes", "Set timeout", "--check-timeout", "5"),
                      ("say", "scout-no-writes", "Review it", "--review"),
+                     ("say", "scout-no-writes", "Disable fixes", "--fix-rounds", "0"),
+                     ("say", "scout-no-writes", "Fix review", "--review", "--fix-rounds", "1"),
                      ("review", "scout-no-writes")):
             with self.subTest(args=args):
                 result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
@@ -1360,7 +1372,7 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(self.invocations(), "invalid options must not launch Codex")
 
     def test_check_passes_after_completed_work_before_automatic_review(self):
-        self.configure()
+        self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "create_files": ["done.txt"]},
             {"mode": "complete", "reply": "Review after objective check"}])
@@ -1378,6 +1390,11 @@ class RotationTests(unittest.TestCase):
         self.assertRegex(output, r"== check `test -f done\.txt`: passed \(exit 0, \d+(?:\.\d+)? s\)")
         self.assertTrue((self.home / "claude-tasks" / "check-passed" / "check.log").is_file())
         self.assertEqual(len(self.review_invocations()), 1)
+        prompt = self.review_invocations()[0]["prompt"]
+        self.assertIn(command, prompt)
+        self.assertIn("passed", prompt.lower())
+        self.assertRegex(prompt.lower(), r"(?:do not|don't).*rerun.*(?:full|entire)")
+        self.assertRegex(prompt.lower(), r"targeted|focused|specific")
         self.assertLess(output.index("== check `"), output.index("== review by "))
 
     def test_check_failure_prints_last_forty_lines_and_skips_review(self):
@@ -1456,7 +1473,7 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(self.review_invocations())
 
     def test_explicit_review_does_not_run_a_persisted_check(self):
-        self.configure()
+        self.configure(language="en")
         self.start("check-explicit-review", "--check", "printf 'checked\\n' >> check-runs")
         self.wait("check-explicit-review")
         self.cli("review", "check-explicit-review")
@@ -1466,6 +1483,21 @@ class RotationTests(unittest.TestCase):
         self.assertEqual((Path(state["worktree"]) / "check-runs").read_text(), "checked\n")
         self.assertNotIn("== check `", output)
         self.assertEqual(len(self.review_invocations()), 1)
+        prompt = self.review_invocations()[0]["prompt"]
+        self.assertIn("printf 'checked\\n' >> check-runs", prompt)
+        self.assertIn("passed", prompt.lower())
+        self.assertRegex(prompt.lower(), r"(?:do not|don't).*rerun.*(?:full|entire)")
+
+    def test_review_without_saved_check_has_no_passed_suite_instruction(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("review-no-check", "--review")
+        self.wait("review-no-check")
+        prompt = self.review_invocations()[0]["prompt"].lower()
+        self.assertNotIn("passed", prompt)
+        self.assertNotRegex(prompt, r"(?:do not|don't).*rerun.*(?:full|entire)")
 
     def test_notify_reports_completed_turn_and_failed_check_with_task_fields(self):
         self.configure()
@@ -1784,6 +1816,326 @@ class RotationTests(unittest.TestCase):
         self.assertIn("Итог нового хода", output)
         self.assertIn("Ревью нового хода", output)
         self.assertNotIn("Начальный ход", output)
+
+    def test_fix_round_sends_findings_to_working_thread_and_carries_rejection_to_fresh_review(self):
+        self.configure(language="en")
+        self.configure_notify()
+        review = self.review_result()
+        decisions = [{"id": "F1", "decision": "fixed", "note": "Handle empty input before indexing."},
+                     {"id": "F2", "decision": "rejected", "note": "The last token is a sentinel, not output."}]
+        fixed = self.work_result(findings=decisions)
+        clean = self.review_result(False)
+        command = "printf 'passed\\n' >> check-runs"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": review},
+            {"mode": "complete", "reply": fixed},
+            {"mode": "complete", "reply": clean}])
+
+        self.start("fix-clean", "--review", "--fix-rounds", "1", "--check", command)
+        output = self.wait("fix-clean")
+        executions = self.invocations()
+        self.assertEqual([event["review"] for event in executions], [False, True, False, True])
+        work, initial_review, correction, final_review = executions
+        self.assertTrue(correction["resume"])
+        self.assertEqual(correction["thread"], work["thread"])
+        self.assertEqual(correction["argv"][:2], ["exec", "resume"])
+        self.assertEqual(len({event["ppid"] for event in executions}), 1,
+                         "one supervisor must finish the whole cycle before wait returns")
+        for finding in review["findings"]:
+            for field in ("id", "severity", "title", "detail", "verify"):
+                self.assertIn(finding[field], correction["prompt"])
+            self.assertIn("{file}:{line}".format(**finding), correction["prompt"])
+        prompt = correction["prompt"].lower()
+        for instruction in ("code", "test", "reject", "commit", "push"):
+            self.assertIn(instruction, prompt)
+        self.assertNotRegex(correction["prompt"], "[А-Яа-яЁё]")
+        self.assertIn("F2", final_review["prompt"])
+        self.assertIn(decisions[1]["note"], final_review["prompt"])
+        self.assertRegex(final_review["prompt"].lower(), r"reason|rationale")
+        for event in (initial_review, final_review):
+            self.assertIn(command, event["prompt"])
+            self.assertIn("passed", event["prompt"].lower())
+            self.assertRegex(event["prompt"].lower(), r"(?:do not|don't).*rerun.*(?:full|entire)")
+        self.assertFalse(final_review["resume"])
+        self.assertEqual(len({work["thread"], initial_review["thread"], final_review["thread"]}), 3)
+        for event in executions:
+            self.assert_output_schema(event, "fix-clean", review=event["review"])
+        state = self.state("fix-clean")
+        self.assertEqual(state["fix_rounds"], 1)
+        self.assertEqual(state["result"], fixed)
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual(state["rounds"][0]["review"], review)
+        self.assertEqual(state["rounds"][0]["decisions"], decisions)
+        self.assertEqual(state["rounds"][0]["check"]["outcome"], "passed")
+        self.assertEqual(len(state["checks"]), 2)
+        self.assertEqual((Path(state["worktree"]) / "check-runs").read_text().splitlines(),
+                         ["passed", "passed"])
+        messages = [json.loads(line) for line in
+                    (self.home / "claude-tasks" / "fix-clean" / "messages.jsonl").read_text().splitlines()]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["source"], "review")
+        self.assertEqual(messages[0]["text"], correction["prompt"])
+        self.assertRegex(output, r"== round 1: 2 findings .*→ fixed 1, rejected 1")
+        self.assertIn("F2", output)
+        self.assertIn(decisions[1]["note"], output)
+        self.assertIn("== check `" + command + "`: passed", output)
+        self.assertIn(clean["summary"], output)
+        self.assertRegex(output, r"== auto-fix: 1 rounds?, findings 2 → 0")
+        self.assertIn("clean", output.lower())
+        self.notification("fix-clean", "turn_finished")
+        self.until(lambda: sum(event["event"] == "review_done" for event in self.notifications("fix-clean")) == 2)
+        notifications = self.notifications("fix-clean")
+        self.assertEqual([event["round"] for event in notifications if event["event"] == "review_done"],
+                         [0, 1])
+        self.assertEqual(sum(event["event"] == "turn_finished" for event in notifications), 1)
+
+    def test_fix_round_limit_runs_exactly_two_corrections_and_prints_final_defects(self):
+        self.configure()
+        reviews = [self.review_result() for _ in range(3)]
+        for number, review in enumerate(reviews):
+            review["summary"] = "Review generation %s still has defects." % number
+        reviews[-1]["findings"][0]["detail"] = "Final review detail must be printed completely."
+        decisions = [{"id": finding["id"], "decision": "fixed", "note": "Updated the relevant code."}
+                     for finding in reviews[0]["findings"]]
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": reviews[0]},
+            {"mode": "complete", "reply": self.work_result(findings=decisions)},
+            {"mode": "complete", "reply": reviews[1]},
+            {"mode": "complete", "reply": self.work_result(findings=decisions)},
+            {"mode": "complete", "reply": reviews[2]}])
+
+        self.start("fix-bounded", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-bounded")
+        executions = self.invocations()
+        self.assertEqual([event["review"] for event in executions], [False, True, False, True, False, True])
+        self.assertEqual(len(self.review_invocations()), 3)
+        self.assertEqual(len({event["thread"] for event in self.review_invocations()}), 3)
+        self.assertTrue(all(event["resume"] and event["thread"] == executions[0]["thread"]
+                            for event in (executions[2], executions[4])))
+        state = self.state("fix-bounded")
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertEqual(state["reviews"][-1]["result"], reviews[-1])
+        self.assertEqual(state["auto_fix_stop"], "rounds_exhausted")
+        for finding in reviews[-1]["findings"]:
+            self.assertIn("[{severity}] {id} {file}:{line} — {title}".format(**finding), output)
+            self.assertIn(finding["detail"], output)
+            self.assertIn(finding["verify"], output)
+        self.assertIn(reviews[-1]["summary"], output)
+        self.assertIn("== round 1:", output)
+        self.assertIn("== round 2:", output)
+        self.assertIn("== auto-fix: 2 rounds, findings 2 → 2 → 2", output)
+
+    def test_say_can_start_a_new_fix_cycle_and_default_say_does_not_inherit_it(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(summary="Initial work")},
+            {"mode": "complete", "reply": self.work_result(summary="Requested followup")},
+            {"mode": "complete", "reply": self.review_result()},
+            {"mode": "complete", "reply": self.work_result(findings=[
+                {"id": "F1", "decision": "fixed", "note": "Updated parser"},
+                {"id": "F2", "decision": "fixed", "note": "Updated formatter"}])},
+            {"mode": "complete", "reply": self.review_result(False)},
+            {"mode": "complete", "reply": self.work_result(summary="Ordinary followup")}])
+        self.start("fix-say")
+        self.wait("fix-say")
+        thread = self.state("fix-say")["thread"]
+        self.cli("say", "fix-say", "Finish the followup", "--review", "--fix-rounds", "1")
+        output = self.wait("fix-say")
+        executions = self.invocations()
+        self.assertEqual([event["review"] for event in executions], [False, False, True, False, True])
+        self.assertTrue(executions[1]["resume"])
+        self.assertTrue(executions[3]["resume"])
+        self.assertEqual(executions[3]["thread"], thread)
+        self.assertEqual(len(self.state("fix-say")["rounds"]), 1)
+        self.assertRegex(output, r"== auto-fix: 1 rounds?, findings 2 → 0")
+        self.cli("say", "fix-say", "One ordinary final followup")
+        output = self.wait("fix-say")
+        self.assertEqual(len(self.invocations()), 6)
+        self.assertEqual(len(self.review_invocations()), 2)
+        self.assertEqual(self.state("fix-say")["fix_rounds"], 0)
+        self.assertNotIn("== auto-fix:", output)
+        self.assertNotIn("== round ", output)
+        self.assertIn("Ordinary followup", output)
+
+    def test_failed_check_after_fix_uses_last_forty_lines_for_next_round_then_reviews(self):
+        self.configure()
+        review = self.review_result()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": review},
+            {"mode": "complete", "create_files": ["fail-check"], "reply": self.work_result(findings=[
+                {"id": "F1", "decision": "fixed", "note": "First fix"},
+                {"id": "F2", "decision": "fixed", "note": "Second fix"}])},
+            {"mode": "complete", "remove_files": ["fail-check"], "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        command = ("if test -f fail-check; then i=1; while [ \"$i\" -le 45 ]; "
+                   "do printf 'retry-line-%02d\\n' \"$i\"; i=$((i + 1)); done; "
+                   "printf 'retry-stderr\\n' >&2; exit 1; fi; printf 'check-passed\\n'")
+        self.start("fix-check-retry", "--review", "--fix-rounds", "2", "--check", command)
+        output = self.wait("fix-check-retry")
+        executions = self.invocations()
+        self.assertEqual([event["review"] for event in executions], [False, True, False, False, True])
+        retry = executions[3]
+        self.assertTrue(retry["resume"])
+        self.assertEqual(retry["thread"], executions[0]["thread"])
+        self.assertIn("check.log", retry["prompt"])
+        self.assertIn("retry-line-07", retry["prompt"])
+        self.assertIn("retry-line-45", retry["prompt"])
+        self.assertIn("retry-stderr", retry["prompt"])
+        self.assertNotIn("retry-line-06", retry["prompt"])
+        for finding in review["findings"]:
+            self.assertNotIn(finding["title"], retry["prompt"], "retry must focus on the failed check")
+        state = self.state("fix-check-retry")
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "failed", "passed"])
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertEqual(state["rounds"][0]["check"]["outcome"], "failed")
+        self.assertIsNone(state["rounds"][1]["review"])
+        self.assertEqual(state["rounds"][1]["check"]["outcome"], "passed")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertIn("== auto-fix: 2 rounds", output)
+        self.assertIn("== round 2:", output)
+        self.assertIn("FAILED", output)
+        self.assertIn("No defects found.", output)
+
+    def test_failed_check_on_last_fix_round_does_not_start_another_review(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result()},
+            {"mode": "complete", "create_files": ["fail-check"], "reply": self.work_result()}])
+        command = "if test -f fail-check; then printf 'last-round-check-failure\\n'; exit 1; fi"
+        self.start("fix-check-exhausted", "--review", "--fix-rounds", "1", "--check", command)
+        output = self.wait("fix-check-exhausted")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False])
+        state = self.state("fix-check-exhausted")
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "failed"])
+        self.assertEqual(state["rounds"][0]["check"]["outcome"], "failed")
+        self.assertIn("check", state["auto_fix_stop"])
+        self.assertIn("last-round-check-failure", output)
+        self.assertIn("FAILED", output)
+        self.assertRegex(output, r"== auto-fix: 1 rounds?")
+        self.assertIn("Found two defects.", output, "the last completed review must remain visible")
+
+    def test_incomplete_fix_results_stop_the_loop_and_print_questions(self):
+        self.configure()
+        for status in ("needs_decision", "blocked", "partial"):
+            with self.subTest(status=status):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                questions = ["Which public API should accept the new argument?"]
+                result = self.work_result(status, questions=questions, remaining=["Wait for the API decision."])
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "reply": self.work_result()},
+                    {"mode": "complete", "reply": self.review_result()},
+                    {"mode": "complete", "reply": result}])
+                slug = "fix-incomplete-" + status.replace("_", "-")
+                before = len(self.invocations())
+                self.start(slug, "--review", "--fix-rounds", "2")
+                output = self.wait(slug)
+                self.assertEqual(len(self.invocations()) - before, 3)
+                state = self.state(slug)
+                self.assertEqual(state["result"], result)
+                self.assertEqual(state["auto_fix_stop"], "result " + status)
+                self.assertEqual(len(state["rounds"]), 1)
+                self.assertIn(questions[0], output)
+                self.assertIn(result["remaining"][0], output)
+                self.assertRegex(output, r"== auto-fix: 1 rounds?")
+
+    def test_stop_during_fix_round_stops_cycle_before_more_checks_or_reviews(self):
+        self.configure()
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result()},
+            {"mode": "hold"}])
+        self.start("fix-stopped", "--review", "--fix-rounds", "2", "--check",
+                   "printf 'check\\n' >> check-runs")
+        self.until(lambda: len(self.invocations()) == 3)
+        correction = self.invocations()[-1]
+        self.assertTrue(correction["resume"])
+        self.cli("stop", "fix-stopped", timeout=20)
+        output = self.wait("fix-stopped")
+        state = self.state("fix-stopped")
+        self.assertEqual(state["outcome"], "stopped")
+        self.assertEqual(state["auto_fix_stop"], "stopped")
+        self.assertEqual(len(self.invocations()), 3)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertEqual(len(state["checks"]), 1)
+        self.assertEqual((Path(state["worktree"]) / "check-runs").read_text().splitlines(), ["check"])
+        self.assertIn("stopped", output)
+        self.notification("fix-stopped", "turn_finished")
+        self.assertEqual(sum(event["event"] == "turn_finished" for event in self.notifications("fix-stopped")), 1)
+
+    def test_rotation_during_fix_hands_findings_to_new_account_and_finishes_cycle(self):
+        self.configure()
+        review = self.review_result()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": review},
+            {"mode": "usage_error"}])
+        self.account(self.other, "B", self.reset + 3600, runs=[
+            {"mode": "complete", "reply": self.work_result(findings=[
+                {"id": "F1", "decision": "fixed", "note": "Fixed after account rotation"},
+                {"id": "F2", "decision": "fixed", "note": "Also fixed after account rotation"}])},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("fix-rotation", "--review", "--fix-rounds", "1")
+        output = self.wait("fix-rotation")
+        executions = self.invocations()
+        self.assertEqual([event["review"] for event in executions], [False, True, False, False, True])
+        interrupted, replacement, final_review = executions[2:]
+        self.assertTrue(interrupted["resume"])
+        self.assertEqual(interrupted["thread"], executions[0]["thread"])
+        self.assertFalse(replacement["resume"])
+        self.assertNotEqual(replacement["thread"], interrupted["thread"])
+        self.assertEqual(replacement["home"], str(self.other))
+        self.assertEqual(final_review["home"], str(self.other))
+        for finding in review["findings"]:
+            for field in ("id", "severity", "title", "detail", "verify"):
+                self.assertIn(finding[field], replacement["prompt"])
+            self.assertIn("{file}:{line}".format(**finding), replacement["prompt"])
+        self.assertRegex(interrupted["prompt"], "[А-Яа-яЁё]")
+        state = self.state("fix-rotation")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["account"], "second")
+        self.assertEqual(len(state["rounds"]), 1, "rotation must not spend another fix round")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertIn("== rotated main → second:", output)
+        self.assertIn("No defects found.", output)
+
+    def test_zero_fix_rounds_keeps_one_review_without_a_correction(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result()}])
+        self.start("fix-zero", "--review", "--fix-rounds", "0")
+        output = self.wait("fix-zero")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True])
+        self.assertEqual(self.state("fix-zero")["fix_rounds"], 0)
+        self.assertFalse(self.state("fix-zero").get("rounds"))
+        self.assertNotIn("== auto-fix:", output)
+
+    def test_fix_rounds_validate_review_requirement_and_range_before_starting_or_saying(self):
+        self.configure()
+        self.start("fix-validation")
+        self.wait("fix-validation")
+        state = self.state("fix-validation")
+        before = len(self.invocations())
+        for options in (("--fix-rounds", "0"), ("--fix-rounds", "1"),
+                        ("--review", "--fix-rounds", "-1"), ("--review", "--fix-rounds", "6"),
+                        ("--review", "--fix-rounds", "1.5")):
+            for command in (("start", "fix-invalid", "--brief", str(self.brief), "--repo", str(self.repo)),
+                            ("say", "fix-validation", "Invalid fix cycle")):
+                with self.subTest(command=command[0], options=options):
+                    result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(command + options),
+                                            cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("fix-rounds", result.stdout + result.stderr)
+                    self.assertEqual(len(self.invocations()), before)
+                    self.assertEqual(self.state("fix-validation"), state)
+                    self.assertFalse((self.home / "claude-tasks" / "fix-invalid").exists())
+        self.assertFalse((self.home / "claude-tasks" / "fix-validation" / "messages.jsonl").exists())
 
     def test_reconnect_errors_do_not_fail_a_completed_turn(self):
         self.configure()
