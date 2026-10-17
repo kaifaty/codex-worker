@@ -5,6 +5,7 @@ Run with python3 -I tests/test_rotation.py. The mid-turn case deliberately
 waits for the supervisor's real 30-second rollout poll.
 """
 import datetime
+import fcntl
 import importlib.util
 import io
 import json
@@ -110,6 +111,11 @@ def app_server():
             result = {"account": value.get("account"),
                       "workspaceRouting": {"chatgptAccountId": value["accountId"]}}
         elif method == "account/rateLimits/read":
+            gate = value.get("rate_limits_gate_after_exec")
+            if gate and (home / "exec-count").exists():
+                trace({"command": "quota-waiting", "gate": gate})
+                while not Path(gate).exists():
+                    time.sleep(0.02)
             if value.get("clear_quota_when_reset_locked"):
                 journal = Path(os.environ["CODEX_TASK_HOME"]) / "codex-worker-resets.jsonl"
                 if journal.exists():
@@ -255,6 +261,12 @@ def execute():
 
     if run["mode"] == "auth_error" and run.get("before_thread"):
         return auth_failure()
+    if run.get("rollout_gate"):
+        trace({"command": "rollout-waiting", "thread": thread})
+        while not Path(run["rollout_gate"]).exists() and not stopped[0]:
+            time.sleep(0.02)
+        if stopped[0]:
+            return 130
     rollout_limits()
     # Publish the ready fixture before the supervisor starts looking for its rollout.
     emit({"type": "thread.started", "thread_id": thread})
@@ -777,6 +789,81 @@ class RotationTests(unittest.TestCase):
                             event.get("pid") == executions[0]["pid"] for event in self.trace()))
         self.assertEqual(self.notification("time-cap", "turn_finished")["outcome"], "budget_exhausted")
         self.assertEqual(self.notification("time-cap", "budget_exhausted")["outcome"], "budget_exhausted")
+
+    def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.configure(language="en", use_reset_credits=True)
+        gate = self.root / "publish-rollout"
+        result = self.work_result("partial", summary="Wrapped up while the reset journal remained locked.")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "hold", "spawn_child": True, "rollout_used": 99, "rollout_gate": str(gate)},
+            {"mode": "complete", "reply": result}])
+        starter = subprocess.Popen(
+            [PYTHON, "-I", str(SCRIPT), "start", "cap-locked-journal", "--brief", str(self.brief),
+             "--repo", str(self.repo), "--max-minutes", "2"],
+            cwd=self.repo, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        self.extra_pids.add(starter.pid)
+        try:
+            self.until(lambda: any(event.get("command") == "rollout-waiting" for event in self.trace()))
+            # Preflight is complete. Contend only the journal opened by on_limit
+            # while the first exec remains alive, then keep it locked through wrap-up.
+            with (self.home / "codex-worker-resets.jsonl").open("a+") as journal:
+                fcntl.flock(journal, fcntl.LOCK_EX)
+                before = len(self.trace())
+                gate.touch()
+                stdout, stderr = starter.communicate(timeout=5)
+                self.assertEqual(starter.returncode, 0, stdout + stderr)
+                self.until(lambda: sum(event.get("command") == "quota-snapshot"
+                                       for event in self.trace()[before:]) >= 2)
+                child = next(event["child_pid"] for event in self.trace()
+                             if event.get("command") == "exec-child")
+                self.extra_pids.add(child)
+                self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
+                output = self.wait("cap-locked-journal", timeout=10)
+                state = self.state("cap-locked-journal")
+                self.assertEqual(state["outcome"], "budget_exhausted")
+                self.assertEqual(state["wrapup"]["outcome"], "completed")
+                self.assertEqual(state["result"], result)
+                executions = self.invocations()
+                self.assertEqual(len(executions), 2)
+                self.assertTrue(executions[1]["resume"])
+                self.assertEqual(executions[1]["thread"], executions[0]["thread"])
+                self.assertIn("time budget has expired", executions[1]["prompt"])
+                self.assertIn("== turn stopped: time budget 2 min exhausted", output)
+                self.assertIn(result["summary"], output)
+                self.assertFalse(self.process_is_live(executions[0]["pid"]))
+                self.until(lambda: not self.process_is_live(child))
+                self.assertFalse(self.consume_calls())
+        finally:
+            if starter.poll() is None:
+                starter.terminate()
+            starter.communicate(timeout=5)
+
+    def test_time_budget_interrupts_a_slow_account_rpc_after_a_usage_error(self):
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.configure(language="en")
+        gate = self.root / "release-quota-rpc"
+        result = self.work_result("partial", summary="Wrapped up without waiting for the quota RPC.")
+        fixture = self.account(self.home, "A", self.reset, runs=[
+            {"mode": "usage_error", "limit_after": 0.05}, {"mode": "complete", "reply": result}])
+        fixture["rate_limits_gate_after_exec"] = str(gate)
+        (self.home / "fixture.json").write_text(json.dumps(fixture))
+        self.start("cap-slow-quota-rpc", "--max-minutes", "2")
+        self.until(lambda: any(event.get("command") == "quota-waiting" for event in self.trace()))
+        blocked_rpc = next(event["pid"] for event in self.trace() if event.get("command") == "quota-waiting")
+        self.assertTrue(self.process_is_live(blocked_rpc))
+        output = self.wait("cap-slow-quota-rpc", timeout=10)
+        state = self.state("cap-slow-quota-rpc")
+        self.assertFalse(gate.exists(), "the deadline must cancel the RPC before its gate opens")
+        self.assertFalse(self.process_is_live(blocked_rpc))
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["result"], result)
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertTrue(executions[1]["resume"])
+        self.assertEqual(executions[1]["thread"], executions[0]["thread"])
+        self.assertIn("== turn stopped: time budget 2 min exhausted", output)
+        self.assertIn(result["summary"], output)
 
     def test_time_budget_does_not_count_sleep_until_subscription_reset(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
@@ -4609,6 +4696,57 @@ with open(sys.argv[1], "a+") as journal:
         self.assertEqual(st["reset_wait_seconds"], 8 * 86400)
         self.assertEqual(st["outcome"], "exhausted")
         self.assertIn("8 days", st["exhausted"]["reason"])
+
+    def test_monitor_quota_cancellation_preserves_stop_priority_and_unrelated_errors(self):
+        worker = self.worker()
+        for case in ("budget", "budget-return", "stop", "error"):
+            with self.subTest(case=case):
+                clock = [0.0]
+                stopped = [False]
+                slug = "quota-cancel-" + case
+                (worker.TASKS / slug).mkdir(parents=True)
+                st = {"slug": slug, "thread": "", "worktree": str(self.repo),
+                      "threads": [], "rotations": []}
+                proc = mock.Mock(pid=12345)
+                proc.poll.return_value = None
+                proc.stdout.fileno.return_value = 99
+                selector = mock.MagicMock()
+                selector.__enter__.return_value = selector
+                selector.select.return_value = [(SimpleNamespace(fileobj=proc.stdout),
+                                                 worker.selectors.EVENT_READ)]
+
+                def on_limit(local, reason, allow_credits, cancelled):
+                    self.assertFalse(cancelled())
+                    self.assertFalse(allow_credits)
+                    if case == "error":
+                        raise RuntimeError("unrelated quota failure")
+                    clock[0] = 61.0
+                    stopped[0] = case == "stop"
+                    self.assertTrue(cancelled())
+                    if case == "budget-return":
+                        return {"reason": reason}
+                    raise RuntimeError("stopped")
+
+                with mock.patch.object(worker, "prepare_home"), \
+                        mock.patch.object(worker, "save"), \
+                        mock.patch.object(worker, "events", return_value=[]), \
+                        mock.patch.object(worker, "terminate") as terminate, \
+                        mock.patch.object(worker.subprocess, "Popen", return_value=proc), \
+                        mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
+                        mock.patch.object(worker.os, "read", return_value=(
+                            b'{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit."}}\n')), \
+                        mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]):
+                    args = (st, {"enabled": True, "switch_at": 99},
+                            {"name": "main", "home": str(self.home)}, "prompt", None,
+                            lambda: stopped[0], on_limit)
+                    if case == "error":
+                        with self.assertRaisesRegex(RuntimeError, "unrelated quota failure"):
+                            worker.monitor(*args, control=worker.TurnControl(1, 3))
+                    else:
+                        result = worker.monitor(*args, control=worker.TurnControl(1, 3))
+                        self.assertEqual(result, ("stopped" if case == "stop" else "budget_exhausted", None))
+                terminate.assert_called_with(proc)
+                self.assertNotIn("codex_pid", st)
 
     def test_monitor_bounds_rollout_searches_and_reads_during_long_step(self):
         worker = self.worker()

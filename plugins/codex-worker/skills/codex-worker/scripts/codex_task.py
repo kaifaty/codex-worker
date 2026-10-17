@@ -1495,6 +1495,24 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         st["codex_pid"] = proc.pid
         save(st)
         buf = b""
+
+        def quota_decision(local, why, allow_credits):
+            # Quota RPCs and reset-journal locks run while exec is still alive.
+            def cancelled():
+                return stopped() or control.expired(active_started)
+
+            try:
+                decision = on_limit(local, why, allow_credits, cancelled)
+            except RuntimeError:
+                if not cancelled():
+                    raise
+                decision = None
+            if stopped():
+                return "stopped", None
+            if control.expired(active_started):
+                return "budget_exhausted", None
+            return ("limit", decision) if decision is not None or not allow_credits else None
+
         try:
             with selectors.DefaultSelector() as sel:
                 sel.register(proc.stdout, selectors.EVENT_READ)
@@ -1554,7 +1572,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                     if authentication_failed:
                         return ("auth" if cfg["enabled"] else "failed"), None
                     if reason:
-                        return ("limit", on_limit(current_info, reason, False)) if cfg["enabled"] else ("failed", None)
+                        return quota_decision(current_info, reason, False) if cfg["enabled"] else ("failed", None)
                     if cfg["enabled"] and thread and proc.poll() is None:
                         now = time.monotonic()
                         if path is None and now >= next_search:
@@ -1570,9 +1588,9 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                             if limits is not None:
                                 current_info = dict(account, logged_in=True, limits=limits)
                                 if exhausted(current_info, cfg):
-                                    decision = on_limit(current_info, limit_reason(current_info, cfg), True)
+                                    decision = quota_decision(current_info, limit_reason(current_info, cfg), True)
                                     if decision is not None:
-                                        return "limit", decision
+                                        return decision
                 code = proc.wait()
         finally:
             try:
@@ -1678,8 +1696,8 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
         notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
-    def on_limit(local, reason, allow_credits):
-        infos = task_snapshots(st, cfg, stopped)
+    def on_limit(local, reason, allow_credits, cancelled):
+        infos = task_snapshots(st, cfg, cancelled)
         current = next((i for i in infos if i["name"] == account["name"]), {})
         if local and exhausted(local, cfg):
             # The RPC may lag the local rollout; keep its fresh credit balance.
