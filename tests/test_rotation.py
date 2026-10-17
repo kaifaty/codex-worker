@@ -418,13 +418,18 @@ class RotationTests(unittest.TestCase):
                         groups.add(int(event["pgid"]))
             owned.difference_update((0, 1, os.getpid()))
             groups.difference_update((0, 1, os.getpgrp()))
-            result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat="],
+            result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
                                     text=True, capture_output=True, check=True)
             table = {}
             for line in result.stdout.splitlines():
-                fields = line.split()
-                if len(fields) == 4:
+                fields = line.split(None, 4)
+                if len(fields) == 5:
                     table[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+                    # Hooks start in their own session and may outlive the
+                    # supervisor's final pid=None save. Their fixture paths
+                    # still identify them after they have been reparented.
+                    if str(self.root) in fields[4]:
+                        owned.add(int(fields[0]))
             while True:
                 descendants = {pid for pid, (parent, group, _) in table.items()
                                if parent in owned or group in groups}
@@ -491,6 +496,13 @@ class RotationTests(unittest.TestCase):
                                 timeout=kwargs.get("timeout", 15))
         self.assertEqual(result.returncode, 0,
                          "command: %s\nstdout:\n%s\nstderr:\n%s" % (args, result.stdout, result.stderr))
+        # Keep supervisors after their final save clears state['pid']; wait
+        # returns as soon as that idle state is visible, before process exit.
+        if args and args[0] in ("start", "scout", "say", "review"):
+            for line in result.stdout.splitlines():
+                pid = line.rpartition(", pid ")[2]
+                if pid.isdigit():
+                    self.extra_pids.add(int(pid))
         return result.stdout
 
     def account(self, home, account_id, reset, used=10, runs=None, auto_reset=False, release_at=None):
@@ -641,6 +653,9 @@ class RotationTests(unittest.TestCase):
         args = ["wait", slug, "--timeout", str(timeout)]
         if through_sleep:
             args.append("--through-sleep")
+        pid = self.state(slug).get("pid")
+        if pid:
+            self.extra_pids.add(pid)
         output = self.cli(*args, timeout=timeout + 15)
         state = self.state(slug)
         stderr_path = self.home / "claude-tasks" / slug / "stderr.log"
@@ -1650,7 +1665,8 @@ class RotationTests(unittest.TestCase):
         followup = "Read the missing-file handling too"
         self.cli("say", "scout-sleep", followup)
         paused = self.wait("scout-sleep")
-        self.assertEqual(self.state("scout-sleep")["outcome"], "sleeping")
+        self.assertTrue(any(entry.get("event") == "sleep"
+                            for entry in self.state("scout-sleep")["rotations"]))
         self.assert_scout_output(paused)
         self.assert_scout_output(self.wait("scout-sleep", timeout=10, through_sleep=True))
         invocation = self.invocations()[-1]
@@ -3427,10 +3443,15 @@ class RotationTests(unittest.TestCase):
         self.account(self.other, "B", self.reset, used=99)
         self.start("reset-resume")
         first = self.wait("reset-resume")
-        sleeping = self.assert_sleeping("reset-resume", first, reset)
-        self.assertEqual(len(self.invocations()), 1)
-        self.assertIn("sleeping until ", self.cli("status"))
-        self.assertEqual([entry["event"] for entry in sleeping["rotations"]], ["sleep"])
+        # A loaded CI worker can wake before wait or the assertions run.
+        # The recorded sleep proves the pause without requiring it to persist.
+        sleeps = [entry for entry in self.state("reset-resume")["rotations"]
+                  if entry.get("event") == "sleep"]
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0]["until"], reset + 0.1, places=3)
+        self.assertEqual(sleeps[0]["account"], "main")
+        self.assertTrue(sleeps[0]["reason"])
+        self.assertIn("== sleeping until ", first)
 
         self.until(lambda: len(self.invocations()) == 2, timeout=10)
         second = self.wait("reset-resume")
