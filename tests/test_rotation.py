@@ -3348,7 +3348,6 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(len({entry["thread"] for entry in executions}), 3)
         self.assertTrue(all(not entry["resume"] for entry in executions))
         self.assertEqual(len({entry["ppid"] for entry in executions}), 1)
-        self.assertLess(executions[1]["monotonic"], executions[2]["monotonic"])
         self.assertIn("Focus on behavior and acceptance criteria", executions[1]["prompt"])
         self.assertIn("Focus on races, processes, signals", executions[2]["prompt"])
         self.assertNotIn("Focus on races, processes, signals", executions[1]["prompt"])
@@ -3358,6 +3357,9 @@ class RotationTests(unittest.TestCase):
         state = self.state("angles-merge")
         self.assertEqual([entry["angle"] for entry in state["reviews"]],
                          ["correctness", "concurrency"])
+        self.assertEqual([entry["thread"] for entry in executions[1:]],
+                         [entry["thread"] for entry in state["reviews"]],
+                         "Review threads must appear in the append-only trace in preset order")
         result = state["review_result"]
         self.assertEqual(result["verdict"], "defects")
         self.assertEqual([entry["angle"] for entry in result["angles"]],
