@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review] [--check CMD] [--check-timeout SEC]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--review] [--check CMD | --no-check] [--check-timeout SEC]
+  codex_task.py say <slug> "message" | --file FILE [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC]
   codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
@@ -74,6 +74,11 @@ RESULT_SCHEMA = object_schema({
     "pr": {"type": "string", "description": "PR URL, or an empty string."},
     "questions": {"type": "array", "items": {"type": "string"}},
     "remaining": {"type": "array", "items": {"type": "string"}},
+    "findings": {"type": "array", "items": object_schema({
+        "id": {"type": "string", "pattern": "^F[1-9][0-9]*$"},
+        "decision": {"type": "string", "enum": ["fixed", "rejected"]},
+        "note": {"type": "string"},
+    })},
 })
 REVIEW_SCHEMA = object_schema({
     "verdict": {"type": "string", "enum": ["clean", "defects"]},
@@ -627,6 +632,8 @@ def load(slug):
     st.setdefault("reviews", [])
     st.setdefault("checks", [])
     st.setdefault("result", None)
+    st.setdefault("fix_rounds", 0)
+    st.setdefault("rounds", [])
     return st
 
 
@@ -664,7 +671,7 @@ def main_repo(path):
     return common.parent
 
 
-def spawn(st, prompt, effort=None, current_message=False, kind="work", review_after=False):
+def spawn(st, prompt, effort=None, current_message=False, kind="work", review_after=False, fix_rounds=0):
     d = TASKS / st["slug"]
     for name in (("review.md",) if kind == "review" else ("last.md", "review.md")):
         last = d / name
@@ -675,11 +682,13 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
               review_start=len(st.get("reviews", [])), turn_started=time.time(),
               check_start=len(st.get("checks", [])),
               turns=st.get("turns", 0) + 1, rotation_start=len(st["rotations"]),
-              event_start=len(events(st)), exhausted=None, outcome="running", reset_wait_seconds=0)
+              event_start=len(events(st)), exhausted=None, outcome="running", reset_wait_seconds=0,
+              fix_rounds=fix_rounds, rounds=[])
     st.pop("sleeping", None)
     st.pop("turn_finished", None)
     st.pop("error", None)
     st.pop("review_skipped", None)
+    st.pop("auto_fix_stop", None)
     if kind != "review":
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
@@ -720,6 +729,14 @@ def thread_messages(st):
 def last_message(st):
     msgs = thread_messages(st)
     return msgs[-1] if msgs else ""
+
+
+def followup_prompt(st, message, cfg, source="claude"):
+    """Journal follow-ups before dispatch so rotation includes the current request."""
+    with (TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
+        stream.write(json.dumps({"at": time.time(), "text": message, "source": source},
+                                ensure_ascii=False) + "\n")
+    return message if st.get("thread") else handoff(st, current_message=True, cfg=cfg)
 
 
 def rollout_path(home, thread):
@@ -765,7 +782,7 @@ def handoff(st, current_message=False, cfg=None):
                    ("The previous worker stopped partway through the task because its subscription reached its limit.\n"
                     "Its commits and uncommitted changes in this worktree are your starting point. "
                     "Continue the existing work without starting over or reverting it.\n\n"))
-    prompt += "Сообщения от Claude по порядку:\n" if ru else "Messages from Claude, in order:\n"
+    prompt += "Сообщения от Claude и ревью по порядку:\n" if ru else "Messages from Claude and review, in order:\n"
     messages = d / "messages.jsonl"
     if messages.exists():
         lines = messages.read_text().splitlines()
@@ -820,13 +837,40 @@ def scout_prompt(question, cfg=None):
 def review_prompt(st, cfg=None):
     cfg = accounts_config() if cfg is None else cfg
     brief = TASKS / st["slug"] / "brief.md"
-    if cfg.get("language", "en") == "ru":
+    ru = cfg.get("language", "en") == "ru"
+    context = ""
+    checks = st.get("checks", [])
+    if (checks and st.get("check") == checks[-1]["cmd"] and checks[-1]["outcome"] == "passed"):
+        check = checks[-1]
+        evidence = f"`{check['cmd']}`: passed (exit {check['exit']}, {check['seconds']:.0f} s).\n"
+        context += (("Сохранённая проверка уже прошла: " + evidence +
+                     "Не перезапускай весь набор проверок. Запускай только точечные проверки, "
+                     "чтобы подтвердить конкретную находку.\n") if ru else
+                    ("The saved check already passed: " + evidence +
+                     "Do not rerun the full test suite. Run only targeted checks to confirm a specific finding.\n"))
+    rejected = []
+    for entry in st.get("rounds", []):
+        findings = {item["id"]: item for item in (entry.get("review") or {}).get("findings", [])}
+        for decision in entry.get("decisions", []):
+            finding = findings.get(decision["id"])
+            if decision["decision"] == "rejected" and finding is not None:
+                rejected.append(f"{finding['id']} [{finding['severity']}] {finding['file']}:{finding['line']} "
+                                f"— {finding['title']}\n{finding['detail']}\nverify: {finding['verify']}\n"
+                                + ("Причина отклонения: " if ru else "Rejection reason: ") + decision["note"])
+    if rejected:
+        context += (("Исполнитель отклонил следующие находки. Не поднимай их снова, если причина верна; "
+                     "если поднимаешь — объясни, чем она неверна.\n") if ru else
+                    ("The worker rejected these findings. Do not raise them again if the reason is valid; "
+                     "if you raise one again, explain why its rejection reason is wrong.\n"))
+        context += "\n\n".join(rejected) + "\n"
+    if ru:
         return (f"Проведи ревью изменений задачи: git diff {shlex.quote(st['base'])}.\n"
                 f"Бриф задачи — в файле {brief}. Прочитай его и сверяйся с разделом «Готово, когда».\n"
                 "Ищи только реальные дефекты: неверное поведение, невыполненные пункты брифа, "
                 "сломанные или фиктивные проверки, опасные побочные эффекты, гонки.\n"
                 "Для каждого дефекта укажи файл:строка, что не так и как это проверить. "
                 "Без замечаний по стилю.\n"
+                + context +
                 "Файлы не меняй, ничего не коммить. Ответь JSON по схеме ревью: verdict clean, если "
                 "дефектов нет, иначе defects. Находки нумеруй F1, F2 и далее; severity P1/P2/P3, "
                 "file, line, title, detail и verify. При clean findings пуст; summary — краткий итог.")
@@ -836,9 +880,41 @@ def review_prompt(st, cfg=None):
             "broken or ineffective checks, dangerous side effects, and races.\n"
             "For each defect, give file:line, explain what is wrong and how to verify it. "
             "Do not comment on style.\n"
+            + context +
             "Do not change files or create commits. Return JSON matching the review schema: verdict clean "
             "when there are no defects, otherwise defects. Number findings F1, F2, etc.; include severity "
             "P1/P2/P3, file, line, title, detail and verify. For clean, findings is empty; summary is a short recap.")
+
+
+def check_tail(st):
+    path = TASKS / st["slug"] / "check.log"
+    if not path.exists():
+        return ""
+    with path.open(encoding="utf-8", errors="replace") as output:
+        return "".join(deque(output, maxlen=40)).rstrip()
+
+
+def fix_prompt(st, review, check, cfg):
+    ru = cfg.get("language", "en") == "ru"
+    if check is not None:
+        prompt = (("Исправь сбой сохранённой проверки после предыдущего исправления.\n" if ru else
+                   "Fix the saved check failure after the previous fix.\n") +
+                  f"`{check['cmd']}`: {check['outcome']}, exit {check['exit']}\ncheck.log (40):\n" +
+                  check.get("tail", check_tail(st)))
+    else:
+        prompt = "Проверь находки ревью по коду:\n" if ru else "Check these review findings against the code:\n"
+        for finding in review["findings"]:
+            prompt += (f"\n{finding['id']} [{finding['severity']}] {finding['file']}:{finding['line']} "
+                       f"— {finding['title']}\n{finding['detail']}\nverify: {finding['verify']}\n")
+    prompt += (("\n\nПроверь каждую находку по коду. Настоящие дефекты исправь, где разумно — с тестом. "
+                "Неверные отклони с причиной в одну строку. Закоммить и запушь изменения. "
+                "Верни итог по схеме работы; в findings укажи для каждой находки id, "
+                "decision fixed или rejected и note с пояснением. Если находок нет, findings пуст.\n") if ru else
+               ("\n\nVerify every finding against the code. Fix real defects, adding a test where reasonable. "
+                "Reject incorrect findings with a one-line reason. Commit and push the changes. "
+                "Return the work result schema; in findings give each finding's id, decision fixed or rejected, "
+                "and an explanatory note. When there are no findings, use an empty findings array.\n"))
+    return prompt
 
 
 def reset_resume_prompt(cfg=None):
@@ -1194,7 +1270,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                     thread = event["thread_id"]
                                     if reviewing:
                                         review_entry = {"account": account["name"], "thread": thread,
-                                                        "started": attempt_started, "finished": None, "result": None}
+                                                        "started": attempt_started, "finished": None, "result": None,
+                                                        "round": len(st.get("rounds", []))}
                                         st.setdefault("reviews", []).append(review_entry)
                                     else:
                                         st["thread"] = thread
@@ -1423,9 +1500,87 @@ def run_check(st, stopped):
         st["outcome"] = "stopped"
     result = {"cmd": st["check"], "exit": code, "seconds": round(time.monotonic() - started, 3),
               "at": time.time(), "outcome": outcome}
+    if outcome in ("failed", "timeout"):
+        result["tail"] = check_tail(st)
     st.setdefault("checks", []).append(result)
     save(st)
     return result
+
+
+def saved_check(st, cfg, stopped, review_after=True):
+    check = run_check(st, stopped) if st.get("check") and not stopped() else None
+    if check and check["outcome"] in ("failed", "timeout"):
+        if review_after and not st.get("review_skipped"):
+            st["review_skipped"] = "check " + check["outcome"]
+        save(st)
+        notify(st, cfg, "check_failed", f"check {check['outcome']} on {st['account']}",
+               outcome=check["outcome"])
+    return check
+
+
+def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False):
+    start = len(st.get("reviews", []))
+    st.update(kind="review", outcome="running", reset_wait_seconds=0)
+    save(st)
+    try:
+        run_turn(st, cfg, prompt, effort, False, stopped, sleep, new_turn=new_turn)
+    except (Exception, SystemExit):
+        st["outcome"] = "stopped" if stopped() else "failed"
+        raise
+    finally:
+        reviews = st.get("reviews", [])[start:]
+        result = reviews[-1].get("result") if reviews else None
+        account = st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
+        outcome = "stopped" if stopped() else st["outcome"]
+        notify(st, cfg, "review_done", f"review {outcome} on {account}",
+               outcome=outcome, account=account,
+               verdict=result["verdict"] if result else None,
+               findings=len(result["findings"]) if result else 0, round=len(st.get("rounds", [])))
+    return result
+
+
+def auto_fix(st, cfg, review, effort, stopped, sleep):
+    """Bounded work/check/review loop under the original supervisor and wait."""
+    failed_check = None
+    while not stopped() and st.get("outcome") == "completed":
+        if failed_check is None:
+            if review is None:
+                st["auto_fix_stop"] = "review unknown"
+                return
+            if review["verdict"] == "clean":
+                st["auto_fix_stop"] = "clean"
+                return
+        if len(st["rounds"]) >= st["fix_rounds"]:
+            st["auto_fix_stop"] = "check " + failed_check["outcome"] if failed_check else "rounds_exhausted"
+            return
+        message = fix_prompt(st, review, failed_check, cfg)
+        entry = {"review": None if failed_check else review, "decisions": [], "check": None}
+        st["rounds"].append(entry)
+        st.update(kind="work", result=None, outcome="running", reset_wait_seconds=0)
+        st.pop("review_skipped", None)
+        prompt = followup_prompt(st, message, cfg, source="review")
+        save(st)
+        run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
+        result = st.get("result")
+        entry["decisions"] = result["findings"] if result is not None else []
+        save(st)
+        if stopped() or st.get("outcome") != "completed":
+            return
+        if result is None or result["status"] != "done":
+            st["auto_fix_stop"] = "result " + (result["status"] if result else "unknown")
+            st["review_skipped"] = st["auto_fix_stop"]
+            return
+        check = saved_check(st, cfg, stopped)
+        entry["check"] = check
+        save(st)
+        if stopped():
+            return
+        if check is not None and check["outcome"] != "passed":
+            failed_check = check
+            continue
+        failed_check = None
+        st["work_completed"] = True
+        review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, sleep)
 
 
 def cmd__run(a):
@@ -1451,32 +1606,35 @@ def cmd__run(a):
         cfg = accounts_config()
         pending = st.pop("pending")
         effort = pending["effort"]
-        run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
-                 stopped, stopped_flag.wait)
+        if st.get("kind") == "review":
+            review_turn(st, cfg, pending["prompt"], effort, stopped, stopped_flag.wait, new_turn=True)
+        else:
+            run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
+                     stopped, stopped_flag.wait)
         work_result = st.get("result") if st.get("kind") not in ("review", "scout") else None
         if (work_result is not None and work_result["status"] != "done"
                 and pending.get("review_after") and st.get("outcome") == "completed"):
             st["review_skipped"] = "result " + work_result["status"]
             save(st)
         if st.get("kind") not in ("review", "scout") and st.get("outcome") == "completed" and st.get("check") and not stopped():
-            check = run_check(st, stopped)
-            if check and check["outcome"] in ("failed", "timeout"):
-                notify(st, cfg, "check_failed", f"check {check['outcome']} on {st['account']}",
-                       outcome=check["outcome"])
-                if pending.get("review_after") and not st.get("review_skipped"):
-                    st["review_skipped"] = "check " + check["outcome"]
-                    save(st)
+            check = saved_check(st, cfg, stopped, pending.get("review_after"))
         if (st.get("kind") != "scout" and st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
                 and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")):
-            st.update(kind="review", work_completed=True, outcome="running", reset_wait_seconds=0)
-            save(st)
-            run_turn(st, cfg, review_prompt(st, cfg), effort, False, stopped, stopped_flag.wait, new_turn=False)
+            st["work_completed"] = True
+            review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, stopped_flag.wait)
+            if st.get("fix_rounds"):
+                auto_fix(st, cfg, review, effort, stopped, stopped_flag.wait)
+            checks = st.get("checks", [])[st.get("check_start", 0):]
+            check = checks[-1] if checks else None
     except (Exception, SystemExit) as exc:
         st.update(outcome="failed", error=str(exc))
         print(f"supervisor failed: {exc}", file=sys.stderr)
     finally:
         if stopped():
             st["outcome"] = "stopped"
+        if st.get("fix_rounds") and (st.get("outcome") != "completed" or not st.get("auto_fix_stop")):
+            st["auto_fix_stop"] = (st.get("outcome") if st.get("outcome") != "completed"
+                                   else st.get("review_skipped", "review unknown"))
         st.pop("sleeping", None)
         st["turn_finished"] = time.time()
         st.pop("pending", None)
@@ -1485,11 +1643,6 @@ def cmd__run(a):
             if st.get("kind") == "review":
                 reviews = st.get("reviews", [])[st.get("review_start", 0):]
                 account = st.get("review_account") or (reviews[-1]["account"] if reviews else account)
-                review_result = reviews[-1].get("result") if reviews else None
-                notify(st, cfg, "review_done", f"review {st['outcome']} on {account}",
-                       outcome=st["outcome"], account=account,
-                       verdict=review_result["verdict"] if review_result else None,
-                       findings=len(review_result["findings"]) if review_result else 0)
             message = f"turn {st['outcome']} on {account}"
             result = st.get("result")
             message += ", result " + (result["status"] if result is not None else "unknown")
@@ -1539,7 +1692,7 @@ def cmd_start(a):
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "created": time.time(), "turns": 0}
     save(st)
-    proc = spawn(st, prompt, a.effort, review_after=a.review)
+    proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
         st = load(a.slug)
         if st["thread"] or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
@@ -1589,8 +1742,8 @@ def cmd_scout(a):
 def cmd_say(a):
     st = load(a.slug)
     scouting = st.get("kind") == "scout"
-    if scouting and (a.check is not None or a.review or a.check_timeout is not None):
-        die("scout is read-only; say --check, --check-timeout and --review are not supported")
+    if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None):
+        die("scout is read-only; say --check, --check-timeout, --review and --fix-rounds are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -1602,12 +1755,10 @@ def cmd_say(a):
         st["check"] = a.check
     if a.check_timeout is not None:
         st["check_timeout"] = a.check_timeout
-    with (TASKS / a.slug / "messages.jsonl").open("a") as f:
-        f.write(json.dumps({"at": time.time(), "text": msg}, ensure_ascii=False) + "\n")
     # If no thread was created (all accounts exhausted on start), retain the brief too.
-    prompt = msg if st.get("thread") else handoff(st, current_message=True, cfg=cfg)
+    prompt = followup_prompt(st, msg, cfg)
     spawn(st, prompt, a.effort or st.get("effort"), current_message=True,
-          kind="scout" if scouting else "work", review_after=a.review)
+          kind="scout" if scouting else "work", review_after=a.review, fix_rounds=a.fix_rounds or 0)
     print(f"sent to {a.slug} (turn {st['turns']}), pid {st['pid']}")
 
 
@@ -1676,19 +1827,30 @@ def cmd_wait(a):
         else:
             raw = last.read_text().strip() if last.exists() else last_message(st) or "(no final message)"
             print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
+    for number, entry in enumerate(st.get("rounds", []), 1):
+        findings = (entry.get("review") or {}).get("findings", [])
+        counts = ", ".join(f"{severity} {sum(f['severity'] == severity for f in findings)}"
+                           for severity in ("P1", "P2", "P3") if any(f["severity"] == severity for f in findings))
+        source = f"{len(findings)} findings" + (f" ({counts})" if counts else "")
+        if entry.get("review") is None:
+            source = "check failure"
+        decisions = entry.get("decisions", [])
+        fixed = sum(d["decision"] == "fixed" for d in decisions)
+        rejected = sum(d["decision"] == "rejected" for d in decisions)
+        print(f"== round {number}: {source} → fixed {fixed}, rejected {rejected}")
+        for decision in decisions:
+            if decision["decision"] == "rejected":
+                print(f"- rejected {decision['id']}: {decision['note']}")
     checks = [] if st.get("kind") == "scout" else st.get("checks", [])[st.get("check_start", 0):]
     for check in checks:
         label = {"passed": "passed", "stopped": "stopped"}.get(check["outcome"], "FAILED")
         reason = "timeout, " if check["outcome"] == "timeout" else ""
         print(f"== check `{check['cmd']}`: {label} ({reason}exit {check['exit']}, {check['seconds']:.0f} s)")
         if check["outcome"] in ("failed", "timeout"):
-            path = d / "check.log"
-            if path.exists():
-                with path.open(encoding="utf-8", errors="replace") as output:
-                    print("".join(deque(output, maxlen=40)).rstrip())
+            print(check.get("tail", check_tail(st)))
     if st.get("review_skipped"):
         print("== review skipped: " + st["review_skipped"])
-    if st.get("kind") == "review":
+    if st.get("kind") == "review" or st.get("rounds"):
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         if reviews:
             entry = reviews[-1]
@@ -1710,6 +1872,12 @@ def cmd_wait(a):
                     print("verify: " + finding["verify"])
         else:
             print("(Codex did not run review)")
+    if st.get("fix_rounds"):
+        reviews = st.get("reviews", [])[st.get("review_start", 0):]
+        trajectory = " → ".join(str(len(entry["result"]["findings"])) for entry in reviews
+                                if entry.get("result") is not None) or "unknown"
+        reason = st.get("auto_fix_stop", st.get("outcome", "unknown"))
+        print(f"== auto-fix: {len(st.get('rounds', []))} rounds, findings {trajectory}; stop: {reason}")
     failed = [e for e in events(st)[st.get("exec_event_start", st.get("event_start", 0)):] if e.get("type") in ("turn.failed", "error")]
     if failed:
         print("== errors:", json.dumps(failed[-1], ensure_ascii=False)[:500])
@@ -1914,6 +2082,8 @@ def main():
     s.add_argument("--effort", default=None, help="default: model_reasoning_effort from ~/.codex/config.toml")
     s.add_argument("--parallel", action="store_true")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
+    s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
+                   help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
     s.add_argument("--check", help="shell command to run after completed work turns; saved for follow-ups")
     s.add_argument("--check-timeout", type=check_timeout, default=1800, help="check timeout in seconds (default: 1800)")
     s = sub.add_parser("scout", help="answer a code question in an existing directory, read-only")
@@ -1929,6 +2099,8 @@ def main():
     s.add_argument("--file")
     s.add_argument("--effort", default=None)
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
+    s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
+                   help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
     checks = s.add_mutually_exclusive_group()
     checks.add_argument("--check", help="replace the saved check command")
     checks.add_argument("--no-check", action="store_true", help="remove the saved check command")
@@ -1965,6 +2137,8 @@ def main():
             scout_parser.error("argument --file: not allowed with argument question")
     else:
         a = p.parse_args()
+    if a.cmd in ("start", "say") and a.fix_rounds is not None and not a.review:
+        p.error("--fix-rounds requires --review")
     if a.cmd in ("start", "scout", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):
         global CODEX
         CODEX = resolve_codex()

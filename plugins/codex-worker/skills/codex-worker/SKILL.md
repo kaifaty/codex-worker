@@ -44,12 +44,14 @@ Do not touch: <what is outside the task>.
 
 `start` appends the standing rules: own worktree only, no bureaucracy, checks for this task only, stop
 after two failed attempts with numbers, push and open a PR but never merge, no Co-Authored-By, and a
-JSON result with a plain-language summary, checks, PR, questions, and remaining work. The settings
+JSON result with a plain-language summary, checks, PR, questions, remaining work, and finding decisions.
+Ordinary turns return an empty `findings` array; fix turns use `{id, decision: fixed|rejected, note}`
+for the supplied findings. The settings
 choose `references/rules.md` or `references/rules.ru.md`; `~/.codex/codex-worker-rules.md`, if present,
 replaces either file. Use that override for another
 language or your own rules; `{branch}` and `{base}` are replaced with the task's branch and PR target.
 
-The same language setting selects the scout, handoff, review, and reset-continuation prompts written by
+The same language setting selects the scout, handoff, review, fix, and reset-continuation prompts written by
 the script. Scouts use their own read-only instructions instead of task rules. Account status output
 is always English. The old `~/.codex/claude-accounts.json` is read only
 when `codex-worker.json` is absent.
@@ -72,10 +74,10 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --review --check "<command from Checks>"` (base defaults to the remote's default branch) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --review --fix-rounds 2 --check "<command from Checks>"` (base defaults to the remote's default branch) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; reads the existing directory (default `.`) with a read-only sandbox and creates no worktree or branch; `wait` prints its concise report |
-| Wait for the turn | `wait <slug>` as a **background** Bash command: it re-invokes you when Codex's turn ends and prints its result, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check` |
+| Wait for the cycle | `wait <slug>` as a **background** Bash command: it re-invokes you when the full review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check` |
 | First review | `review <slug> [--effort E]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a `done` result and a passing check, or an unstructured result for compatibility |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
@@ -90,7 +92,8 @@ when the tasks' builds and tests cannot interfere. A task's turn survives the en
 new session `status` and `wait` pick it up again.
 
 Scouts can run alongside tasks and in parallel without `--parallel`, one question per scout. `say`
-continues the same read-only thread; `--check`, `--review`, and `review` are unavailable for scouts.
+continues the same read-only thread; `--check`, `--review`, `--fix-rounds`, and `review` are unavailable
+for scouts.
 `clean` archives scout threads and removes only its task state and logs, preserving the inspected
 directory.
 
@@ -99,11 +102,30 @@ automatic review. `--check-timeout SEC` defaults to 1800; output goes to the tas
 Failure or timeout skips the requested review, and `wait` shows the result and the last 40 output
 lines. Results of `partial`, `blocked`, or `needs_decision` also skip automatic review, with
 `review_skipped: "result <status>"`; the saved check still runs. Failed, stopped, and paused turns do
-not run checks.
+not run checks. Inside an automatic fix cycle, an incomplete result stops immediately before checks.
+
+Use `start --review --fix-rounds 2 --check "<command from Checks>"` by default. `--fix-rounds N` on
+`start` or `say` accepts 0–5, defaults to 0, and requires `--review`. Each round sends the review's
+findings directly to the implementation thread, with the same account rotation and reset waiting as
+`say`. Codex must verify each finding against the code, fix real defects with tests where useful,
+reject incorrect findings with a one-line reason, then commit and push. The saved check runs before
+another review in a fresh thread. That review receives rejected findings and their reasons, with an
+instruction to explain any disagreement before raising them again.
+
+The cycle stops on `clean`, the round limit, `partial`, `blocked`, `needs_decision`, or `stop`. A check
+failure after a fix spends the next available round on the last 40 lines of `check.log` instead of
+review findings. If no round remains, it stops without another review. A single `wait` follows the
+cycle and prints round finding counts and decisions, rejected findings with reasons, check results,
+the latest review in full, a finding-count history, and the stop reason. If the task sleeps at a limit,
+the usual `wait --through-sleep` option applies.
+
+Every review prompt names the command and result of a passing saved check and tells the reviewer not
+to rerun the full suite. Only focused checks needed to confirm a specific finding should run again.
 
 Implementation and review turns use `--output-schema` with strict schemas saved in the task directory.
-`wait` renders the implementation's `status`, `summary`, `checks`, `pr`, `questions`, and `remaining`,
-and review findings with IDs, severity, file and line, details, and verification steps. Reviews have a
+`wait` renders the implementation's `status`, `summary`, `checks`, `pr`, `questions`, `remaining`, and
+`findings` decisions, plus review findings with IDs, severity, file and line, details, and verification
+steps. Reviews have a
 `clean` or `defects` verdict. The supervisor saves valid implementation JSON in state as `result` and
 valid review JSON in the review record. An invalid or non-JSON final message has `result: null`;
 `wait` labels it `unknown` and prints the original text. Scouts keep their plain-text reports.
@@ -112,6 +134,7 @@ The user can configure task notifications with `notify` in `~/.codex/codex-worke
 an argv list receiving the event JSON as its final argument. `notify_events` optionally filters event
 types. Hooks run asynchronously and write output or launch errors to the task's `notify.log`; see the
 README for examples.
+`review_done` includes the review's `round`; `turn_finished` fires once at the end of the whole cycle.
 
 ## Multiple subscriptions
 
@@ -163,23 +186,26 @@ parallel, one question each, and `wait` for their reports. Verify key facts by r
 `file:line` locations; use `say` for follow-up questions.
 
 1. Write the brief to a temporary file outside the repository, such as the session scratchpad or a
-   temporary directory, so it cannot enter a checkout commit. Run `start --review --check "<command
-   from Checks>"`, then `wait` in the background. Tell the user in a line what went to Codex and that
-   you will report back; don't sit and poll.
+   temporary directory, so it cannot enter a checkout commit. Run `start --review --fix-rounds 2
+   --check "<command from Checks>"`, then one `wait` in the background for the whole cycle. Tell the
+   user in a line what went to Codex and that you will report back; don't sit and poll.
 2. When `wait` returns, first read `result`. For `needs_decision`, decide yourself if the decision is
    within the task; otherwise ask the user, then send the decision with `say`. For `blocked`, resolve
    the blocker or take it to the user. For `partial`, send `say` with the next instructions. For
-   `done`, read the check result and the first review from its fresh thread; if there was no
+   `done`, read the check result and latest review from its fresh thread; if there was no
    `--review`, run `review` and `wait` again. If `result` is unknown, read the original final message
    and follow the same check and review process as before. The supervisor's check result is objective
-   evidence for that command; the summary and findings are claims. If the check failed, send a fix
-   request before requesting a review.
-3. Check every finding against the actual diff (`gh pr diff <n>` or
+   evidence for that command; the summary, finding decisions, and rejection reasons are worker claims
+   to verify. If the check failed and the cycle stopped, send a fix request before requesting a review.
+3. Read the actual diff, latest review, and every rejection reason. Check each finding and rejection
+   against the code (`gh pr diff <n>` or
    `git -C <worktree> diff <base>`), then review the parts the findings did not cover for real failures.
    Follow the repo's review rules; use `/code-review` for big or risky PRs if available. Check its
    numbers against the "Done when" list. A passing check does not replace reading the diff.
-4. Found problems → one `say` with all of them, each with what's wrong, what to do and how it is checked.
-   Same stop rule: after two rounds on the same point, take it to the user.
+4. Found problems or findings left after the round limit → one `say` with all of them, each with what's
+   wrong, what to do and how it is checked; use `--review --fix-rounds 2` for another bounded cycle.
+   Record deferred work in issues when appropriate. Same stop rule: after two rounds on the same
+   point, take it to the user.
 5. Good → merge per the repo's rules, then `clean`. Report to the user: what Codex did, what you checked,
    what is still open, the PR link. If `wait` reported an account switch, mention it.
 

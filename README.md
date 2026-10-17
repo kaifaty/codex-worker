@@ -5,8 +5,9 @@ moves substantial coding work to your ChatGPT subscription, saving Claude subscr
 parts where you want Claude's judgment.
 
 Claude writes a bounded brief, starts Codex, and waits in the background. Codex commits and opens a PR.
-A fresh Codex thread can provide the first review; Claude checks the diff, requests fixes, and handles
-the final review and merge. Optional account monitoring can pause a task until a usage window resets.
+Optional Codex reviews run in fresh threads, and the supervisor can send findings back for bounded
+fix rounds. Claude checks the final diff and review and handles merging. Optional account monitoring
+can pause a task until a usage window resets.
 
 This repository is both the `kaifaty` Claude Code marketplace and the `codex-worker` plugin.
 
@@ -64,26 +65,31 @@ The skill handles these commands for Claude. To run them yourself, set `T` to th
 
 ```sh
 T="$HOME/.claude/skills/codex-worker/scripts/codex_task.py"
-python3 -I "$T" start csv-export --brief brief.md --review --check "python3 -m unittest tests.test_csv_export"
+python3 -I "$T" start csv-export --brief brief.md --review --fix-rounds 2 --check "python3 -m unittest tests.test_csv_export"
 python3 -I "$T" wait csv-export
 python3 -I "$T" status csv-export
 ```
 
 Use a brief with the change, context, measurable completion conditions, focused checks, and boundaries.
 The worker creates `codex/csv-export` and an isolated worktree, implements the task, runs the check,
-and starts the first review in a fresh thread if the check passes and the result is `done`. In Claude
-Code, `wait` runs as a background Bash command so Claude can resume when the turn ends.
+and starts a review in a fresh thread if the check passes and the result is `done`. With
+`--fix-rounds 2`, it can send findings to the worker, check the fixes, and review again twice without
+Claude relaying messages. One `wait` covers the whole cycle; in Claude Code it runs as a background
+Bash command.
 
 Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
 status (`done`, `partial`, `blocked`, or `needs_decision`), summary, checks, PR, questions, and remaining
-work, plus review findings with IDs, severity, locations, and verification steps. `status <slug>`
+work, plus round summaries, rejected findings with reasons, the latest review, and the stop reason.
+Implementation results include `findings` decisions (`fixed` or `rejected`), empty on ordinary turns.
+Review findings include IDs, severity, locations, and verification steps. `status <slug>`
 includes the latest `result`. Invalid or non-JSON finals remain readable as `result: unknown`, and
 automatic review keeps its previous behavior for them. Scouts return plain text.
 
-Check the report and the actual diff. If there are issues, send one follow-up and wait again:
+Check the actual diff, latest review, and rejection reasons: the worker's claims need verification.
+Send remaining findings through `say` or record issues after the round limit:
 
 ```sh
-python3 -I "$T" say csv-export --file fixes.md --review
+python3 -I "$T" say csv-export --file fixes.md --review --fix-rounds 2
 python3 -I "$T" wait csv-export
 ```
 
@@ -121,10 +127,10 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review] [--check CMD]` | Create a worktree and start implementation; `--brief -` reads stdin. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review [--fix-rounds N]] [--check CMD]` | Create a worktree and start implementation; `--brief -` reads stdin. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review`, replace the check with `--check CMD`, or remove it with `--no-check`. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review --fix-rounds N`, replace the check with `--check CMD`, or remove it with `--no-check`. |
 | `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
@@ -137,6 +143,12 @@ Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
 `~/.codex/claude-tasks/<slug>/`. Turns continue independently of Claude's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
+
+`--fix-rounds` accepts 0–5 (default 0), requires `--review`, and is unavailable for scouts. The loop
+stops on a clean review, the round limit, a worker result requiring intervention, or `stop`. A failed
+check after a fix uses the next available round to send the last 40 lines of `check.log` to the worker;
+without a remaining round, it stops without another review. Reviews are told the command and result
+of a passing saved check and may run only focused checks for a specific finding, not repeat the suite.
 
 ## Checks after each turn
 
@@ -169,7 +181,7 @@ A minimal configuration is:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated scout, handoff, review, and reset-continuation prompts. Claude writes the brief in the user's configured language. |
+| `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated scout, handoff, review, fix, and reset-continuation prompts. Claude writes the brief in the user's configured language. |
 | `accounts` | Absent | Explicit account list; its presence enables automatic limit monitoring and rotation. Without it, tasks use the existing `~/.codex` login. |
 | `switch_at` | `99` | Used-percentage threshold for configured accounts, greater than 0 and at most 100. |
 | `credits` | `false` | Allow continuing on credits if no configured account has ordinary usage available. |
@@ -203,7 +215,7 @@ An argv hook receives one final JSON argument with `event`, `kind`, `slug`, `rep
 and a short `message`. Event types are `turn_finished` (`outcome`, `result`, also named in `message`),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
-(`verdict` and finding count).
+(`verdict`, finding count, and `round`). `turn_finished` is sent once when the entire cycle ends.
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
 with `curl`; the appended argument supplies the value for `--data-binary`:
 
