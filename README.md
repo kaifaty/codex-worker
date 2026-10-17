@@ -261,10 +261,14 @@ and network access are **not** restricted.
 
 The worker leaves changes in the worktree and returns a `commit_message` whose first line is the
 subject. After each completed work turn, including fix rounds and any result status, the supervisor
-commits changes before checking them, with Git hooks disabled. It pushes without force and creates a
-PR if `gh` is available and the branch has none. Failed or stopped turns are not committed. Empty
+commits changes before checking them, with Git hooks and fsmonitor disabled. It pushes without force
+and creates a PR if `gh` is available and the branch has none. Failed or stopped turns are not committed. Empty
 messages use `<slug>: turn <N>`. Push or PR failures do not fail the turn; `wait` shows the publication
 result or error and `== sandbox: workspace`. `status` also shows the mode.
+
+Only filters whose `clean`, `smudge`, or `process` commands start with `git-lfs ` or `git lfs ` allow
+supervisor publication; otherwise, commit the turn manually. Workspace mode is unsuitable for a
+repository whose config references worktree files through `include.path` or `core.attributesFile`.
 
 ## Task notifications
 

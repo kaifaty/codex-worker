@@ -63,6 +63,7 @@ MINUTE_SECONDS = float(os.environ.get("CODEX_TASK_MINUTE_SECONDS", "60"))
 RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
+GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 
 
 def object_schema(properties):
@@ -171,6 +172,27 @@ def sh(cmd, cwd=None, check=True, errors="strict"):
     if check and r.returncode != 0:
         die(f"{' '.join(cmd)} failed:\n{r.stderr.strip() or r.stdout.strip()}")
     return r.stdout.rstrip()
+
+
+def unsafe_filter_driver(cwd):
+    """Read every config scope without inspecting worker-written file contents."""
+    result = subprocess.run(GIT + ["config", "--null", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
+                            cwd=cwd, text=True, capture_output=True, errors="replace")
+    if result.returncode == 1:  # No configured filter commands.
+        return None
+    result.check_returncode()
+    # NUL-delimited records preserve embedded newlines in filter commands.
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        key, _, command = record.partition("\n")
+        if not command.startswith(("git-lfs ", "git lfs ")):
+            return key[len("filter."):key.rfind(".")]
+    return None
+
+
+def workspace_filter_driver(st):
+    return unsafe_filter_driver(st["worktree"]) if st.get("sandbox") == "workspace" else None
 
 
 def accounts_config():
@@ -729,7 +751,7 @@ def running_tasks(exclude=""):
 
 def main_repo(path):
     """The main checkout of the repository `path` belongs to (including worktrees)."""
-    common = Path(sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
+    common = Path(sh(GIT + ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
     return common.parent
 
 
@@ -860,9 +882,14 @@ def handoff(st, current_message=False, cfg=None):
                 prompt += f"\n{n}. {text}\n"
     if not scouting:
         prompt += f"\n{'Коммиты' if ru else 'Commits'} (git log --oneline {st['base']}..HEAD):\n"
-        prompt += sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")
+        prompt += sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")
         prompt += ("\n\nСостояние worktree (git status --short):\n" if ru else "\n\nWorktree status (git status --short):\n")
-        prompt += sh(["git", "status", "--short"], cwd=st["worktree"], check=False) or ("(чисто)" if ru else "(clean)")
+        driver = workspace_filter_driver(st)
+        if driver is not None:
+            prompt += (f"(пропущено: настроен фильтр {driver})" if ru else
+                       f"(skipped: filter driver {driver} is configured)")
+        else:
+            prompt += sh(GIT + ["status", "--short"], cwd=st["worktree"], check=False) or ("(чисто)" if ru else "(clean)")
     if has_threads:
         label = (("Последние сообщения предыдущего разведчика" if ru else "Latest messages from the previous scout")
                  if scouting else ("Последние сообщения предыдущего исполнителя" if ru else "Latest messages from the previous worker"))
@@ -954,12 +981,12 @@ DISABLED_TEST = re.compile(
 
 def guarded_changes(st):
     """Combine committed and dirty diffs, treating renames as deletion/addition."""
-    if st.get("kind") == "scout":
+    if st.get("kind") == "scout" or workspace_filter_driver(st) is not None:
         return []
     root = st["worktree"]
     paths = check_paths(st)
     changed = {}
-    args = ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
+    args = GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
     for revisions in ([st["base"], "HEAD"], ["--cached", "HEAD"], []):
         stats = sh(args + ["--numstat", "-z"] + revisions + ["--"], cwd=root, check=False)
         deleted = set(sh(args + ["--name-only", "-z", "--diff-filter=D"] + revisions + ["--"],
@@ -994,7 +1021,7 @@ def guarded_changes(st):
                     line_number += 1
                 elif in_hunk and line.startswith(" "):
                     line_number += 1
-    untracked = sh(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
+    untracked = sh(GIT + ["ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
     for path in filter(None, untracked.split("\0")):
         if not guarded_path(path, st, paths):
             continue
@@ -1909,6 +1936,9 @@ def run_check(st, stopped):
 
 def run_base_check(st, stopped):
     """Check task HEAD with the base's guarded files, leaving the task untouched."""
+    driver = workspace_filter_driver(st)
+    if driver is not None:
+        return {"outcome": "skipped", "reason": f"filter driver {driver} is configured; commit this turn manually"}
     if st["worktree"] in st["check"]:
         return {"outcome": "skipped", "reason": "check command uses the task worktree's absolute path"}
     started = time.monotonic()
@@ -1920,15 +1950,15 @@ def run_base_check(st, stopped):
         with tempfile.TemporaryDirectory(prefix="base-check-", dir=str(TASKS / st["slug"])) as directory:
             worktree = Path(directory) / "worktree"
             try:
-                subprocess.run(["git", "worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
+                subprocess.run(GIT + ["worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
                                cwd=st["worktree"], check=True, capture_output=True)
                 guarded = set()
                 for revision in (st["base"], "HEAD"):
-                    files = sh(["git", "ls-tree", "-r", "--name-only", "-z", revision],
+                    files = sh(GIT + ["ls-tree", "-r", "--name-only", "-z", revision],
                                cwd=worktree)
                     guarded.update(path for path in files.split("\0") if path and guarded_path(path, st, paths))
                 if guarded:
-                    subprocess.run(["git", "--literal-pathspecs", "restore", "--source=" + st["base"],
+                    subprocess.run(GIT + ["--literal-pathspecs", "restore", "--source=" + st["base"],
                                     "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
                                    input="\0".join(sorted(guarded)) + "\0", text=True,
                                    cwd=worktree, check=True, capture_output=True)
@@ -1939,7 +1969,7 @@ def run_base_check(st, stopped):
                         result["outcome"] = "failed"
             finally:
                 if (worktree / ".git").exists():
-                    subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
+                    subprocess.run(GIT + ["worktree", "remove", "--force", str(worktree)],
                                    cwd=st["worktree"], check=True, capture_output=True)
     except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
         detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
@@ -1995,7 +2025,6 @@ def publish_work(st, stopped):
             or st.get("outcome") != "completed" or stopped()):
         return
     receipt = {"at": time.time(), "sha": "", "pushed": False, "pr": "", "error": ""}
-    git = ["git", "-c", "core.hooksPath=/dev/null"]
 
     def run(args):
         return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
@@ -2003,7 +2032,11 @@ def publish_work(st, stopped):
 
     stage = "commit"
     try:
-        if not run(git + ["status", "--porcelain"]):
+        driver = unsafe_filter_driver(st["worktree"])
+        if driver is not None:
+            raise RuntimeError(f"filter driver {driver} is configured; the supervisor does not run filters "
+                               "on worker-written files — commit this turn manually")
+        if not run(GIT + ["status", "--porcelain"]):
             return
         message = ((st.get("result") or {}).get("commit_message") or "").strip()
         message = message or f"{st['slug']}: turn {st['turns']}"
@@ -2013,13 +2046,13 @@ def publish_work(st, stopped):
             file.flush()
             if stopped():
                 return
-            run(git + ["add", "-A"])
+            run(GIT + ["add", "-A"])
             if stopped():
                 return
-            run(git + ["commit", "-F", file.name])
-        receipt["sha"] = run(git + ["rev-parse", "HEAD"])
+            run(GIT + ["commit", "-F", file.name])
+        receipt["sha"] = run(GIT + ["rev-parse", "HEAD"])
         stage = "push"
-        run(git + ["push", "-u", "origin", st["branch"]])
+        run(GIT + ["push", "-u", "origin", st["branch"]])
         receipt["pushed"] = True
         gh = shutil.which("gh")
         if gh:
@@ -2034,7 +2067,7 @@ def publish_work(st, stopped):
                     file.flush()
                     receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].removeprefix("origin/"),
                                          "--head", st["branch"], "--title", subject, "--body-file", file.name])
-    except (OSError, subprocess.CalledProcessError) as exc:
+    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         detail = (exc.stderr or exc.stdout or str(exc)) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         receipt["error"] = stage + ": " + detail.strip()
     st["publish"] = receipt
@@ -2201,11 +2234,11 @@ def cmd_start(a):
     wt = WORKTREES / f"claude-{a.slug}" / repo.name
     if wt.exists():
         die(f"{wt} exists")
-    sh(["git", "fetch", "--quiet", "origin"], cwd=repo)
-    a.base = a.base or sh(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
+    sh(GIT + ["fetch", "--quiet", "origin"], cwd=repo)
+    a.base = a.base or sh(GIT + ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
                           check=False) or "origin/main"
     wt.parent.mkdir(parents=True, exist_ok=True)
-    sh(["git", "worktree", "add", "--quiet", "-b", branch, str(wt), a.base], cwd=repo)
+    sh(GIT + ["worktree", "add", "--quiet", "-b", branch, str(wt), a.base], cwd=repo)
     d = TASKS / a.slug
     d.mkdir(parents=True)
     prompt = brief.rstrip() + "\n\n" + rules.replace("{branch}", branch).replace("{base}", a.base.removeprefix("origin/"))
@@ -2353,7 +2386,7 @@ def cmd_wait(a):
     publication = st.get("publish")
     if publication:
         if publication["sha"]:
-            subject = sh(["git", "log", "-1", "--format=%s", publication["sha"]], cwd=st["worktree"], check=False)
+            subject = sh(GIT + ["log", "-1", "--format=%s", publication["sha"]], cwd=st["worktree"], check=False)
             line = f"== committed {publication['sha']} " + json.dumps(subject, ensure_ascii=False)
             if publication["pushed"]:
                 line += "; pushed"
@@ -2450,8 +2483,9 @@ def cmd_wait(a):
     if st.get("kind") == "scout":
         return
     print(f"== commits on {st['branch']}:")
-    print(sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)")
-    dirty = sh(["git", "status", "--short"], cwd=st["worktree"], check=False)
+    print(sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)")
+    dirty = (sh(GIT + ["status", "--short"], cwd=st["worktree"], check=False)
+             if workspace_filter_driver(st) is None else "")
     if dirty:
         print("== uncommitted:\n" + dirty)
 
@@ -2483,7 +2517,7 @@ def describe(st, detail):
     pr = (sh(["gh", "pr", "list", "--head", st["branch"], "--state", "all", "--json", "number,state,url",
               "--jq", '.[] | "\\(.number) \\(.state) \\(.url)"'], cwd=st["worktree"], check=False)
           if shutil.which("gh") else "")
-    commits = sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
+    commits = sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = TASKS / st["slug"] / "review.md"
     message = review.read_text().strip() if reviewing and review.exists() else last_message(st)
     return "\n".join([line, f"worktree {st['worktree']}", *result_lines(st.get("result")),
@@ -2542,10 +2576,10 @@ def cmd_clean(a):
     if st.get("kind") != "scout":
         repo, wt = st["repo"], st["worktree"]
         if Path(wt).exists():
-            sh(["git", "worktree", "remove", "--force", wt], cwd=repo)
+            sh(GIT + ["worktree", "remove", "--force", wt], cwd=repo)
             shutil.rmtree(Path(wt).parent, ignore_errors=True)
         if not a.keep_branch:
-            subprocess.run(["git", "branch", "-D", st["branch"]], cwd=repo, capture_output=True)
+            subprocess.run(GIT + ["branch", "-D", st["branch"]], cwd=repo, capture_output=True)
     cfg = accounts_config()
     for entry in st["threads"] + st["reviews"]:
         account = account_named(cfg, entry["account"])

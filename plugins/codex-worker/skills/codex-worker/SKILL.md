@@ -117,10 +117,14 @@ network access.
 Workspace instructions override the worker's commit and publication rules: leave changes in the
 worktree and return a repository-appropriate `commit_message`, with the subject on its first line.
 After each completed implementation turn, including fix rounds and any result status, the supervisor
-commits before checking, disables Git hooks, pushes without force, and creates a PR if `gh` is
-available and the branch has none. An empty message uses `<slug>: turn <N>`. Failed and stopped turns
+commits before checking, disables Git hooks and fsmonitor, pushes without force, and creates a PR if
+`gh` is available and the branch has none. An empty message uses `<slug>: turn <N>`. Failed and stopped turns
 are not committed. Publication errors do not fail the turn; `wait` prints the publication result or
 error and `== sandbox: workspace`. `status` shows the saved mode.
+
+Only filters whose `clean`, `smudge`, or `process` commands start with `git-lfs ` or `git lfs ` allow
+supervisor publication; otherwise, commit the turn manually. Workspace mode is unsuitable for a
+repository whose config references worktree files through `include.path` or `core.attributesFile`.
 
 ## Turn checks and limits
 

@@ -12,6 +12,7 @@ import json
 import os
 import runpy
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -646,6 +647,20 @@ class RotationTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.gh_trace_path.read_text().splitlines()]
 
+    def record_git_calls(self):
+        real_git = shutil.which("git", path=self.env["PATH"])
+        self.assertIsNotNone(real_git)
+        path = self.root / "git-trace.jsonl"
+        wrapper = self.root / "git"
+        wrapper.write_text(
+            "#!" + PYTHON + "\n"
+            "import json, os, sys\n"
+            "with open(" + repr(str(path)) + ", 'a') as stream:\n"
+            "    stream.write(json.dumps({'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')\n"
+            "os.execv(" + repr(real_git) + ", [" + repr(real_git) + "] + sys.argv[1:])\n")
+        wrapper.chmod(0o700)
+        return path
+
     def configure_notify(self, events=None, command=None):
         path = self.home / "codex-worker.json"
         legacy = self.home / "claude-accounts.json"
@@ -1031,6 +1046,109 @@ class RotationTests(unittest.TestCase):
                 self.assertEqual(self.git("log", "-1", "--format=%s", state["branch"]),
                                  "Save " + status + " checkpoint")
                 self.assertTrue(state["publish"]["pushed"])
+
+    def test_workspace_filter_guard_blocks_worker_clean_script_before_status_and_wait(self):
+        self.configure(language="en", sandbox="workspace")
+        # Commit the attributes while no driver is configured, then install a
+        # harmless initial clean command before the worker replaces its script.
+        self.commit_fixture({".gitattributes": "tracked.txt filter=project\n",
+                             "clean.sh": "#!/bin/sh\ncat\n"})
+        self.git("config", "filter.project.clean", "/bin/sh clean.sh")
+        initial = self.git("rev-parse", "HEAD")
+        marker = self.root / "outside-worktree.marker"
+        marker.write_text("untouched\n")
+        script = "#!/bin/sh\nprintf 'filter executed\\n' > " + shlex.quote(str(marker)) + "\ncat\n"
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "worker change\n", "clean.sh": script},
+            "reply": self.work_result(commit_message="Do not run a worker-written filter")}])
+        trace_path = self.record_git_calls()
+        self.start("sandbox-filter-guard")
+        output = self.wait("sandbox-filter-guard")
+        state = self.state("sandbox-filter-guard")
+        error = ("commit: filter driver project is configured; the supervisor does not run filters "
+                 "on worker-written files — commit this turn manually")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["publish"]["error"], error)
+        self.assertEqual(state["publish"]["sha"], "")
+        self.assertFalse(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["pr"], "")
+        self.assertIn("== publish error: " + error, output)
+        self.assertEqual(marker.read_text(), "untouched\n")
+        self.assertEqual(self.git("rev-parse", state["branch"]), initial)
+        self.assertEqual((Path(state["worktree"]) / "clean.sh").read_text(), script)
+        self.assertEqual((Path(state["worktree"]) / "tracked.txt").read_text(), "worker change\n")
+        events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+        worktree_events = [event for event in events if event["cwd"] == state["worktree"]]
+        self.assertTrue(worktree_events)
+        self.assertIn("config", worktree_events[0]["argv"])
+        self.assertTrue(any("--get-regexp" in event["argv"] for event in worktree_events))
+        self.assertFalse(any("status" in event["argv"] or "add" in event["argv"] or
+                             "commit" in event["argv"] for event in worktree_events), worktree_events)
+        self.assertFalse(self.gh_invocations())
+
+    def test_workspace_filter_guard_allows_git_lfs_command_prefixes_without_running_lfs(self):
+        self.configure(language="en", sandbox="workspace")
+        for index, command in enumerate(("git-lfs clean -- %f", "git lfs filter-process")):
+            with self.subTest(command=command):
+                # No attributes select this driver: real Git LFS is never run.
+                self.git("config", "filter.lfs.clean", command)
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {"tracked.txt": command + "\n"},
+                    "reply": self.work_result(commit_message="Allow an inactive Git LFS driver")}])
+                slug = "sandbox-lfs-filter-" + str(index)
+                self.start(slug)
+                self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "completed")
+                self.assertEqual(state["publish"]["error"], "")
+                self.assertTrue(state["publish"]["pushed"])
+                self.assertEqual(self.git("log", "-1", "--format=%s", state["branch"]),
+                                 "Allow an inactive Git LFS driver")
+
+    def test_workspace_filter_guard_reads_all_config_scopes_and_command_forms(self):
+        self.env.update(GIT_CONFIG_SYSTEM=str(self.root / "git-system.conf"),
+                        GIT_CONFIG_GLOBAL=str(self.root / "git-global.conf"))
+        worker = self.worker()
+        cases = (("clean", "/bin/sh clean.sh", "project.nested"),
+                 ("smudge", "/bin/sh\nclean.sh", "project.nested"),
+                 ("process", "git-lfs-custom process", "project.nested"),
+                 ("clean", "", "project.nested"),
+                 ("smudge", " git lfs smudge", "project.nested"),
+                 ("process", "git-lfs filter-process", None),
+                 ("clean", "git lfs clean -- %f", None),
+                 ("smudge", "git-lfs smudge\n--skip", None))
+        with mock.patch.dict(os.environ, self.env):
+            self.assertIsNone(worker.unsafe_filter_driver(self.repo))
+            for scope in ("--system", "--global", "--local"):
+                for operation, command, expected in cases:
+                    with self.subTest(scope=scope, operation=operation, command=command):
+                        key = "filter.project.nested." + operation
+                        self.git("config", scope, key, command)
+                        try:
+                            self.assertEqual(worker.unsafe_filter_driver(self.repo), expected)
+                        finally:
+                            self.git("config", scope, "--unset-all", key)
+
+    def test_workspace_supervisor_git_commands_disable_fsmonitor_and_hooks(self):
+        self.configure(language="en", sandbox="workspace")
+        trace_path = self.record_git_calls()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "supervisor publication\n"},
+            "reply": self.work_result(commit_message="Keep supervisor Git commands isolated")}])
+        self.start("sandbox-git-safety")
+        self.wait("sandbox-git-safety")
+        self.cli("status", "sandbox-git-safety")
+        self.assertTrue(self.state("sandbox-git-safety")["publish"]["pushed"])
+        events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+        self.assertTrue(events)
+        for event in events:
+            argv = event["argv"]
+            self.assertIn("core.hooksPath=/dev/null", argv, event)
+            self.assertIn("core.fsmonitor=false", argv, event)
+            for setting in ("core.hooksPath=/dev/null", "core.fsmonitor=false"):
+                self.assertEqual(argv[argv.index(setting) - 1], "-c", event)
+        for command in ("config", "status", "add", "commit", "push"):
+            self.assertTrue(any(command in event["argv"] for event in events), (command, events))
 
     def test_workspace_stopped_and_failed_turns_leave_changes_uncommitted(self):
         self.configure(language="en", sandbox="workspace")
