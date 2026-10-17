@@ -58,6 +58,80 @@ MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
 
 
+def object_schema(properties):
+    return {"type": "object", "properties": properties, "required": list(properties),
+            "additionalProperties": False}
+
+
+RESULT_SCHEMA = object_schema({
+    "status": {"type": "string", "enum": ["done", "partial", "blocked", "needs_decision"]},
+    "summary": {"type": "string"},
+    "checks": {"type": "array", "items": object_schema({
+        "command": {"type": "string"},
+        "outcome": {"type": "string", "enum": ["passed", "failed", "not_run"]},
+        "details": {"type": "string", "description": "Include numerical evidence: counts, exits, attempts."},
+    })},
+    "pr": {"type": "string", "description": "PR URL, or an empty string."},
+    "questions": {"type": "array", "items": {"type": "string"}},
+    "remaining": {"type": "array", "items": {"type": "string"}},
+})
+REVIEW_SCHEMA = object_schema({
+    "verdict": {"type": "string", "enum": ["clean", "defects"]},
+    "findings": {"type": "array", "items": object_schema({
+        "id": {"type": "string", "pattern": "^F[1-9][0-9]*$"},
+        "severity": {"type": "string", "enum": ["P1", "P2", "P3"]},
+        "file": {"type": "string"},
+        "line": {"type": "integer", "minimum": 1},
+        "title": {"type": "string"},
+        "detail": {"type": "string"},
+        "verify": {"type": "string"},
+    })},
+    "summary": {"type": "string"},
+})
+
+
+def matches_schema(value, schema):
+    """Validate the small JSON Schema subset used by our output contracts."""
+    kind = schema["type"]
+    if kind == "object":
+        return (isinstance(value, dict) and set(value) == set(schema["required"])
+                and all(matches_schema(value[key], field) for key, field in schema["properties"].items()))
+    if kind == "array":
+        return isinstance(value, list) and all(matches_schema(item, schema["items"]) for item in value)
+    if kind == "integer":
+        return type(value) is int and value >= schema.get("minimum", value)
+    if kind == "string":
+        return (isinstance(value, str) and ("enum" not in schema or value in schema["enum"])
+                and ("pattern" not in schema or re.fullmatch(schema["pattern"], value) is not None))
+    return False
+
+
+def parse_result(message, reviewing=False):
+    try:
+        value = json.loads(message)
+    except (ValueError, TypeError):
+        return None
+    return value if matches_schema(value, REVIEW_SCHEMA if reviewing else RESULT_SCHEMA) else None
+
+
+def result_lines(result, raw="(no final message)"):
+    if result is None:
+        return ["== result: unknown (unstructured final message)", raw]
+    label = {"done": "done", "partial": "PARTIAL", "blocked": "BLOCKED", "needs_decision": "NEEDS DECISION"}
+    lines = ["== result: " + label[result["status"]], result["summary"]]
+    for check in result["checks"]:
+        lines.append(f"- {check['command']}: {check['outcome']} — {check['details']}")
+    if result["pr"]:
+        lines.append("PR: " + result["pr"])
+    if result["questions"]:
+        lines.append("Questions:")
+        lines.extend(f"{n}. {question}" for n, question in enumerate(result["questions"], 1))
+    if result["remaining"]:
+        lines.append("Remaining:")
+        lines.extend("- " + item for item in result["remaining"])
+    return lines
+
+
 def die(msg):
     sys.exit(f"codex_task: {msg}")
 
@@ -552,6 +626,7 @@ def load(slug):
     st.setdefault("rotations", [])
     st.setdefault("reviews", [])
     st.setdefault("checks", [])
+    st.setdefault("result", None)
     return st
 
 
@@ -605,6 +680,8 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("turn_finished", None)
     st.pop("error", None)
     st.pop("review_skipped", None)
+    if kind != "review":
+        st["result"] = None
     with (d / "stderr.log").open("a") as errors:
         proc = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "_run", st["slug"]],
                                 cwd=st["worktree"], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors,
@@ -707,7 +784,15 @@ def handoff(st, current_message=False, cfg=None):
     if has_threads:
         label = (("Последние сообщения предыдущего разведчика" if ru else "Latest messages from the previous scout")
                  if scouting else ("Последние сообщения предыдущего исполнителя" if ru else "Latest messages from the previous worker"))
-        prompt += f"\n\n{label}:\n" + "\n\n".join(thread_messages(st)[-3:])[-4000:]
+        messages = []
+        for message in thread_messages(st)[-3:]:
+            result = None if scouting else parse_result(message)
+            if result is not None:
+                message = result["summary"]
+                if result["remaining"]:
+                    message += ("\nОсталось:\n" if ru else "\nRemaining:\n") + "\n".join(result["remaining"])
+            messages.append(message)
+        prompt += f"\n\n{label}:\n" + "\n\n".join(messages)[-4000:]
     if not scouting:
         prompt += (f"\n\nСначала посмотри git status и git diff {st['base']}, потом продолжай работу.\n" if ru else
                    f"\n\nFirst inspect git status and git diff {st['base']}, then continue the task.\n")
@@ -742,14 +827,18 @@ def review_prompt(st, cfg=None):
                 "сломанные или фиктивные проверки, опасные побочные эффекты, гонки.\n"
                 "Для каждого дефекта укажи файл:строка, что не так и как это проверить. "
                 "Без замечаний по стилю.\n"
-                "Файлы не меняй, ничего не коммить. Если дефектов нет — так и напиши.")
+                "Файлы не меняй, ничего не коммить. Ответь JSON по схеме ревью: verdict clean, если "
+                "дефектов нет, иначе defects. Находки нумеруй F1, F2 и далее; severity P1/P2/P3, "
+                "file, line, title, detail и verify. При clean findings пуст; summary — краткий итог.")
     return (f"Review the task changes: git diff {shlex.quote(st['base'])}.\n"
             f"Read the task brief at {brief} and check its acceptance criteria.\n"
             "Look only for real defects: incorrect behavior, unmet brief requirements, "
             "broken or ineffective checks, dangerous side effects, and races.\n"
             "For each defect, give file:line, explain what is wrong and how to verify it. "
             "Do not comment on style.\n"
-            "Do not change files or create commits. If there are no defects, say so.")
+            "Do not change files or create commits. Return JSON matching the review schema: verdict clean "
+            "when there are no defects, otherwise defects. Number findings F1, F2, etc.; include severity "
+            "P1/P2/P3, file, line, title, detail and verify. For clean, findings is empty; summary is a short recap.")
 
 
 def reset_resume_prompt(cfg=None):
@@ -1053,6 +1142,10 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         args += ["--json", "-C", st["worktree"], "-o", str(last)]
     if st.get("kind") == "scout":
         args += ["-c", 'sandbox_mode="read-only"']
+    else:
+        schema = d / ("review-schema.json" if reviewing else "result-schema.json")
+        schema.write_text(json.dumps(REVIEW_SCHEMA if reviewing else RESULT_SCHEMA, indent=2), encoding="utf-8")
+        args += ["--output-schema", str(schema)]
     args += effort_args(effort) + [prompt]
     path = rollout_path(account["home"], thread) if thread else None
     previous_size = path.stat().st_size if path else 0
@@ -1062,6 +1155,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     current_info = None
     failed = False
     authentication_failed = False
+    final_message = ""
     st["exec_event_start"] = len(events(st))
     save(st)
     with (d / "events.jsonl").open("ab", buffering=0) as log, (d / "stderr.log").open("a") as errors:
@@ -1100,7 +1194,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                     thread = event["thread_id"]
                                     if reviewing:
                                         review_entry = {"account": account["name"], "thread": thread,
-                                                        "started": attempt_started, "finished": None}
+                                                        "started": attempt_started, "finished": None, "result": None}
                                         st.setdefault("reviews", []).append(review_entry)
                                     else:
                                         st["thread"] = thread
@@ -1110,6 +1204,9 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                             and not st["rotations"][-1]["thread"]):
                                         st["rotations"][-1]["thread"] = thread
                                     save(st)
+                                if (event.get("type") == "item.completed"
+                                        and (event.get("item") or {}).get("type") == "agent_message"):
+                                    final_message = event["item"].get("text", "")
                                 if limit_error(event):
                                     reason = "usage limit"
                                 if auth_error(event):
@@ -1146,8 +1243,12 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
             finally:
                 proc.stdout.close()
                 st.pop("codex_pid", None)
+                message = last.read_text(encoding="utf-8").strip() if last.exists() else final_message
                 if review_entry is not None:
                     review_entry["finished"] = time.time()
+                    review_entry["result"] = parse_result(message, reviewing=True)
+                elif not reviewing and st.get("kind") != "scout":
+                    st["result"] = parse_result(message)
                 save(st)
     if reviewing and not review_fallback and not thread and code == 2:
         with (d / "stderr.log").open("rb") as errors:
@@ -1352,16 +1453,21 @@ def cmd__run(a):
         effort = pending["effort"]
         run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
                  stopped, stopped_flag.wait)
+        work_result = st.get("result") if st.get("kind") not in ("review", "scout") else None
+        if (work_result is not None and work_result["status"] != "done"
+                and pending.get("review_after") and st.get("outcome") == "completed"):
+            st["review_skipped"] = "result " + work_result["status"]
+            save(st)
         if st.get("kind") not in ("review", "scout") and st.get("outcome") == "completed" and st.get("check") and not stopped():
             check = run_check(st, stopped)
             if check and check["outcome"] in ("failed", "timeout"):
                 notify(st, cfg, "check_failed", f"check {check['outcome']} on {st['account']}",
                        outcome=check["outcome"])
-                if pending.get("review_after"):
+                if pending.get("review_after") and not st.get("review_skipped"):
                     st["review_skipped"] = "check " + check["outcome"]
                     save(st)
         if (st.get("kind") != "scout" and st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
-                and (check is None or check["outcome"] == "passed")):
+                and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")):
             st.update(kind="review", work_completed=True, outcome="running", reset_wait_seconds=0)
             save(st)
             run_turn(st, cfg, review_prompt(st, cfg), effort, False, stopped, stopped_flag.wait, new_turn=False)
@@ -1379,12 +1485,22 @@ def cmd__run(a):
             if st.get("kind") == "review":
                 reviews = st.get("reviews", [])[st.get("review_start", 0):]
                 account = st.get("review_account") or (reviews[-1]["account"] if reviews else account)
+                review_result = reviews[-1].get("result") if reviews else None
                 notify(st, cfg, "review_done", f"review {st['outcome']} on {account}",
-                       outcome=st["outcome"], account=account)
+                       outcome=st["outcome"], account=account,
+                       verdict=review_result["verdict"] if review_result else None,
+                       findings=len(review_result["findings"]) if review_result else 0)
             message = f"turn {st['outcome']} on {account}"
+            result = st.get("result")
+            message += ", result " + (result["status"] if result is not None else "unknown")
             if check is not None:
                 message += ", check " + check["outcome"]
-            notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account)
+            notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account, result=result)
+            if (result is not None and result["status"] in ("blocked", "needs_decision")
+                    and st.get("kind") not in ("review", "scout")):
+                question = next(iter(result["questions"]), "")
+                notify(st, cfg, "needs_input", f"result {result['status']}: {question}",
+                       result=result, question=question)
         reap_notifications()
         # Publishing idle permits clean to remove both the task and its worktree.
         st["pid"] = None
@@ -1558,7 +1674,8 @@ def cmd_wait(a):
             # Paused before any exec: the thread's last message belongs to an earlier turn.
             print("(Codex did not run this turn)")
         else:
-            print(last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
+            raw = last.read_text().strip() if last.exists() else last_message(st) or "(no final message)"
+            print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
     checks = [] if st.get("kind") == "scout" else st.get("checks", [])[st.get("check_start", 0):]
     for check in checks:
         label = {"passed": "passed", "stopped": "stopped"}.get(check["outcome"], "FAILED")
@@ -1576,9 +1693,21 @@ def cmd_wait(a):
         if reviews:
             entry = reviews[-1]
             minutes = ((entry.get("finished") or time.time()) - entry["started"]) / 60
-            print(f"== review by {entry['account']} ({minutes:.1f} min):")
-            review = d / "review.md"
-            print(review.read_text().strip() if review.exists() else "(no final review)")
+            heading = f"== review by {entry['account']} ({minutes:.1f} min):"
+            result = entry.get("result")
+            if result is None:
+                print(heading)
+                print("== result: unknown (unstructured final message)")
+                review = d / "review.md"
+                print(review.read_text().strip() if review.exists() else "(no final review)")
+            else:
+                count = len(result["findings"])
+                print(heading + (f" {count} defect{'s' if count != 1 else ''}" if count else " no defects"))
+                print(result["summary"])
+                for finding in result["findings"]:
+                    print(f"[{finding['severity']}] {finding['id']} {finding['file']}:{finding['line']} — {finding['title']}")
+                    print(finding["detail"])
+                    print("verify: " + finding["verify"])
         else:
             print("(Codex did not run review)")
     failed = [e for e in events(st)[st.get("exec_event_start", st.get("event_start", 0)):] if e.get("type") in ("turn.failed", "error")]
@@ -1624,8 +1753,9 @@ def describe(st, detail):
     commits = sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = TASKS / st["slug"] / "review.md"
     message = review.read_text().strip() if reviewing and review.exists() else last_message(st)
-    return "\n".join([line, f"worktree {st['worktree']}", f"PR: {pr or 'none'}",
-                      "commits:\n" + (commits or "(none)"), "last message:\n" + (message or "(none)")])
+    return "\n".join([line, f"worktree {st['worktree']}", *result_lines(st.get("result")),
+                      f"PR: {pr or 'none'}", "commits:\n" + (commits or "(none)"),
+                      "last message:\n" + (message or "(none)")])
 
 
 def cmd_status(a):

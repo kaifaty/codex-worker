@@ -71,8 +71,14 @@ python3 -I "$T" status csv-export
 
 Use a brief with the change, context, measurable completion conditions, focused checks, and boundaries.
 The worker creates `codex/csv-export` and an isolated worktree, implements the task, runs the check,
-and starts the first review in a fresh thread if the check passes. In Claude Code, `wait` runs as a
-background Bash command so Claude can resume when the turn ends.
+and starts the first review in a fresh thread if the check passes and the result is `done`. In Claude
+Code, `wait` runs as a background Bash command so Claude can resume when the turn ends.
+
+Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
+status (`done`, `partial`, `blocked`, or `needs_decision`), summary, checks, PR, questions, and remaining
+work, plus review findings with IDs, severity, locations, and verification steps. `status <slug>`
+includes the latest `result`. Invalid or non-JSON finals remain readable as `result: unknown`, and
+automatic review keeps its previous behavior for them. Scouts return plain text.
 
 Check the report and the actual diff. If there are issues, send one follow-up and wait again:
 
@@ -120,7 +126,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
 | `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review`, replace the check with `--check CMD`, or remove it with `--no-check`. |
 | `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
-| `status [<slug>]` | Show task state, account, thread, PR, commits, and last message. |
+| `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `accounts` | Show login, plan, limits, reset times, credits, and availability in English. |
 | `login <name> [--browser]` | Have the human sign in to an account; writes `codex-worker.json`. |
@@ -140,9 +146,10 @@ replaces the saved command; `say --no-check` removes it. `--check-timeout SEC` d
 Failed, stopped, and paused turns do not run checks.
 
 Output goes to the task's `check.log`. `wait` prints the exit code and duration; on failure or timeout,
-it also prints the last 40 output lines. A failed check skips a requested automatic review. The
-supervisor's result is objective evidence for that command; Claude must still read the actual diff
-and verify the completion conditions.
+it also prints the last 40 output lines. A failed check skips a requested automatic review. Results
+`partial`, `blocked`, and `needs_decision` skip automatic review with
+`review_skipped: "result <status>"`; the saved check still runs. The supervisor's result is objective
+evidence for that command; Claude must still read the actual diff and verify the completion conditions.
 
 ## Settings and language
 
@@ -193,8 +200,10 @@ Notifications work even when Claude's session has ended. For macOS, add to `code
 ```
 
 An argv hook receives one final JSON argument with `event`, `kind`, `slug`, `repo`, `branch`, `account`, `at`,
-and a short `message`. Event types are `turn_finished` (`outcome`), `paused` (`until`), `woke`,
-`rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`.
+and a short `message`. Event types are `turn_finished` (`outcome`, `result`, also named in `message`),
+`needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
+`woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
+(`verdict` and finding count).
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
 with `curl`; the appended argument supplies the value for `--data-binary`:
 
