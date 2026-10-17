@@ -266,8 +266,15 @@ def execute():
         Path("pending.txt").write_text("unfinished untracked file\n")
     for name in run.get("create_files", []):
         Path(name).write_text("created by fake Codex\n")
+    for name, contents in run.get("write_files", {}).items():
+        path = Path(name)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(contents)
     for name in run.get("remove_files", []):
         Path(name).unlink(missing_ok=True)
+    if run.get("commit_files"):
+        subprocess.run(["git", "add", "--"] + run["commit_files"], check=True)
+        subprocess.run(["git", "commit", "-qm", "Apply fake worker changes"], check=True)
     if run["mode"] in ("limit", "usage_error"):
         time.sleep(run.get("limit_after", 0.15))
         value = fixture()
@@ -435,6 +442,15 @@ class RotationTests(unittest.TestCase):
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
+
+    def commit_fixture(self, files):
+        for name, contents in files.items():
+            path = self.repo / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
+        self.git("add", "--", *files)
+        self.git("commit", "--quiet", "-m", "Add guarded file fixtures")
+        self.git("push", "--quiet", "origin", "main")
 
     def cli(self, *args, **kwargs):
         result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
@@ -1396,6 +1412,234 @@ class RotationTests(unittest.TestCase):
         self.assertRegex(prompt.lower(), r"(?:do not|don't).*rerun.*(?:full|entire)")
         self.assertRegex(prompt.lower(), r"targeted|focused|specific")
         self.assertLess(output.index("== check `"), output.index("== review by "))
+
+    def test_guarded_changes_print_counts_and_reach_review_and_notification(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.commit_fixture({"tests/test_a.py": "def test_a():\n    assert True\n",
+                             "src/a.py": "value = 1\n"})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {
+                "tests/test_a.py": "def test_a():\n    assert 1 == 1\n    assert 2 == 2\n",
+                "src/a.py": "value = 2\n"}, "commit_files": ["tests/test_a.py"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("guarded-counts", "--review")
+        output = self.wait("guarded-counts")
+        guarded = [line for line in output.splitlines() if line.startswith("== guarded files changed:")]
+        self.assertEqual(guarded, ["== guarded files changed: tests/test_a.py (+2 −1)"])
+        prompt = self.review_invocations()[0]["prompt"]
+        self.assertIn("tests/test_a.py", prompt)
+        self.assertRegex(prompt.lower(), r"assertion|assert")
+        self.assertRegex(prompt.lower(), r"skip|disabled")
+        self.assertRegex(prompt.lower(), r"tolerance|tolerances")
+        self.assertIn("mock", prompt.lower())
+        self.assertEqual(self.notification("guarded-counts", "turn_finished")["guarded_changed"], 1)
+
+    def test_guarded_deleted_files_and_added_skips_have_separate_warnings(self):
+        self.configure(language="en")
+        self.commit_fixture({"tests/test_a.py": "def test_a():\n    assert True\n",
+                             "tests/test_removed.py": "def test_removed():\n    assert True\n"})
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {
+                "tests/test_a.py": "@unittest.skip('temporarily disabled')\ndef test_a():\n    assert True\n"},
+            "remove_files": ["tests/test_removed.py"]}])
+        self.start("guarded-disabled")
+        output = self.wait("guarded-disabled")
+        deleted = [line for line in output.splitlines() if line.startswith("== guarded files deleted:")]
+        disabled = [line for line in output.splitlines() if line.startswith("== guarded tests disabled:")]
+        self.assertEqual(len(deleted), 1)
+        self.assertIn("tests/test_removed.py", deleted[0])
+        self.assertEqual(len(disabled), 1)
+        self.assertIn("tests/test_a.py", disabled[0])
+        self.assertNotIn("tests/test_removed.py", disabled[0])
+
+    def test_check_paths_and_repeatable_guard_globs_protect_custom_files(self):
+        self.configure(language="en")
+        self.commit_fixture({"scripts/verify.sh": "printf 'original check\\n'\n",
+                             "fixtures/nested/sample.json": "{}\n",
+                             "config/check.toml": "enabled = true\n",
+                             "src/a.py": "value = 1\n"})
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {
+                "scripts/verify.sh": "printf 'replacement check\\n'\n",
+                "fixtures/nested/sample.json": '{"changed": true}\n',
+                "config/check.toml": "enabled = false\n",
+                "src/a.py": "value = 2\n"}}])
+        self.start("guarded-custom", "--check", "sh scripts/verify.sh", "--guard", "fixtures/**",
+                   "--guard", "config/*.toml")
+        output = self.wait("guarded-custom")
+        state = self.state("guarded-custom")
+        self.assertEqual(state["guards"], ["fixtures/**", "config/*.toml"])
+        guarded = next(line for line in output.splitlines() if line.startswith("== guarded files changed:"))
+        for name in ("scripts/verify.sh", "fixtures/nested/sample.json", "config/check.toml"):
+            self.assertIn(name + " (+1 −1)", guarded)
+        self.assertNotIn("src/a.py", guarded)
+        self.assertEqual(state["checks"][-1]["outcome"], "passed")
+
+    def test_builtin_guards_cover_nested_tests_names_and_ci_and_untracked_files(self):
+        self.configure(language="en")
+        guarded_names = ("pkg/tests/a.py", "pkg/test/a.py", "pkg/__tests__/a.js", "pkg/spec/a.rb",
+                         "pkg/test_widget.py", "pkg/widget_test.go", "pkg/widget.test.js",
+                         "pkg/widget.spec.ts", ".github/workflows/check.yml", ".gitlab-ci.yml",
+                         ".forgejo/workflows/check.yml")
+        self.commit_fixture({name: "old\n" for name in guarded_names})
+        changes = {name: "new\n" for name in guarded_names}
+        changes.update({"tests/test_new.py": "new test\n", "src/a.py": "new source\n",
+                        "contest/a.py": "unrelated\n"})
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "write_files": changes}])
+        self.start("guarded-patterns")
+        output = self.wait("guarded-patterns")
+        guarded = next(line for line in output.splitlines() if line.startswith("== guarded files changed:"))
+        for name in guarded_names:
+            self.assertIn(name + " (+1 −1)", guarded)
+        self.assertIn("tests/test_new.py (+1 −0)", guarded)
+        self.assertNotIn("src/a.py", guarded)
+        self.assertNotIn("contest/a.py", guarded)
+
+    def test_base_check_restores_base_tests_reports_failure_and_still_reviews(self):
+        self.configure(language="en")
+        base_test = ("from pathlib import Path\n"
+                     "assert Path('tests/test_removed.py').is_file(), 'deleted test was not restored'\n"
+                     "assert not Path('tests/test_new.py').exists(), 'new test was not removed'\n"
+                     "print('base guarded files restored', flush=True)\n"
+                     "assert Path('src/a.txt').read_text() == 'expected\\n', 'original assertion failed'\n")
+        self.commit_fixture({"tests/test_a.py": base_test, "tests/test_removed.py": "# original test\n",
+                             "src/a.txt": "expected\n"})
+        changes = {"tests/test_a.py": "print('weakened check passed')\n",
+                   "tests/test_new.py": "# replacement test\n", "src/a.txt": "broken\n"}
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": changes, "remove_files": ["tests/test_removed.py"],
+             "commit_files": list(changes) + ["tests/test_removed.py"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        command = PYTHON + " -I tests/test_a.py"
+        self.start("guarded-base", "--review", "--check", command, "--base-check")
+        output = self.wait("guarded-base")
+        state = self.state("guarded-base")
+        self.assertTrue(state["base_check"])
+        check = state["checks"][-1]
+        self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
+        self.assertEqual(check["base_check"]["outcome"], "failed")
+        self.assertNotEqual(check["base_check"]["exit"], 0)
+        self.assertGreaterEqual(check["base_check"]["seconds"], 0)
+        self.assertIn("== base tests: FAILED", output)
+        self.assertIn("base guarded files restored", output)
+        self.assertIn("original assertion failed", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertLess(output.index("== base tests: FAILED"), output.index("== review by "))
+        self.assertNotIn("== review skipped:", output)
+        worktrees = self.git("worktree", "list", "--porcelain")
+        paths = {line[len("worktree "):] for line in worktrees.splitlines() if line.startswith("worktree ")}
+        self.assertEqual(paths, {str(self.repo), state["worktree"]})
+        self.assertNotIn("detached", worktrees)
+        self.assertEqual((Path(state["worktree"]) / "tests/test_a.py").read_text(), changes["tests/test_a.py"])
+        self.assertFalse((Path(state["worktree"]) / "tests/test_removed.py").exists())
+        self.assertTrue((Path(state["worktree"]) / "tests/test_new.py").is_file())
+
+    def test_say_disables_base_check_and_keeps_it_disabled(self):
+        self.configure(language="en")
+        self.start("guarded-disable-base", "--check", "true", "--base-check")
+        output = self.wait("guarded-disable-base")
+        self.assertIn("== base tests: passed", output)
+        self.assertEqual(self.state("guarded-disable-base")["checks"][0]["base_check"]["outcome"], "passed")
+        self.cli("say", "guarded-disable-base", "Disable the baseline comparison", "--no-base-check")
+        self.assertNotIn("== base tests:", self.wait("guarded-disable-base"))
+        self.cli("say", "guarded-disable-base", "Continue with the saved settings")
+        self.assertNotIn("== base tests:", self.wait("guarded-disable-base"))
+        state = self.state("guarded-disable-base")
+        self.assertFalse(state.get("base_check"))
+        self.assertEqual(len(state["checks"]), 3)
+        self.assertTrue(all(not check.get("base_check") for check in state["checks"][1:]))
+
+    def test_no_guarded_change_has_no_warning_and_notifies_zero(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"src/a.py": "value = 2\n"}}])
+        self.start("guarded-none")
+        output = self.wait("guarded-none")
+        self.assertNotIn("== guarded files changed:", output)
+        self.assertNotIn("== guarded files deleted:", output)
+        self.assertNotIn("== guarded tests disabled:", output)
+        self.assertEqual(self.notification("guarded-none", "turn_finished")["guarded_changed"], 0)
+
+    def test_guarded_index_changes_survive_restoring_working_contents(self):
+        self.configure(language="en")
+        self.configure_notify()
+        original = "def test_a():\n    assert True\n"
+        self.commit_fixture({"tests/test_a.py": original})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete"}, {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("guarded-index")
+        self.wait("guarded-index")
+        self.notification("guarded-index", "turn_finished")
+        worktree = Path(self.state("guarded-index")["worktree"])
+        path = worktree / "tests/test_a.py"
+        path.write_text("@unittest.skip('staged weakening')\n" + original)
+        staged = subprocess.run(["git", "add", "--", "tests/test_a.py"], cwd=worktree,
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(staged.returncode, 0, staged.stderr)
+        path.write_text(original)
+        combined = subprocess.run(["git", "diff", "HEAD", "--", "tests/test_a.py"], cwd=worktree,
+                                  env=self.env, text=True, capture_output=True)
+        self.assertEqual(combined.returncode, 0, combined.stderr)
+        self.assertEqual(combined.stdout, "", "fixture must conceal the staged edit from git diff HEAD")
+        output = self.wait("guarded-index")
+        guarded = next(line for line in output.splitlines() if line.startswith("== guarded files changed:"))
+        disabled = next(line for line in output.splitlines() if line.startswith("== guarded tests disabled:"))
+        self.assertIn("tests/test_a.py", guarded)
+        self.assertIn("tests/test_a.py", disabled)
+        self.cli("review", "guarded-index")
+        self.wait("guarded-index")
+        self.assertIn("tests/test_a.py", self.review_invocations()[0]["prompt"])
+        self.until(lambda: len([event for event in self.notifications("guarded-index")
+                                if event["event"] == "turn_finished"]) == 2)
+        finished = [event for event in self.notifications("guarded-index") if event["event"] == "turn_finished"]
+        self.assertEqual(finished[-1]["guarded_changed"], 1)
+
+    def test_check_root_directory_path_guards_non_test_files(self):
+        self.configure(language="en")
+        self.commit_fixture({"src/a.py": "value = 1\n"})
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"src/a.py": "value = 2\n"}}])
+        command = "test -d . && : " + "x" * 300
+        self.start("guarded-root-path", "--check", command)
+        output = self.wait("guarded-root-path")
+        self.assertIn("== guarded files changed: src/a.py (+1 −1)", output)
+        self.assertEqual(self.state("guarded-root-path")["checks"][-1]["outcome"], "passed")
+
+    def test_check_path_stays_guarded_after_worker_deletes_it(self):
+        self.configure(language="en")
+        self.commit_fixture({"scripts/verify.sh": "exit 0\n"})
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "remove_files": ["scripts/verify.sh"]}])
+        self.start("guarded-deleted-check", "--check", "test ! -e scripts/verify.sh")
+        output = self.wait("guarded-deleted-check")
+        self.assertIn("== guarded files changed: scripts/verify.sh (+0 −1)", output)
+        self.assertIn("== guarded files deleted: scripts/verify.sh", output)
+        self.assertEqual(self.state("guarded-deleted-check")["checks"][-1]["outcome"], "passed")
+
+    def test_base_check_timeout_prints_tail_reviews_and_removes_worktree(self):
+        self.configure(language="en")
+        self.commit_fixture({"tests/test_a.py": "import time\nprint('base timeout marker', flush=True)\ntime.sleep(60)\n"})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tests/test_a.py": "print('fast modified test')\n"},
+             "commit_files": ["tests/test_a.py"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("guarded-base-timeout", "--review", "--check", PYTHON + " -I tests/test_a.py",
+                   "--base-check", "--check-timeout", "0.5")
+        output = self.wait("guarded-base-timeout")
+        state = self.state("guarded-base-timeout")
+        check = state["checks"][-1]
+        self.assertEqual(check["outcome"], "passed")
+        self.assertEqual(check["base_check"]["outcome"], "timeout")
+        self.assertGreaterEqual(check["base_check"]["seconds"], 0.5)
+        self.assertIn("== base tests: FAILED", output)
+        self.assertIn("base timeout marker", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        worktrees = self.git("worktree", "list", "--porcelain")
+        paths = {line[len("worktree "):] for line in worktrees.splitlines() if line.startswith("worktree ")}
+        self.assertEqual(paths, {str(self.repo), state["worktree"]})
+        self.assertNotIn("detached", worktrees)
 
     def test_check_failure_prints_last_forty_lines_and_skips_review(self):
         self.configure()

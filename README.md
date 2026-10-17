@@ -127,10 +127,10 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review [--fix-rounds N]] [--check CMD]` | Create a worktree and start implementation; `--brief -` reads stdin. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review --fix-rounds N`, replace the check with `--check CMD`, or remove it with `--no-check`. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
 | `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
@@ -162,6 +162,17 @@ it also prints the last 40 output lines. A failed check skips a requested automa
 `partial`, `blocked`, and `needs_decision` skip automatic review with
 `review_skipped: "result <status>"`; the saved check still runs. The supervisor's result is objective
 evidence for that command; Claude must still read the actual diff and verify the completion conditions.
+
+`wait` names changed guarded files with added/deleted line counts, including uncommitted changes, and
+separately flags deleted files and added test-skip markers. Guards cover standard test and CI paths,
+existing repository paths in the saved check command, and saved, repeatable `start --guard "GLOB"`
+patterns. Review prompts list those files and ask whether checks were weakened; read them in full.
+
+For refactoring or optimization that should preserve behavior, add `start --base-check`. After a
+passing check, the supervisor reruns the command in a temporary detached worktree at the task's
+`HEAD`, with guarded files restored from the base (new files removed, deleted files restored), then
+removes that worktree. `wait` shows `== base tests: passed/FAILED` and a log tail. Failure is advisory:
+review still runs. The setting persists until `say --no-base-check` disables it.
 
 ## Settings and language
 
@@ -212,7 +223,8 @@ Notifications work even when Claude's session has ended. For macOS, add to `code
 ```
 
 An argv hook receives one final JSON argument with `event`, `kind`, `slug`, `repo`, `branch`, `account`, `at`,
-and a short `message`. Event types are `turn_finished` (`outcome`, `result`, also named in `message`),
+and a short `message`. Event types are `turn_finished` (`outcome`, `result`, also named in `message`,
+and `guarded_changed`, the number of changed guarded files),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
 (`verdict`, finding count, and `round`). `turn_finished` is sent once when the entire cycle ends.

@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC]
+  codex_task.py say <slug> "message" | --file FILE [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
@@ -23,6 +23,7 @@ The internal _run <slug> supervisor survives the caller and opens a new thread o
 """
 import argparse
 import fcntl
+import fnmatch
 import json
 import math
 import os
@@ -33,6 +34,7 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -634,6 +636,8 @@ def load(slug):
     st.setdefault("result", None)
     st.setdefault("fix_rounds", 0)
     st.setdefault("rounds", [])
+    st.setdefault("guards", [])
+    st.setdefault("base_check", False)
     return st
 
 
@@ -834,11 +838,134 @@ def scout_prompt(question, cfg=None):
     return question.rstrip() + "\n\n" + rules
 
 
+def check_paths(st):
+    """Read literal repository paths from the shell command without executing it."""
+    paths = set(st.get("check_paths", []))
+    root = Path(st["worktree"])
+    try:
+        lexer = shlex.shlex(st.get("check") or "", posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
+    except ValueError:
+        return sorted(paths)
+    for token in tokens:
+        candidate = token.split("=", 1)[-1] if token.startswith("-") and "=" in token else token
+        if not candidate:
+            continue
+        path = Path(os.path.abspath(root / candidate))
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:
+            continue
+        try:
+            exists = path.exists()
+        except OSError:
+            # Shell arguments can be code or long strings rather than filenames.
+            continue
+        if exists:
+            paths.add(relative)
+    return sorted(paths)
+
+
+def guarded_path(path, st, paths):
+    parts = path.split("/")
+    return (any(part in ("tests", "test", "__tests__", "spec") for part in parts[:-1])
+            or any(fnmatch.fnmatchcase(parts[-1], pattern)
+                   for pattern in ("test_*", "*_test.*", "*.test.*", "*.spec.*"))
+            or path == ".gitlab-ci.yml"
+            or path.startswith((".github/workflows/", ".forgejo/workflows/"))
+            or any(item == "." or path == item or path.startswith(item + "/") for item in paths)
+            or any(fnmatch.fnmatchcase(path, pattern.removeprefix("./")) for pattern in st.get("guards", [])))
+
+
+DISABLED_TEST = re.compile(r"\b(?:skip|skipif|xfail|only)\b|@unittest\.skip\w*|@Disabled\b|\bt\.Skip\(", re.I)
+
+
+def guarded_changes(st):
+    """Combine committed and dirty diffs, treating renames as deletion/addition."""
+    if st.get("kind") == "scout":
+        return []
+    root = st["worktree"]
+    paths = check_paths(st)
+    changed = {}
+    args = ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
+    for revisions in ([st["base"], "HEAD"], ["--cached", "HEAD"], []):
+        stats = sh(args + ["--numstat", "-z"] + revisions + ["--"], cwd=root, check=False)
+        deleted = set(sh(args + ["--name-only", "-z", "--diff-filter=D"] + revisions + ["--"],
+                         cwd=root, check=False).split("\0"))
+        for entry in stats.split("\0"):
+            if not entry:
+                continue
+            added, removed, path = entry.split("\t", 2)
+            if not guarded_path(path, st, paths):
+                continue
+            item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
+                                             "deleted": False, "disabled": []})
+            item["added"] += int(added) if added != "-" else 0
+            item["removed"] += int(removed) if removed != "-" else 0
+            item["deleted"] |= path in deleted
+            patch = sh(args + ["--unified=0"] + revisions + ["--", path],
+                       cwd=root, check=False)
+            line_number = 0
+            in_hunk = False
+            for line in patch.splitlines():
+                hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
+                if hunk:
+                    line_number = int(hunk[1])
+                    in_hunk = True
+                elif in_hunk and line.startswith("+"):
+                    if DISABLED_TEST.search(line[1:]):
+                        marker = {"line": line_number, "text": line[1:].strip()}
+                        if marker not in item["disabled"]:
+                            item["disabled"].append(marker)
+                    line_number += 1
+                elif in_hunk and line.startswith(" "):
+                    line_number += 1
+    untracked = sh(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
+    for path in filter(None, untracked.split("\0")):
+        if not guarded_path(path, st, paths):
+            continue
+        file = Path(root) / path
+        try:
+            content = os.readlink(file) if file.is_symlink() else file.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lines = content.splitlines()
+        item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
+                                         "deleted": False, "disabled": []})
+        item["added"] += len(lines)
+        item["disabled"].extend({"line": n, "text": line.strip()} for n, line in enumerate(lines, 1)
+                                if DISABLED_TEST.search(line))
+    return [changed[path] for path in sorted(changed)]
+
+
+def guarded_lines(changes):
+    if not changes:
+        return []
+    lines = ["== guarded files changed: " + ", ".join(
+        f"{item['path']} (+{item['added']} −{item['removed']})" for item in changes)]
+    deleted = [item["path"] for item in changes if item["deleted"]]
+    if deleted:
+        lines.append("== guarded files deleted: " + ", ".join(deleted))
+    disabled = [f"{item['path']}:{marker['line']} {marker['text']}"
+                for item in changes for marker in item["disabled"]]
+    if disabled:
+        lines.append("== guarded tests disabled: " + "; ".join(disabled))
+    return lines
+
+
 def review_prompt(st, cfg=None):
     cfg = accounts_config() if cfg is None else cfg
     brief = TASKS / st["slug"] / "brief.md"
     ru = cfg.get("language", "en") == "ru"
     context = ""
+    guarded = guarded_lines(guarded_changes(st))
+    if guarded:
+        context += "\n".join(guarded) + "\n"
+        context += (("Прочитай эти охраняемые файлы целиком и проверь, не ослаблены ли проверки: "
+                     "убранные утверждения, пропуски, расширенные допуски, моки вместо проверяемого кода.\n") if ru else
+                    ("Read these guarded files in full and check for weakened checks: removed assertions, "
+                     "skips, widened tolerances, or mocks replacing the code under test.\n"))
     checks = st.get("checks", [])
     if (checks and st.get("check") == checks[-1]["cmd"] and checks[-1]["outcome"] == "passed"):
         check = checks[-1]
@@ -848,6 +975,12 @@ def review_prompt(st, cfg=None):
                      "чтобы подтвердить конкретную находку.\n") if ru else
                     ("The saved check already passed: " + evidence +
                      "Do not rerun the full test suite. Run only targeted checks to confirm a specific finding.\n"))
+        if check.get("base_check"):
+            base = check["base_check"]
+            context += (f"Base tests: {base['outcome']} (exit {base['exit']}, {base['seconds']:.0f} s).\n"
+                        + base.get("tail", "") + "\n")
+            context += (("Это сигнал для ревью; причиной может быть законная смена поведения.\n") if ru else
+                        ("This is review evidence; a legitimate behavior change may explain a failure.\n"))
     rejected = []
     for entry in st.get("rounds", []):
         findings = {item["id"]: item for item in (entry.get("review") or {}).get("findings", [])}
@@ -886,8 +1019,8 @@ def review_prompt(st, cfg=None):
             "P1/P2/P3, file, line, title, detail and verify. For clean, findings is empty; summary is a short recap.")
 
 
-def check_tail(st):
-    path = TASKS / st["slug"] / "check.log"
+def check_tail(st, filename="check.log"):
+    path = TASKS / st["slug"] / filename
     if not path.exists():
         return ""
     with path.open(encoding="utf-8", errors="replace") as output:
@@ -1462,7 +1595,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
 
-def run_check(st, stopped):
+def execute_check(st, stopped, cwd, filename):
     """Run the saved check after work, owning and reaping its process group."""
     if stopped():
         return None
@@ -1470,9 +1603,9 @@ def run_check(st, stopped):
     proc = None
     outcome = "failed"
     code = None
-    with (TASKS / st["slug"] / "check.log").open("wb") as log:
+    with (TASKS / st["slug"] / filename).open("wb") as log:
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", st["check"]], cwd=st["worktree"],
+            proc = subprocess.Popen(["/bin/sh", "-c", st["check"]], cwd=cwd,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             st["check_pid"] = proc.pid
             save(st)
@@ -1501,14 +1634,69 @@ def run_check(st, stopped):
     result = {"cmd": st["check"], "exit": code, "seconds": round(time.monotonic() - started, 3),
               "at": time.time(), "outcome": outcome}
     if outcome in ("failed", "timeout"):
-        result["tail"] = check_tail(st)
+        result["tail"] = check_tail(st, filename)
+    return result
+
+
+def run_check(st, stopped):
+    result = execute_check(st, stopped, st["worktree"], "check.log")
+    if result is None:
+        return None
     st.setdefault("checks", []).append(result)
     save(st)
     return result
 
 
+def run_base_check(st, stopped):
+    """Check task HEAD with the base's guarded files, leaving the task untouched."""
+    started = time.monotonic()
+    log = TASKS / st["slug"] / "base-check.log"
+    log.write_text("", encoding="utf-8")
+    result = None
+    paths = check_paths(st)
+    try:
+        with tempfile.TemporaryDirectory(prefix="base-check-", dir=str(TASKS / st["slug"])) as directory:
+            worktree = Path(directory) / "worktree"
+            try:
+                subprocess.run(["git", "worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
+                               cwd=st["worktree"], check=True, capture_output=True)
+                guarded = set()
+                for revision in (st["base"], "HEAD"):
+                    files = sh(["git", "ls-tree", "-r", "--name-only", "-z", revision],
+                               cwd=worktree)
+                    guarded.update(path for path in files.split("\0") if path and guarded_path(path, st, paths))
+                if guarded:
+                    subprocess.run(["git", "--literal-pathspecs", "restore", "--source=" + st["base"],
+                                    "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
+                                   input="\0".join(sorted(guarded)) + "\0", text=True,
+                                   cwd=worktree, check=True, capture_output=True)
+                execution = execute_check(st, stopped, worktree, "base-check.log")
+                if execution is not None:
+                    result = {key: execution[key] for key in ("outcome", "exit", "seconds")}
+                    if result["outcome"] == "stopped":
+                        result["outcome"] = "failed"
+            finally:
+                if (worktree / ".git").exists():
+                    subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
+                                   cwd=st["worktree"], check=True, capture_output=True)
+    except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
+        detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        if isinstance(detail, bytes):
+            detail = detail.decode("utf-8", errors="replace")
+        with log.open("a", encoding="utf-8") as output:
+            output.write("\nbase check setup/cleanup failed: " + (detail or str(exc)) + "\n")
+        result = None
+    if result is None:
+        result = {"outcome": "failed", "exit": None, "seconds": round(time.monotonic() - started, 3)}
+    result["tail"] = check_tail(st, "base-check.log")
+    return result
+
+
 def saved_check(st, cfg, stopped, review_after=True):
     check = run_check(st, stopped) if st.get("check") and not stopped() else None
+    if check and check["outcome"] == "passed" and st.get("base_check") and not stopped():
+        check["base_check"] = run_base_check(st, stopped)
+        save(st)
     if check and check["outcome"] in ("failed", "timeout"):
         if review_after and not st.get("review_skipped"):
             st["review_skipped"] = "check " + check["outcome"]
@@ -1648,7 +1836,8 @@ def cmd__run(a):
             message += ", result " + (result["status"] if result is not None else "unknown")
             if check is not None:
                 message += ", check " + check["outcome"]
-            notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account, result=result)
+            notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account, result=result,
+                   guarded_changed=len(guarded_changes(st)))
             if (result is not None and result["status"] in ("blocked", "needs_decision")
                     and st.get("kind") not in ("review", "scout")):
                 question = next(iter(result["questions"]), "")
@@ -1690,7 +1879,9 @@ def cmd_start(a):
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
+          "guards": a.guard, "base_check": a.base_check,
           "created": time.time(), "turns": 0}
+    st["check_paths"] = check_paths(st)
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
@@ -1742,8 +1933,9 @@ def cmd_scout(a):
 def cmd_say(a):
     st = load(a.slug)
     scouting = st.get("kind") == "scout"
-    if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None):
-        die("scout is read-only; say --check, --check-timeout, --review and --fix-rounds are not supported")
+    if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
+                     or a.no_base_check):
+        die("scout is read-only; say --check, --check-timeout, --review, --fix-rounds and --no-base-check are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -1751,8 +1943,13 @@ def cmd_say(a):
     cfg = accounts_config()
     if a.no_check:
         st["check"] = None
+        st["check_paths"] = []
     elif a.check is not None:
         st["check"] = a.check
+        st["check_paths"] = []
+        st["check_paths"] = check_paths(st)
+    if a.no_base_check:
+        st["base_check"] = False
     if a.check_timeout is not None:
         st["check_timeout"] = a.check_timeout
     # If no thread was created (all accounts exhausted on start), retain the brief too.
@@ -1827,6 +2024,8 @@ def cmd_wait(a):
         else:
             raw = last.read_text().strip() if last.exists() else last_message(st) or "(no final message)"
             print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
+    for line in guarded_lines(guarded_changes(st)):
+        print(line)
     for number, entry in enumerate(st.get("rounds", []), 1):
         findings = (entry.get("review") or {}).get("findings", [])
         counts = ", ".join(f"{severity} {sum(f['severity'] == severity for f in findings)}"
@@ -1848,6 +2047,13 @@ def cmd_wait(a):
         print(f"== check `{check['cmd']}`: {label} ({reason}exit {check['exit']}, {check['seconds']:.0f} s)")
         if check["outcome"] in ("failed", "timeout"):
             print(check.get("tail", check_tail(st)))
+        if check.get("base_check"):
+            base = check["base_check"]
+            label = "passed" if base["outcome"] == "passed" else "FAILED"
+            reason = "timeout, " if base["outcome"] == "timeout" else ""
+            print(f"== base tests: {label} ({reason}exit {base['exit']}, {base['seconds']:.0f} s)")
+            if base.get("tail"):
+                print(base["tail"])
     if st.get("review_skipped"):
         print("== review skipped: " + st["review_skipped"])
     if st.get("kind") == "review" or st.get("rounds"):
@@ -2086,6 +2292,8 @@ def main():
                    help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
     s.add_argument("--check", help="shell command to run after completed work turns; saved for follow-ups")
     s.add_argument("--check-timeout", type=check_timeout, default=1800, help="check timeout in seconds (default: 1800)")
+    s.add_argument("--guard", action="append", default=[], metavar="GLOB", help="guard matching repository paths (repeatable)")
+    s.add_argument("--base-check", action="store_true", help="also check task HEAD with guarded files restored from base")
     s = sub.add_parser("scout", help="answer a code question in an existing directory, read-only")
     s.add_argument("slug")
     s.add_argument("question", nargs="?")
@@ -2105,6 +2313,7 @@ def main():
     checks.add_argument("--check", help="replace the saved check command")
     checks.add_argument("--no-check", action="store_true", help="remove the saved check command")
     s.add_argument("--check-timeout", type=check_timeout, default=None, help="replace the saved check timeout")
+    s.add_argument("--no-base-check", action="store_true", help="disable the saved base check")
     s = sub.add_parser("review")
     s.add_argument("slug")
     s.add_argument("--effort", default=None)

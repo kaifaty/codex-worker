@@ -74,10 +74,10 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --review --fix-rounds 2 --check "<command from Checks>"` (base defaults to the remote's default branch) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --review --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; reads the existing directory (default `.`) with a read-only sandbox and creates no worktree or branch; `wait` prints its concise report |
 | Wait for the cycle | `wait <slug>` as a **background** Bash command: it re-invokes you when the full review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check` |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` disables inherited base tests |
 | First review | `review <slug> [--effort E]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a `done` result and a passing check, or an unstructured result for compatibility |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
@@ -103,6 +103,23 @@ Failure or timeout skips the requested review, and `wait` shows the result and t
 lines. Results of `partial`, `blocked`, or `needs_decision` also skip automatic review, with
 `review_skipped: "result <status>"`; the saved check still runs. Failed, stopped, and paused turns do
 not run checks. Inside an automatic fix cycle, an incomplete result stops immediately before checks.
+
+The supervisor guards test directories (`tests/`, `test/`, `__tests__/`, `spec/`), test filenames
+(`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`), and CI paths (`.github/workflows/`,
+`.gitlab-ci.yml`, `.forgejo/workflows/`). It also guards existing repository paths named in the saved
+check command and patterns passed with repeatable `start --guard "GLOB"`; these patterns persist in
+task state. After a work turn, `wait` prints `guarded files changed` with each changed file's added and
+deleted line counts across the base-to-HEAD diff and uncommitted changes. It separately flags deleted
+guarded files and added `skip`/`xfail`/`only` markers. Review prompts name the files and ask the reviewer
+to look for removed assertions, skips, wider tolerances, and mocks replacing the code under test.
+
+Use `start --base-check` for tasks that should preserve behavior, such as refactoring and optimization.
+After a passing ordinary check, the supervisor creates a temporary detached worktree at the task's
+`HEAD`, restores guarded files from the base (removing new files and restoring deleted files), runs
+the same command, then removes the worktree. The check record includes the base run's outcome, exit
+code, and duration. `wait` prints `== base tests: passed/FAILED` with a log tail. Failure is a signal
+to examine: a legitimate behavior change can explain it, and review still runs. This option persists
+across turns; `say --no-base-check` disables it.
 
 Use `start --review --fix-rounds 2 --check "<command from Checks>"` by default. `--fix-rounds N` on
 `start` or `say` accepts 0–5, defaults to 0, and requires `--review`. Each round sends the review's
@@ -134,7 +151,8 @@ The user can configure task notifications with `notify` in `~/.codex/codex-worke
 an argv list receiving the event JSON as its final argument. `notify_events` optionally filters event
 types. Hooks run asynchronously and write output or launch errors to the task's `notify.log`; see the
 README for examples.
-`review_done` includes the review's `round`; `turn_finished` fires once at the end of the whole cycle.
+`review_done` includes the review's `round`; `turn_finished` fires once at the end of the whole cycle
+and includes `guarded_changed`, the number of changed guarded files.
 
 ## Multiple subscriptions
 
@@ -200,6 +218,10 @@ parallel, one question each, and `wait` for their reports. Verify key facts by r
 3. Read the actual diff, latest review, and every rejection reason. Check each finding and rejection
    against the code (`gh pr diff <n>` or
    `git -C <worktree> diff <base>`), then review the parts the findings did not cover for real failures.
+   If `wait` prints `guarded files changed`, read every named file in full and check that tests and
+   checks were not weakened through removed assertions, skips, wider tolerances, or mocks replacing
+   the code under test. Read a deleted file's base version. Examine any base-test failure before
+   accepting the work, even when the ordinary check and review pass.
    Follow the repo's review rules; use `/code-review` for big or risky PRs if available. Check its
    numbers against the "Done when" list. A passing check does not replace reading the diff.
 4. Found problems or findings left after the round limit → one `say` with all of them, each with what's
