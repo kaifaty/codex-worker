@@ -44,7 +44,8 @@ Do not touch: <what is outside the task>.
 
 `start` appends the standing rules: own worktree only, no bureaucracy, checks for this task only, stop
 after two failed attempts with numbers, push and open a PR but never merge, no Co-Authored-By, and a
-JSON result with a plain-language summary, checks, PR, questions, remaining work, and finding decisions.
+JSON result with a plain-language summary, checks, PR, questions, remaining work, finding decisions,
+and a `commit_message` string (empty after worker commits or when there are no changes).
 Ordinary turns return an empty `findings` array; fix turns use `{id, decision: fixed|rejected, note}`
 for the supplied findings. The settings
 choose `references/rules.md` or `references/rules.ru.md`; `~/.codex/codex-worker-rules.md`, if present,
@@ -74,7 +75,7 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --max-minutes M --review --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M --review --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; reads the existing directory (default `.`) with a read-only sandbox and creates no worktree or branch; `wait` prints its concise report |
 | Wait for the cycle | `wait <slug>` as a **background** Bash command: it re-invokes you when the full review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
 | Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M` and optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` disables inherited base tests |
@@ -90,6 +91,42 @@ The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug
 `~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
+
+## Optional workspace sandbox
+
+The `sandbox` setting in `~/.codex/codex-worker.json` accepts `"off"` (default) or `"workspace"`.
+`start --sandbox off|workspace` overrides it for one task; `say` inherits the saved mode. For example:
+
+```json
+{
+  "sandbox": "workspace",
+  "writable_dirs": ["~/.gradle", "~/.npm"]
+}
+```
+
+`writable_dirs` expands `~` and makes paths absolute. In workspace mode, worker and review execs,
+including resumes and account rotations, use `workspace-write` with network access. Saved checks run
+through `codex sandbox` with the same permissions; scouts remain read-only.
+
+The sandbox blocks writes outside the worktree, protecting task state and saved checks, other
+repositories, `~/.ssh`, and `~/.codex`. Temporary directories stay writable, and `writable_dirs`
+explicitly grants write access to its entries. Builds with caches outside the worktree fail until the
+cache directories are added. The sandbox does **not** restrict disk reads, including tokens, or
+network access.
+
+Workspace instructions override the worker's commit and publication rules: leave changes in the
+worktree and return a repository-appropriate `commit_message`, with the subject on its first line.
+After each completed implementation turn, including fix rounds and any result status, the supervisor
+commits before checking, disables Git hooks and fsmonitor, pushes without force, and creates a PR if
+`gh` is available and the branch has none. An empty message uses `<slug>: turn <N>`. Failed and stopped turns
+are not committed. Publication errors do not fail the turn; `wait` prints the publication result or
+error and `== sandbox: workspace`. `status` shows the saved mode.
+
+Only filters whose `clean`, `smudge`, or `process` commands start with `git-lfs ` or `git lfs ` allow
+supervisor publication; otherwise, commit the turn manually. Workspace mode is unsuitable for a
+repository whose config references worktree files through `include.path` or `core.attributesFile`.
+
+## Turn checks and limits
 
 Choose `--max-minutes M` for every implementation `start` and `say` according to the task's size;
 split a task whose safe budget would be very long. Without the flag, `max_turn_minutes` in

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
   codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
@@ -16,7 +16,8 @@
 
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
 credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_review_minutes (30),
-repeat_limit (3), notify and notify_events. Legacy claude-accounts.json is a fallback.
+repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
+Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without quota monitoring or rotation.
 State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
 CODEX_TASK_HOME and CODEX_TASK_CODEX override the main home and CLI binary (also for tests).
@@ -62,6 +63,7 @@ MINUTE_SECONDS = float(os.environ.get("CODEX_TASK_MINUTE_SECONDS", "60"))
 RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
+GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 
 
 def object_schema(properties):
@@ -78,6 +80,7 @@ RESULT_SCHEMA = object_schema({
         "details": {"type": "string", "description": "Include numerical evidence: counts, exits, attempts."},
     })},
     "pr": {"type": "string", "description": "PR URL, or an empty string."},
+    "commit_message": {"type": "string", "description": "Repository-style commit message; first line is the subject. Empty if already committed or unchanged."},
     "questions": {"type": "array", "items": {"type": "string"}},
     "remaining": {"type": "array", "items": {"type": "string"}},
     "findings": {"type": "array", "items": object_schema({
@@ -171,6 +174,27 @@ def sh(cmd, cwd=None, check=True, errors="strict"):
     return r.stdout.rstrip()
 
 
+def unsafe_filter_driver(cwd):
+    """Read every config scope without inspecting worker-written file contents."""
+    result = subprocess.run(GIT + ["config", "--null", "--get-regexp", r"^filter\..*\.(clean|smudge|process)$"],
+                            cwd=cwd, text=True, capture_output=True, errors="replace")
+    if result.returncode == 1:  # No configured filter commands.
+        return None
+    result.check_returncode()
+    # NUL-delimited records preserve embedded newlines in filter commands.
+    for record in result.stdout.split("\0"):
+        if not record:
+            continue
+        key, _, command = record.partition("\n")
+        if not command.startswith(("git-lfs ", "git lfs ")):
+            return key[len("filter."):key.rfind(".")]
+    return None
+
+
+def workspace_filter_driver(st):
+    return unsafe_filter_driver(st["worktree"]) if st.get("sandbox") == "workspace" else None
+
+
 def accounts_config():
     p = CODEX_HOME / "codex-worker.json"
     if not p.exists():
@@ -189,6 +213,14 @@ def accounts_config():
     cfg.setdefault("max_turn_minutes", None)
     cfg.setdefault("max_review_minutes", 30)
     cfg.setdefault("repeat_limit", 3)
+    cfg.setdefault("sandbox", "off")
+    cfg.setdefault("writable_dirs", [])
+    if cfg["sandbox"] not in ("off", "workspace"):
+        die('sandbox must be "off" or "workspace"')
+    if not isinstance(cfg["writable_dirs"], list) or not all(
+            isinstance(path, str) and path for path in cfg["writable_dirs"]):
+        die("writable_dirs must be a list of nonempty directory paths")
+    cfg["writable_dirs"] = [str(Path(path).expanduser().resolve()) for path in cfg["writable_dirs"]]
     for key in ("max_turn_minutes", "max_review_minutes"):
         value = cfg[key]
         if key == "max_turn_minutes" and value is None:
@@ -285,6 +317,36 @@ def rules_path(cfg=None):
 
 def rules_text(cfg=None):
     return rules_path(cfg).read_text(encoding="utf-8")
+
+
+def sandbox_rules(cfg, reviewing=False):
+    if cfg.get("language", "en") == "ru":
+        rules = ("## Песочница worktree\n\n"
+                 "Этот раздел отменяет правила про коммиты и публикацию выше. "
+                 "git commit, git push и gh pr create в песочнице недоступны, не пытайся их запускать. ")
+        if reviewing:
+            return rules + "Файлы не меняй; верни только JSON по схеме ревью."
+        return rules + ("Оставь изменения в worktree: надзиратель закоммитит и опубликует их после хода. "
+                        "В итоге дай commit_message по правилам репозитория: первая строка — заголовок. "
+                        "Если изменений нет или ты уже закоммитил их сам, commit_message — пустая строка.")
+    rules = ("## Workspace sandbox\n\n"
+             "This section overrides the commit and publication rules above. "
+             "git commit, git push and gh pr create are unavailable in the sandbox; do not try them. ")
+    if reviewing:
+        return rules + "Do not change files; return only JSON matching the review schema."
+    return rules + ("Leave changes in the worktree: the supervisor will commit and publish them after the turn. "
+                    "Return commit_message following the repository's rules; the first line is the subject. "
+                    "Use an empty commit_message if there are no changes or you already committed them yourself.")
+
+
+def sandbox_args(st):
+    if st.get("sandbox", "off") != "workspace":
+        return []
+    # JSON strings are TOML basic strings too; TOML also requires escaping DEL.
+    roots = json.dumps(st.get("writable_dirs", []), ensure_ascii=False).replace("\x7f", "\\u007f")
+    return ["-c", 'sandbox_mode="workspace-write"',
+            "-c", "sandbox_workspace_write.network_access=true",
+            "-c", "sandbox_workspace_write.writable_roots=" + roots]
 
 
 def account_named(cfg, name):
@@ -654,6 +716,8 @@ def load(slug):
     st.setdefault("rounds", [])
     st.setdefault("guards", [])
     st.setdefault("base_check", False)
+    st.setdefault("sandbox", "off")
+    st.setdefault("writable_dirs", [])
     return st
 
 
@@ -687,7 +751,7 @@ def running_tasks(exclude=""):
 
 def main_repo(path):
     """The main checkout of the repository `path` belongs to (including worktrees)."""
-    common = Path(sh(["git", "rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
+    common = Path(sh(GIT + ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
     return common.parent
 
 
@@ -711,6 +775,7 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("auto_fix_stop", None)
     st.pop("turn_stop", None)
     st.pop("wrapup", None)
+    st.pop("publish", None)
     if kind != "review":
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
@@ -817,9 +882,14 @@ def handoff(st, current_message=False, cfg=None):
                 prompt += f"\n{n}. {text}\n"
     if not scouting:
         prompt += f"\n{'Коммиты' if ru else 'Commits'} (git log --oneline {st['base']}..HEAD):\n"
-        prompt += sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")
+        prompt += sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")
         prompt += ("\n\nСостояние worktree (git status --short):\n" if ru else "\n\nWorktree status (git status --short):\n")
-        prompt += sh(["git", "status", "--short"], cwd=st["worktree"], check=False) or ("(чисто)" if ru else "(clean)")
+        driver = workspace_filter_driver(st)
+        if driver is not None:
+            prompt += (f"(пропущено: настроен фильтр {driver})" if ru else
+                       f"(skipped: filter driver {driver} is configured)")
+        else:
+            prompt += sh(GIT + ["status", "--short"], cwd=st["worktree"], check=False) or ("(чисто)" if ru else "(clean)")
     if has_threads:
         label = (("Последние сообщения предыдущего разведчика" if ru else "Latest messages from the previous scout")
                  if scouting else ("Последние сообщения предыдущего исполнителя" if ru else "Latest messages from the previous worker"))
@@ -911,12 +981,12 @@ DISABLED_TEST = re.compile(
 
 def guarded_changes(st):
     """Combine committed and dirty diffs, treating renames as deletion/addition."""
-    if st.get("kind") == "scout":
+    if st.get("kind") == "scout" or workspace_filter_driver(st) is not None:
         return []
     root = st["worktree"]
     paths = check_paths(st)
     changed = {}
-    args = ["git", "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
+    args = GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
     for revisions in ([st["base"], "HEAD"], ["--cached", "HEAD"], []):
         stats = sh(args + ["--numstat", "-z"] + revisions + ["--"], cwd=root, check=False)
         deleted = set(sh(args + ["--name-only", "-z", "--diff-filter=D"] + revisions + ["--"],
@@ -951,7 +1021,7 @@ def guarded_changes(st):
                     line_number += 1
                 elif in_hunk and line.startswith(" "):
                     line_number += 1
-    untracked = sh(["git", "ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
+    untracked = sh(GIT + ["ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
     for path in filter(None, untracked.split("\0")):
         if not guarded_path(path, st, paths):
             continue
@@ -1478,8 +1548,14 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         args += ["resume", thread, "--json", "-o", str(last)]
     else:
         args += ["--json", "-C", st["worktree"], "-o", str(last)]
-    if st.get("kind") == "scout" or (reviewing and wrapup):
+    if st.get("kind") == "scout":
         args += ["-c", 'sandbox_mode="read-only"']
+    else:
+        args += sandbox_args(st)
+        if st.get("sandbox") == "workspace":
+            rules = sandbox_rules(cfg, reviewing=reviewing)
+            if not prompt.endswith(rules):
+                prompt += "\n\n" + rules
     if st.get("kind") != "scout":
         schema = d / ("review-schema.json" if reviewing else "result-schema.json")
         schema.write_text(json.dumps(REVIEW_SCHEMA if reviewing else RESULT_SCHEMA, indent=2), encoding="utf-8")
@@ -1811,7 +1887,12 @@ def execute_check(st, stopped, cwd, filename):
     code = None
     with (TASKS / st["slug"] / filename).open("wb") as log:
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", st["check"]], cwd=cwd,
+            args = ["/bin/sh", "-c", st["check"]]
+            env = None
+            if st.get("sandbox") == "workspace":
+                args = [codex_binary(), "sandbox"] + sandbox_args(st) + ["--"] + args
+                env = account_env({"home": str(CODEX_HOME)})
+            proc = subprocess.Popen(args, cwd=cwd, env=env,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             st["check_pid"] = proc.pid
             save(st)
@@ -1855,6 +1936,9 @@ def run_check(st, stopped):
 
 def run_base_check(st, stopped):
     """Check task HEAD with the base's guarded files, leaving the task untouched."""
+    driver = workspace_filter_driver(st)
+    if driver is not None:
+        return {"outcome": "skipped", "reason": f"filter driver {driver} is configured; commit this turn manually"}
     if st["worktree"] in st["check"]:
         return {"outcome": "skipped", "reason": "check command uses the task worktree's absolute path"}
     started = time.monotonic()
@@ -1866,15 +1950,15 @@ def run_base_check(st, stopped):
         with tempfile.TemporaryDirectory(prefix="base-check-", dir=str(TASKS / st["slug"])) as directory:
             worktree = Path(directory) / "worktree"
             try:
-                subprocess.run(["git", "worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
+                subprocess.run(GIT + ["worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
                                cwd=st["worktree"], check=True, capture_output=True)
                 guarded = set()
                 for revision in (st["base"], "HEAD"):
-                    files = sh(["git", "ls-tree", "-r", "--name-only", "-z", revision],
+                    files = sh(GIT + ["ls-tree", "-r", "--name-only", "-z", revision],
                                cwd=worktree)
                     guarded.update(path for path in files.split("\0") if path and guarded_path(path, st, paths))
                 if guarded:
-                    subprocess.run(["git", "--literal-pathspecs", "restore", "--source=" + st["base"],
+                    subprocess.run(GIT + ["--literal-pathspecs", "restore", "--source=" + st["base"],
                                     "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
                                    input="\0".join(sorted(guarded)) + "\0", text=True,
                                    cwd=worktree, check=True, capture_output=True)
@@ -1885,7 +1969,7 @@ def run_base_check(st, stopped):
                         result["outcome"] = "failed"
             finally:
                 if (worktree / ".git").exists():
-                    subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
+                    subprocess.run(GIT + ["worktree", "remove", "--force", str(worktree)],
                                    cwd=st["worktree"], check=True, capture_output=True)
     except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
         detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
@@ -1935,6 +2019,61 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False):
     return result
 
 
+def publish_work(st, stopped):
+    """Publish a completed workspace turn outside the worker's write boundary."""
+    if (st.get("sandbox") != "workspace" or st.get("kind") != "work"
+            or st.get("outcome") != "completed" or stopped()):
+        return
+    receipt = {"at": time.time(), "sha": "", "pushed": False, "pr": "", "error": ""}
+
+    def run(args):
+        return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
+                              text=True, errors="replace").stdout.strip()
+
+    stage = "commit"
+    try:
+        driver = unsafe_filter_driver(st["worktree"])
+        if driver is not None:
+            raise RuntimeError(f"filter driver {driver} is configured; the supervisor does not run filters "
+                               "on worker-written files — commit this turn manually")
+        if not run(GIT + ["status", "--porcelain"]):
+            return
+        message = ((st.get("result") or {}).get("commit_message") or "").strip()
+        message = message or f"{st['slug']}: turn {st['turns']}"
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="commit-",
+                                         dir=str(TASKS / st["slug"])) as file:
+            file.write(message + "\n")
+            file.flush()
+            if stopped():
+                return
+            run(GIT + ["add", "-A"])
+            if stopped():
+                return
+            run(GIT + ["commit", "-F", file.name])
+        receipt["sha"] = run(GIT + ["rev-parse", "HEAD"])
+        stage = "push"
+        run(GIT + ["push", "-u", "origin", st["branch"]])
+        receipt["pushed"] = True
+        gh = shutil.which("gh")
+        if gh:
+            stage = "PR"
+            receipt["pr"] = run([gh, "pr", "list", "--head", st["branch"], "--state", "all",
+                                 "--json", "url", "--jq", ".[0].url // empty"])
+            if not receipt["pr"]:
+                subject, _, body = message.partition("\n")
+                with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="pr-",
+                                                 dir=str(TASKS / st["slug"])) as file:
+                    file.write(body.strip() or subject)
+                    file.flush()
+                    receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].removeprefix("origin/"),
+                                         "--head", st["branch"], "--title", subject, "--body-file", file.name])
+    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
+        detail = (exc.stderr or exc.stdout or str(exc)) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
+        receipt["error"] = stage + ": " + detail.strip()
+    st["publish"] = receipt
+    save(st)
+
+
 def auto_fix(st, cfg, review, effort, stopped, sleep):
     """Bounded work/check/review loop under the original supervisor and wait."""
     failed_check = None
@@ -1961,6 +2100,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         save(st)
         work_paths = check_paths(st)
         run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
+        publish_work(st, stopped)
         st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
         result = st.get("result")
         entry["decisions"] = result["findings"] if result is not None else []
@@ -2017,6 +2157,7 @@ def cmd__run(a):
             work_paths = check_paths(st) if st.get("kind") != "scout" else None
             run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
                      stopped, stopped_flag.wait)
+            publish_work(st, stopped)
             if work_paths is not None:
                 st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
                 save(st)
@@ -2084,17 +2225,20 @@ def cmd_start(a):
     brief = sys.stdin.read() if a.brief == "-" else Path(a.brief).read_text()
     if not brief.strip():
         die("empty brief")
+    sandbox = a.sandbox if a.sandbox is not None else cfg["sandbox"]
     rules = rules_text(cfg)
+    if sandbox == "workspace":
+        rules += "\n\n" + sandbox_rules(cfg)
     repo = main_repo(a.repo)
     branch = f"codex/{a.slug}"
     wt = WORKTREES / f"claude-{a.slug}" / repo.name
     if wt.exists():
         die(f"{wt} exists")
-    sh(["git", "fetch", "--quiet", "origin"], cwd=repo)
-    a.base = a.base or sh(["git", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
+    sh(GIT + ["fetch", "--quiet", "origin"], cwd=repo)
+    a.base = a.base or sh(GIT + ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"], cwd=repo,
                           check=False) or "origin/main"
     wt.parent.mkdir(parents=True, exist_ok=True)
-    sh(["git", "worktree", "add", "--quiet", "-b", branch, str(wt), a.base], cwd=repo)
+    sh(GIT + ["worktree", "add", "--quiet", "-b", branch, str(wt), a.base], cwd=repo)
     d = TASKS / a.slug
     d.mkdir(parents=True)
     prompt = brief.rstrip() + "\n\n" + rules.replace("{branch}", branch).replace("{base}", a.base.removeprefix("origin/"))
@@ -2103,6 +2247,7 @@ def cmd_start(a):
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
+          "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"],
           "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
           "created": time.time(), "turns": 0}
     save(st)
@@ -2236,6 +2381,20 @@ def cmd_wait(a):
         reset = f"{local_time(e['reset'])} ({e['account']})" if e["reset"] is not None else "unknown"
         print(f"== all accounts at limit; earliest reset {reset}; continue with say after that")
     state = "paused" if sleeping else "finished"
+    if st.get("sandbox") == "workspace":
+        print("== sandbox: workspace")
+    publication = st.get("publish")
+    if publication:
+        if publication["sha"]:
+            subject = sh(GIT + ["log", "-1", "--format=%s", publication["sha"]], cwd=st["worktree"], check=False)
+            line = f"== committed {publication['sha']} " + json.dumps(subject, ensure_ascii=False)
+            if publication["pushed"]:
+                line += "; pushed"
+            if publication["pr"]:
+                line += "; PR " + publication["pr"]
+            print(line)
+        if publication["error"]:
+            print("== publish error: " + publication["error"])
     print(f"== {a.slug}: turn {st.get('turns')} {state} after "
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
     if st.get("turn_stop"):
@@ -2324,8 +2483,9 @@ def cmd_wait(a):
     if st.get("kind") == "scout":
         return
     print(f"== commits on {st['branch']}:")
-    print(sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)")
-    dirty = sh(["git", "status", "--short"], cwd=st["worktree"], check=False)
+    print(sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)")
+    dirty = (sh(GIT + ["status", "--short"], cwd=st["worktree"], check=False)
+             if workspace_filter_driver(st) is None else "")
     if dirty:
         print("== uncommitted:\n" + dirty)
 
@@ -2348,7 +2508,8 @@ def describe(st, detail):
     location = st["worktree"] if scouting else st["branch"]
     label = "  scout" if scouting else ("  review" if reviewing else "")
     line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {location}  "
-            f"account {account}  thread {thread[:13]}" + label)
+            f"account {account}  thread {thread[:13]}" + label
+            + "  sandbox " + ("read-only" if scouting else st.get("sandbox", "off")))
     if not detail:
         return line
     if scouting:
@@ -2356,7 +2517,7 @@ def describe(st, detail):
     pr = (sh(["gh", "pr", "list", "--head", st["branch"], "--state", "all", "--json", "number,state,url",
               "--jq", '.[] | "\\(.number) \\(.state) \\(.url)"'], cwd=st["worktree"], check=False)
           if shutil.which("gh") else "")
-    commits = sh(["git", "log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
+    commits = sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = TASKS / st["slug"] / "review.md"
     message = review.read_text().strip() if reviewing and review.exists() else last_message(st)
     return "\n".join([line, f"worktree {st['worktree']}", *result_lines(st.get("result")),
@@ -2415,10 +2576,10 @@ def cmd_clean(a):
     if st.get("kind") != "scout":
         repo, wt = st["repo"], st["worktree"]
         if Path(wt).exists():
-            sh(["git", "worktree", "remove", "--force", wt], cwd=repo)
+            sh(GIT + ["worktree", "remove", "--force", wt], cwd=repo)
             shutil.rmtree(Path(wt).parent, ignore_errors=True)
         if not a.keep_branch:
-            subprocess.run(["git", "branch", "-D", st["branch"]], cwd=repo, capture_output=True)
+            subprocess.run(GIT + ["branch", "-D", st["branch"]], cwd=repo, capture_output=True)
     cfg = accounts_config()
     for entry in st["threads"] + st["reviews"]:
         account = account_named(cfg, entry["account"])
@@ -2529,6 +2690,8 @@ def main():
     s.add_argument("--base", default=None, help="default: the remote's default branch (origin/HEAD)")
     s.add_argument("--effort", default=None, help="default: model_reasoning_effort from ~/.codex/config.toml")
     s.add_argument("--parallel", action="store_true")
+    s.add_argument("--sandbox", choices=("off", "workspace"), default=None,
+                   help="write sandbox for this task (default: sandbox setting, off)")
     s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
     s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,

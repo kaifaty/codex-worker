@@ -12,6 +12,7 @@ import json
 import os
 import runpy
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -349,10 +350,48 @@ if command == "app-server":
     app_server()
 elif command == "exec":
     sys.exit(execute())
+elif command == "sandbox":
+    trace({"command": "sandbox", "argv": sys.argv[1:], "cwd": os.getcwd()})
+    args = sys.argv[sys.argv.index("--") + 1:]
+    os.execv(args[0], args)
 elif command == "archive":
     trace({"command": "archive", "thread": sys.argv[2]})
 else:
     sys.exit("unsupported fake codex command: " + command)
+'''
+
+
+FAKE_GH = r'''import json
+import os
+import sys
+from pathlib import Path
+
+args = sys.argv[1:]
+state_path = Path(os.environ["CODEX_FAKE_GH_STATE"])
+state = json.loads(state_path.read_text()) if state_path.exists() else {}
+event = {"argv": args, "cwd": os.getcwd()}
+if "--body-file" in args:
+    event["body"] = Path(args[args.index("--body-file") + 1]).read_text()
+with Path(os.environ["CODEX_FAKE_GH_TRACE"]).open("a") as stream:
+    stream.write(json.dumps(event) + "\n")
+branch = args[args.index("--head") + 1] if "--head" in args else ""
+if args[:2] == ["pr", "list"]:
+    url = state.get(branch, "")
+    if "--jq" in args:
+        expression = args[args.index("--jq") + 1]
+        print(("42 OPEN " + url if "number" in expression else url) if url else "")
+    else:
+        print(json.dumps([{"number": 42, "state": "OPEN", "url": url}] if url else []))
+elif args[:2] == ["pr", "create"]:
+    if os.environ.get("CODEX_FAKE_GH_CREATE_ERROR"):
+        print("fixture PR creation failed", file=sys.stderr)
+        sys.exit(1)
+    url = "https://example.test/pull/" + str(len(state) + 1)
+    state[branch] = url
+    state_path.write_text(json.dumps(state))
+    print(url)
+else:
+    sys.exit("unsupported fake gh invocation")
 '''
 
 
@@ -373,8 +412,15 @@ class RotationTests(unittest.TestCase):
         self.fake = self.root / "codex"
         self.fake.write_text("#!" + PYTHON + "\n" + FAKE_CODEX)
         self.fake.chmod(0o700)
+        self.gh_trace_path = self.root / "fake-gh-trace.jsonl"
+        fake_gh = self.root / "gh"
+        fake_gh.write_text("#!" + PYTHON + "\n" + FAKE_GH)
+        fake_gh.chmod(0o700)
         self.env = dict(os.environ, CODEX_TASK_HOME=str(self.home),
                         CODEX_TASK_CODEX=str(self.fake), CODEX_FAKE_TRACE=str(self.trace_path),
+                        CODEX_FAKE_GH_TRACE=str(self.gh_trace_path),
+                        CODEX_FAKE_GH_STATE=str(self.root / "fake-gh-state.json"),
+                        PATH=str(self.root) + os.pathsep + os.environ.get("PATH", ""),
                         CODEX_TASK_SLEEP_STEP="0.05", CODEX_TASK_RESET_MARGIN="0.1",
                         GIT_AUTHOR_NAME="Rotation Test", GIT_AUTHOR_EMAIL="rotation@example.test",
                         GIT_COMMITTER_NAME="Rotation Test", GIT_COMMITTER_EMAIL="rotation@example.test")
@@ -418,13 +464,18 @@ class RotationTests(unittest.TestCase):
                         groups.add(int(event["pgid"]))
             owned.difference_update((0, 1, os.getpid()))
             groups.difference_update((0, 1, os.getpgrp()))
-            result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat="],
+            result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
                                     text=True, capture_output=True, check=True)
             table = {}
             for line in result.stdout.splitlines():
-                fields = line.split()
-                if len(fields) == 4:
+                fields = line.split(None, 4)
+                if len(fields) == 5:
                     table[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
+                    # Hooks start in their own session and may outlive the
+                    # supervisor's final pid=None save. Their fixture paths
+                    # still identify them after they have been reparented.
+                    if str(self.root) in fields[4]:
+                        owned.add(int(fields[0]))
             while True:
                 descendants = {pid for pid, (parent, group, _) in table.items()
                                if parent in owned or group in groups}
@@ -491,6 +542,13 @@ class RotationTests(unittest.TestCase):
                                 timeout=kwargs.get("timeout", 15))
         self.assertEqual(result.returncode, 0,
                          "command: %s\nstdout:\n%s\nstderr:\n%s" % (args, result.stdout, result.stderr))
+        # Keep supervisors after their final save clears state['pid']; wait
+        # returns as soon as that idle state is visible, before process exit.
+        if args and args[0] in ("start", "scout", "say", "review"):
+            for line in result.stdout.splitlines():
+                pid = line.rpartition(", pid ")[2]
+                if pid.isdigit():
+                    self.extra_pids.add(int(pid))
         return result.stdout
 
     def account(self, home, account_id, reset, used=10, runs=None, auto_reset=False, release_at=None):
@@ -581,6 +639,28 @@ class RotationTests(unittest.TestCase):
     def review_invocations(self):
         return [event for event in self.invocations() if event.get("review")]
 
+    def sandbox_invocations(self):
+        return [event for event in self.trace() if event.get("command") == "sandbox"]
+
+    def gh_invocations(self):
+        if not self.gh_trace_path.exists():
+            return []
+        return [json.loads(line) for line in self.gh_trace_path.read_text().splitlines()]
+
+    def record_git_calls(self):
+        real_git = shutil.which("git", path=self.env["PATH"])
+        self.assertIsNotNone(real_git)
+        path = self.root / "git-trace.jsonl"
+        wrapper = self.root / "git"
+        wrapper.write_text(
+            "#!" + PYTHON + "\n"
+            "import json, os, sys\n"
+            "with open(" + repr(str(path)) + ", 'a') as stream:\n"
+            "    stream.write(json.dumps({'argv': sys.argv[1:], 'cwd': os.getcwd()}) + '\\n')\n"
+            "os.execv(" + repr(real_git) + ", [" + repr(real_git) + "] + sys.argv[1:])\n")
+        wrapper.chmod(0o700)
+        return path
+
     def configure_notify(self, events=None, command=None):
         path = self.home / "codex-worker.json"
         legacy = self.home / "claude-accounts.json"
@@ -641,6 +721,9 @@ class RotationTests(unittest.TestCase):
         args = ["wait", slug, "--timeout", str(timeout)]
         if through_sleep:
             args.append("--through-sleep")
+        pid = self.state(slug).get("pid")
+        if pid:
+            self.extra_pids.add(pid)
         output = self.cli(*args, timeout=timeout + 15)
         state = self.state(slug)
         stderr_path = self.home / "claude-tasks" / slug / "stderr.log"
@@ -703,7 +786,7 @@ class RotationTests(unittest.TestCase):
                   "checks": [{"command": "python3 -I tests/test_rotation.py", "outcome": "passed",
                               "details": "3 tests passed, 0 failed"}],
                   "pr": "https://example.test/pull/42", "questions": [], "remaining": [],
-                  "findings": []}
+                  "findings": [], "commit_message": ""}
         result.update(changes)
         return result
 
@@ -747,8 +830,455 @@ class RotationTests(unittest.TestCase):
                    ["done", "partial", "blocked", "needs_decision"])
         self.assertCountEqual(properties[field]["enum"], choices)
         if not review:
+            self.assertEqual(properties["commit_message"]["type"], "string")
             decision = properties["findings"]["items"]["properties"]["decision"]
             self.assertCountEqual(decision["enum"], ["fixed", "rejected"])
+
+    def assert_workspace_sandbox(self, invocation, writable_dirs=()):
+        argv = invocation["argv"]
+        settings = [argv[index + 1] for index, value in enumerate(argv[:-1]) if value == "-c"]
+        sandbox = [value for value in settings if value.startswith("sandbox_")]
+        self.assertEqual(len(sandbox), 3, argv)
+        self.assertIn('sandbox_mode="workspace-write"', sandbox)
+        self.assertIn("sandbox_workspace_write.network_access=true", sandbox)
+        roots = next(value.split("=", 1)[1] for value in sandbox
+                     if value.startswith("sandbox_workspace_write.writable_roots="))
+        self.assertEqual(json.loads(roots), list(writable_dirs))
+        self.assertNotIn("\x7f", roots, "TOML requires DEL to be escaped")
+        self.assertNotIn("-s", argv)
+        self.assertNotIn("--add-dir", argv)
+
+    def assert_no_workspace_sandbox(self, invocation):
+        self.assertFalse(any(value.startswith("sandbox_") for value in invocation["argv"]),
+                         invocation["argv"])
+
+    def test_workspace_settings_are_normalized_saved_and_inherited_by_say_and_review(self):
+        user_home = self.root / "user-home"
+        user_home.mkdir()
+        self.env["HOME"] = str(user_home)
+        cache = '.cache/quote"-slash\\-line\n-tab\t-del\x7f-🙂'
+        roots = [str(user_home / cache), str(self.repo / "build-cache")]
+        self.configure(language="en", sandbox="workspace", writable_dirs=["~/" + cache, "build-cache"])
+        settings = self.home / "codex-worker.json"
+        settings.write_text((self.home / "claude-accounts.json").read_text())
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)},
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("sandbox-inherit", "--review")
+        output = self.wait("sandbox-inherit")
+        state = self.state("sandbox-inherit")
+        self.assertEqual((state["sandbox"], state["writable_dirs"]), ("workspace", roots))
+        self.assertIn("== sandbox: workspace", output)
+        for args in (("status",), ("status", "sandbox-inherit")):
+            self.assertIn("sandbox workspace", self.cli(*args))
+        config = json.loads(settings.read_text())
+        config.update(sandbox="off", writable_dirs=[])
+        settings.write_text(json.dumps(config))
+        self.cli("say", "sandbox-inherit", "Continue with the task's saved sandbox")
+        self.wait("sandbox-inherit")
+        self.cli("review", "sandbox-inherit")
+        self.wait("sandbox-inherit")
+        executions = self.invocations()
+        self.assertEqual([event["resume"] for event in executions], [False, False, True, False])
+        self.assertEqual([event["review"] for event in executions], [False, True, False, True])
+        self.assertEqual(self.state("sandbox-inherit")["writable_dirs"], roots)
+        for event in executions:
+            self.assert_workspace_sandbox(event, roots)
+            self.assertIn("## Workspace sandbox", event["prompt"])
+            if event["review"]:
+                self.assertNotIn("commit_message", event["prompt"])
+                self.assertNotIn("commit_message", event["output_schema"]["properties"])
+        self.start("sandbox-override", "--sandbox", "workspace")
+        self.wait("sandbox-override")
+        self.assertEqual(self.state("sandbox-override")["sandbox"], "workspace")
+        self.assert_workspace_sandbox(self.invocations()[-1])
+
+    def test_workspace_settings_validate_values_and_default_to_off(self):
+        worker = self.worker()
+        config = worker.accounts_config()
+        self.assertEqual(config["sandbox"], "off")
+        self.assertEqual(config["writable_dirs"], [])
+        invalid = {"sandbox": (None, False, "workspace-write"),
+                   "writable_dirs": (None, "cache", [None], [""])}
+        for key, values in invalid.items():
+            for value in values:
+                with self.subTest(key=key, value=value):
+                    (self.home / "codex-worker.json").write_text(json.dumps({key: value}))
+                    with self.assertRaises(SystemExit) as raised:
+                        worker.accounts_config()
+                    self.assertIn(key, str(raised.exception))
+
+    def test_workspace_rules_are_localized_and_off_has_no_sandbox_flags_or_section(self):
+        for language, heading in (("en", "## Workspace sandbox"), ("ru", "## Песочница worktree")):
+            with self.subTest(language=language):
+                self.configure(language=language, sandbox="workspace")
+                self.start("sandbox-rules-" + language)
+                self.wait("sandbox-rules-" + language)
+                prompt = self.invocations()[-1]["prompt"]
+                self.assertIn(heading, prompt)
+                for text in ("git commit", "git push", "gh pr create", "commit_message", "worktree"):
+                    self.assertIn(text, prompt[prompt.index(heading):])
+                self.start("sandbox-off-" + language, "--sandbox", "off")
+                output = self.wait("sandbox-off-" + language)
+                self.assert_no_workspace_sandbox(self.invocations()[-1])
+                self.assertNotIn(heading, self.invocations()[-1]["prompt"])
+                self.assertNotIn("== sandbox:", output)
+                self.assertEqual(self.state("sandbox-off-" + language)["sandbox"], "off")
+        self.configure(language="en")
+        self.start("sandbox-default-off")
+        self.wait("sandbox-default-off")
+        self.assert_no_workspace_sandbox(self.invocations()[-1])
+        self.assertIn("sandbox off", self.cli("status", "sandbox-default-off"))
+
+    def test_workspace_rotation_and_review_fallback_keep_the_sandbox_and_scout_stays_read_only(self):
+        self.configure(language="en", sandbox="workspace", writable_dirs=[str(self.root / "cache")])
+        roots = [str(self.root / "cache")]
+        self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error"}])
+        self.account(self.other, "B", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("sandbox-rotation")
+        self.wait("sandbox-rotation")
+        self.assertEqual(self.state("sandbox-rotation")["account"], "second")
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertNotEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
+        fixture = json.loads((self.other / "fixture.json").read_text())
+        fixture["review_prompt_conflict"] = True
+        (self.other / "fixture.json").write_text(json.dumps(fixture))
+        self.cli("review", "sandbox-rotation")
+        self.wait("sandbox-rotation")
+        rejected, fallback = self.invocations()[-2:]
+        self.assertEqual(rejected["mode"], "review_prompt_conflict")
+        self.assertTrue(rejected["review"])
+        self.assertFalse(fallback["review"])
+        self.assertEqual(fallback["prompt"], rejected["prompt"])
+        for event in self.invocations():
+            self.assert_workspace_sandbox(event, roots)
+            self.assertIn("## Workspace sandbox", event["prompt"])
+        for event in (rejected, fallback):
+            self.assertNotIn("commit_message", event["prompt"])
+            self.assertNotIn("commit_message", event["output_schema"]["properties"])
+        self.cli("scout", "sandbox-scout", "Read the task's implementation")
+        self.wait("sandbox-scout")
+        scout = self.invocations()[-1]
+        self.assert_scout_read_only(scout)
+        self.assertFalse(any(value.startswith("sandbox_workspace_write.") for value in scout["argv"]))
+        self.assertNotIn("## Workspace sandbox", scout["prompt"])
+        self.assertIn("sandbox read-only", self.cli("status", "sandbox-scout"))
+
+    def test_workspace_supervisor_commits_pushes_without_hooks_and_creates_only_one_pr(self):
+        self.configure(language="en", sandbox="workspace")
+        hooks = self.root / "hooks"
+        hooks.mkdir()
+        markers = []
+        for name in ("pre-commit", "pre-push"):
+            marker = self.root / (name + ".ran")
+            markers.append(marker)
+            hook = hooks / name
+            hook.write_text("#!/bin/sh\n: > " + shlex.quote(str(marker)) + "\nexit 17\n")
+            hook.chmod(0o700)
+        self.git("config", "core.hooksPath", str(hooks))
+        message = 'Publish "workspace" changes\n\nKeep supervisor hooks disabled.\nRecord the worktree changes.'
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": "first sandbox change\n",
+                                                     "new.txt": "new file\n"},
+             "reply": self.work_result(commit_message=message)},
+            {"mode": "complete", "write_files": {"tracked.txt": "second sandbox change\n"},
+             "remove_files": ["new.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": self.work_result()}])
+        self.start("sandbox-publish")
+        output = self.wait("sandbox-publish")
+        state = self.state("sandbox-publish")
+        publish = state["publish"]
+        self.assertEqual(set(publish), {"at", "sha", "pushed", "pr", "error"})
+        self.assertGreater(publish["at"], 0)
+        self.assertEqual(publish["sha"], self.git("rev-parse", state["branch"]))
+        self.assertTrue(publish["pushed"])
+        self.assertEqual(publish["error"], "")
+        self.assertEqual(publish["pr"], "https://example.test/pull/1")
+        self.assertEqual(self.git("log", "-1", "--format=%B", state["branch"]), message)
+        self.assertEqual(self.git("--git-dir", str(self.root / "origin.git"), "rev-parse", state["branch"]),
+                         publish["sha"])
+        subject = message.splitlines()[0]
+        self.assertIn("== committed " + publish["sha"] + " " + json.dumps(subject) +
+                      "; pushed; PR " + publish["pr"], output)
+        creates = [event for event in self.gh_invocations() if event["argv"][:2] == ["pr", "create"]]
+        self.assertEqual(len(creates), 1)
+        args = creates[0]["argv"]
+        self.assertEqual(args[args.index("--base") + 1], "main")
+        self.assertEqual(args[args.index("--head") + 1], state["branch"])
+        self.assertEqual(args[args.index("--title") + 1], subject)
+        self.assertEqual(creates[0]["body"], message.partition("\n")[2].strip())
+        first_sha = publish["sha"]
+        self.cli("say", "sandbox-publish", "Make another change")
+        self.wait("sandbox-publish")
+        state = self.state("sandbox-publish")
+        self.assertNotEqual(state["publish"]["sha"], first_sha)
+        self.assertEqual(self.git("log", "-1", "--format=%s", state["branch"]), "sandbox-publish: turn 2")
+        self.assertEqual(self.git("--git-dir", str(self.root / "origin.git"), "rev-parse", state["branch"]),
+                         state["publish"]["sha"])
+        self.assertFalse((Path(state["worktree"]) / "new.txt").exists())
+        for marker in markers:
+            self.assertFalse(marker.exists(), "supervisor must disable " + marker.stem)
+        second_sha = state["publish"]["sha"]
+        self.cli("say", "sandbox-publish", "Confirm that no more changes are needed")
+        self.wait("sandbox-publish")
+        self.assertEqual(self.git("rev-parse", state["branch"]), second_sha)
+        self.assertFalse(self.state("sandbox-publish").get("publish"))
+        self.assertEqual(len([event for event in self.gh_invocations()
+                              if event["argv"][:2] == ["pr", "create"]]), 1)
+
+    def test_workspace_commits_completed_turns_with_any_typed_status(self):
+        self.configure(language="en", sandbox="workspace")
+        for status in ("done", "partial", "blocked", "needs_decision"):
+            with self.subTest(status=status):
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {"tracked.txt": status + "\n"},
+                    "reply": self.work_result(status, commit_message="Save " + status + " checkpoint")}])
+                slug = "sandbox-status-" + status.replace("_", "-")
+                self.start(slug)
+                self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "completed")
+                self.assertEqual(state["result"]["status"], status)
+                self.assertEqual(self.git("log", "-1", "--format=%s", state["branch"]),
+                                 "Save " + status + " checkpoint")
+                self.assertTrue(state["publish"]["pushed"])
+
+    def test_workspace_filter_guard_blocks_worker_clean_script_before_status_and_wait(self):
+        self.configure(language="en", sandbox="workspace")
+        # Commit the attributes while no driver is configured, then install a
+        # harmless initial clean command before the worker replaces its script.
+        self.commit_fixture({".gitattributes": "tracked.txt filter=project\n",
+                             "clean.sh": "#!/bin/sh\ncat\n"})
+        self.git("config", "filter.project.clean", "/bin/sh clean.sh")
+        initial = self.git("rev-parse", "HEAD")
+        marker = self.root / "outside-worktree.marker"
+        marker.write_text("untouched\n")
+        script = "#!/bin/sh\nprintf 'filter executed\\n' > " + shlex.quote(str(marker)) + "\ncat\n"
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "worker change\n", "clean.sh": script},
+            "reply": self.work_result(commit_message="Do not run a worker-written filter")}])
+        trace_path = self.record_git_calls()
+        self.start("sandbox-filter-guard")
+        output = self.wait("sandbox-filter-guard")
+        state = self.state("sandbox-filter-guard")
+        error = ("commit: filter driver project is configured; the supervisor does not run filters "
+                 "on worker-written files — commit this turn manually")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["publish"]["error"], error)
+        self.assertEqual(state["publish"]["sha"], "")
+        self.assertFalse(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["pr"], "")
+        self.assertIn("== publish error: " + error, output)
+        self.assertEqual(marker.read_text(), "untouched\n")
+        self.assertEqual(self.git("rev-parse", state["branch"]), initial)
+        self.assertEqual((Path(state["worktree"]) / "clean.sh").read_text(), script)
+        self.assertEqual((Path(state["worktree"]) / "tracked.txt").read_text(), "worker change\n")
+        events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+        worktree_events = [event for event in events if event["cwd"] == state["worktree"]]
+        self.assertTrue(worktree_events)
+        self.assertIn("config", worktree_events[0]["argv"])
+        self.assertTrue(any("--get-regexp" in event["argv"] for event in worktree_events))
+        self.assertFalse(any("status" in event["argv"] or "add" in event["argv"] or
+                             "commit" in event["argv"] for event in worktree_events), worktree_events)
+        self.assertFalse(self.gh_invocations())
+
+    def test_workspace_filter_guard_allows_git_lfs_command_prefixes_without_running_lfs(self):
+        self.configure(language="en", sandbox="workspace")
+        for index, command in enumerate(("git-lfs clean -- %f", "git lfs filter-process")):
+            with self.subTest(command=command):
+                # No attributes select this driver: real Git LFS is never run.
+                self.git("config", "filter.lfs.clean", command)
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {"tracked.txt": command + "\n"},
+                    "reply": self.work_result(commit_message="Allow an inactive Git LFS driver")}])
+                slug = "sandbox-lfs-filter-" + str(index)
+                self.start(slug)
+                self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "completed")
+                self.assertEqual(state["publish"]["error"], "")
+                self.assertTrue(state["publish"]["pushed"])
+                self.assertEqual(self.git("log", "-1", "--format=%s", state["branch"]),
+                                 "Allow an inactive Git LFS driver")
+
+    def test_workspace_filter_guard_reads_all_config_scopes_and_command_forms(self):
+        self.env.update(GIT_CONFIG_SYSTEM=str(self.root / "git-system.conf"),
+                        GIT_CONFIG_GLOBAL=str(self.root / "git-global.conf"))
+        worker = self.worker()
+        cases = (("clean", "/bin/sh clean.sh", "project.nested"),
+                 ("smudge", "/bin/sh\nclean.sh", "project.nested"),
+                 ("process", "git-lfs-custom process", "project.nested"),
+                 ("clean", "", "project.nested"),
+                 ("smudge", " git lfs smudge", "project.nested"),
+                 ("process", "git-lfs filter-process", None),
+                 ("clean", "git lfs clean -- %f", None),
+                 ("smudge", "git-lfs smudge\n--skip", None))
+        with mock.patch.dict(os.environ, self.env):
+            self.assertIsNone(worker.unsafe_filter_driver(self.repo))
+            for scope in ("--system", "--global", "--local"):
+                for operation, command, expected in cases:
+                    with self.subTest(scope=scope, operation=operation, command=command):
+                        key = "filter.project.nested." + operation
+                        self.git("config", scope, key, command)
+                        try:
+                            self.assertEqual(worker.unsafe_filter_driver(self.repo), expected)
+                        finally:
+                            self.git("config", scope, "--unset-all", key)
+
+    def test_workspace_supervisor_git_commands_disable_fsmonitor_and_hooks(self):
+        self.configure(language="en", sandbox="workspace")
+        trace_path = self.record_git_calls()
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "supervisor publication\n"},
+            "reply": self.work_result(commit_message="Keep supervisor Git commands isolated")}])
+        self.start("sandbox-git-safety")
+        self.wait("sandbox-git-safety")
+        self.cli("status", "sandbox-git-safety")
+        self.assertTrue(self.state("sandbox-git-safety")["publish"]["pushed"])
+        events = [json.loads(line) for line in trace_path.read_text().splitlines()]
+        self.assertTrue(events)
+        for event in events:
+            argv = event["argv"]
+            self.assertIn("core.hooksPath=/dev/null", argv, event)
+            self.assertIn("core.fsmonitor=false", argv, event)
+            for setting in ("core.hooksPath=/dev/null", "core.fsmonitor=false"):
+                self.assertEqual(argv[argv.index(setting) - 1], "-c", event)
+        for command in ("config", "status", "add", "commit", "push"):
+            self.assertTrue(any(command in event["argv"] for event in events), (command, events))
+
+    def test_workspace_stopped_and_failed_turns_leave_changes_uncommitted(self):
+        self.configure(language="en", sandbox="workspace")
+        initial = self.git("rev-parse", "HEAD")
+        for mode in ("failed", "hold"):
+            with self.subTest(mode=mode):
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": mode, "write_files": {"tracked.txt": mode + " changes\n"},
+                    "reply": self.work_result(commit_message="Do not commit interrupted work")}])
+                slug = "sandbox-" + mode
+                self.start(slug)
+                worktree = Path(self.state(slug)["worktree"])
+                self.until(lambda: (worktree / "tracked.txt").read_text() == mode + " changes\n")
+                if mode == "hold":
+                    self.cli("stop", slug, timeout=20)
+                self.cli("wait", slug, "--timeout", "10")
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "stopped" if mode == "hold" else "failed")
+                self.assertEqual(self.git("rev-parse", state["branch"]), initial)
+                self.assertFalse(state.get("publish"))
+                self.assertFalse(self.gh_invocations())
+
+    def test_workspace_check_uses_codex_sandbox_and_keeps_the_saved_command_and_log(self):
+        roots = [str(self.root / "cache")]
+        self.configure(language="en", sandbox="workspace", writable_dirs=roots)
+        command = "printf 'sandbox check marker\\n'; test -f tracked.txt"
+        self.start("sandbox-check", "--check", command)
+        output = self.wait("sandbox-check")
+        state = self.state("sandbox-check")
+        self.assertEqual(state["checks"][-1]["outcome"], "passed")
+        self.assertEqual(state["checks"][-1]["cmd"], command)
+        events = self.sandbox_invocations()
+        self.assertEqual(len(events), 1)
+        self.assert_workspace_sandbox(events[0], roots)
+        self.assertEqual(events[0]["argv"][-4:], ["--", "/bin/sh", "-c", command])
+        self.assertEqual(events[0]["cwd"], state["worktree"])
+        self.assertEqual(events[0]["home"], str(self.home))
+        self.assertIn("sandbox check marker", (self.home / "claude-tasks" / "sandbox-check" / "check.log").read_text())
+        self.assertIn("== check `" + command + "`: passed", output)
+
+    def test_workspace_check_timeout_and_stop_kill_the_sandbox_process_group(self):
+        self.configure(language="en", sandbox="workspace")
+        command = 'sleep 60 & child=$!; echo "$child" > check-child.pid; wait "$child"'
+        for outcome in ("timeout", "stopped"):
+            with self.subTest(outcome=outcome):
+                slug = "sandbox-check-" + outcome
+                self.start(slug, "--check", command, "--check-timeout", "0.5" if outcome == "timeout" else "60")
+                child = self.check_child(slug)
+                if outcome == "stopped":
+                    self.cli("stop", slug, timeout=20)
+                self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["checks"][-1]["outcome"], outcome)
+                if outcome == "timeout":
+                    self.assertGreaterEqual(state["checks"][-1]["seconds"], 0.5)
+                else:
+                    self.assertEqual(state["outcome"], "stopped")
+                self.assertFalse(state.get("check_pid"))
+                event = self.sandbox_invocations()[-1]
+                self.assert_workspace_sandbox(event)
+                self.assertEqual(event["pid"], event["pgid"])
+                self.until(lambda: not self.process_is_live(child))
+                self.until(lambda: not self.process_is_live(event["pid"]))
+
+    def test_workspace_push_failure_is_reported_without_failing_the_turn(self):
+        self.configure(language="en", sandbox="workspace")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "write_files": {"tracked.txt": "unpublished change\n"},
+             "reply": self.work_result(commit_message="Save work without an origin")}])
+        self.start("sandbox-no-origin")
+        self.wait("sandbox-no-origin")
+        self.assertFalse(self.state("sandbox-no-origin").get("publish"))
+        self.git("remote", "remove", "origin")
+        self.cli("say", "sandbox-no-origin", "Save another change")
+        output = self.wait("sandbox-no-origin")
+        state = self.state("sandbox-no-origin")
+        publish = state["publish"]
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(publish["sha"], self.git("rev-parse", state["branch"]))
+        self.assertFalse(publish["pushed"])
+        self.assertEqual(publish["pr"], "")
+        self.assertIn("origin", publish["error"])
+        self.assertIn("== publish error: " + publish["error"], output)
+        self.assertFalse(self.gh_invocations())
+
+    def test_workspace_pr_failure_is_reported_without_failing_the_turn(self):
+        self.configure(language="en", sandbox="workspace")
+        self.env["CODEX_FAKE_GH_CREATE_ERROR"] = "1"
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "published change without PR\n"},
+            "reply": self.work_result(commit_message="Publish before a PR service failure")}])
+        self.start("sandbox-pr-error")
+        output = self.wait("sandbox-pr-error")
+        state = self.state("sandbox-pr-error")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["pr"], "")
+        self.assertIn("fixture PR creation failed", state["publish"]["error"])
+        self.assertIn("== publish error: " + state["publish"]["error"], output)
+
+    def test_workspace_fix_round_commits_before_each_sandboxed_check(self):
+        self.configure(language="en", sandbox="workspace")
+        decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed the reported defect."}
+                     for finding in self.review_result()["findings"]]
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": "initial implementation\n"},
+             "reply": self.work_result(commit_message="Implement sandbox work")},
+            {"mode": "complete", "reply": self.review_result()},
+            {"mode": "complete", "write_files": {"tracked.txt": "corrected implementation\n"},
+             "reply": self.work_result(commit_message="Fix sandbox review findings", findings=decisions)},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        command = 'test -z "$(git status --porcelain)" && git log -1 --format=%s'
+        self.start("sandbox-fix", "--review", "--fix-rounds", "1", "--check", command)
+        self.wait("sandbox-fix")
+        state = self.state("sandbox-fix")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertEqual(state["rounds"][0]["check"]["outcome"], "passed")
+        self.assertEqual(self.git("log", "-2", "--format=%s", state["branch"]).splitlines(),
+                         ["Fix sandbox review findings", "Implement sandbox work"])
+        self.assertEqual(state["publish"]["sha"], self.git("rev-parse", state["branch"]))
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertEqual(len(self.sandbox_invocations()), 2)
+        for event in self.sandbox_invocations() + self.invocations():
+            self.assert_workspace_sandbox(event)
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False, True])
+        self.assertTrue(self.invocations()[2]["resume"])
+        self.assertEqual(len([event for event in self.gh_invocations()
+                              if event["argv"][:2] == ["pr", "create"]]), 1)
 
     def test_time_budget_kills_exec_group_wraps_same_thread_checks_and_skips_review(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
@@ -1288,6 +1818,8 @@ class RotationTests(unittest.TestCase):
         self.configure_notify()
         invalid_results = ["Legacy final message without JSON", '{"status": "done"',
                            self.work_result(status="finished"), self.work_result(extra="unexpected"),
+                           self.work_result(commit_message=None), self.work_result(commit_message=["subject"]),
+                           {key: value for key, value in self.work_result().items() if key != "commit_message"},
                            self.work_result(checks=[{"command": "check", "outcome": "passed"}]),
                            self.work_result(checks=[{"command": "check", "outcome": "passed",
                                                     "details": "1 passed", "extra": "unexpected"}]),
@@ -1650,7 +2182,8 @@ class RotationTests(unittest.TestCase):
         followup = "Read the missing-file handling too"
         self.cli("say", "scout-sleep", followup)
         paused = self.wait("scout-sleep")
-        self.assertEqual(self.state("scout-sleep")["outcome"], "sleeping")
+        self.assertTrue(any(entry.get("event") == "sleep"
+                            for entry in self.state("scout-sleep")["rotations"]))
         self.assert_scout_output(paused)
         self.assert_scout_output(self.wait("scout-sleep", timeout=10, through_sleep=True))
         invocation = self.invocations()[-1]
@@ -1916,6 +2449,9 @@ class RotationTests(unittest.TestCase):
         self.assertRegex(output, r"== check `test -f done\.txt`: passed \(exit 0, \d+(?:\.\d+)? s\)")
         self.assertTrue((self.home / "claude-tasks" / "check-passed" / "check.log").is_file())
         self.assertEqual(len(self.review_invocations()), 1)
+        self.assertEqual(self.sandbox_invocations(), [])
+        for event in self.invocations():
+            self.assert_no_workspace_sandbox(event)
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn(command, prompt)
         self.assertIn("passed", prompt.lower())
@@ -3427,10 +3963,15 @@ class RotationTests(unittest.TestCase):
         self.account(self.other, "B", self.reset, used=99)
         self.start("reset-resume")
         first = self.wait("reset-resume")
-        sleeping = self.assert_sleeping("reset-resume", first, reset)
-        self.assertEqual(len(self.invocations()), 1)
-        self.assertIn("sleeping until ", self.cli("status"))
-        self.assertEqual([entry["event"] for entry in sleeping["rotations"]], ["sleep"])
+        # A loaded CI worker can wake before wait or the assertions run.
+        # The recorded sleep proves the pause without requiring it to persist.
+        sleeps = [entry for entry in self.state("reset-resume")["rotations"]
+                  if entry.get("event") == "sleep"]
+        self.assertEqual(len(sleeps), 1)
+        self.assertAlmostEqual(sleeps[0]["until"], reset + 0.1, places=3)
+        self.assertEqual(sleeps[0]["account"], "main")
+        self.assertTrue(sleeps[0]["reason"])
+        self.assertIn("== sleeping until ", first)
 
         self.until(lambda: len(self.invocations()) == 2, timeout=10)
         second = self.wait("reset-resume")
