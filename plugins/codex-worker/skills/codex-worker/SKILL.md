@@ -75,11 +75,11 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M --review --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M --review [--review-angles LIST] --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; reads the existing directory (default `.`) with a read-only sandbox and creates no worktree or branch; `wait` prints its concise report |
 | Wait for the cycle | `wait <slug>` as a **background** Bash command: it re-invokes you when the full review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M` and optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` disables inherited base tests |
-| First review | `review <slug> [--effort E]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a `done` result and a passing check, or an unstructured result for compatibility |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M` and optionally `--review [--review-angles LIST] --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` disables inherited base tests |
+| First review | `review <slug> [--effort E] [--review-angles LIST]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a `done` result and a passing check, or an unstructured result for compatibility |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
 | Accounts | `accounts` — logins, plans, limits, reset times and credits |
@@ -142,10 +142,12 @@ group and requests a wrap-up in the same thread, in the configured language. Tim
 for working changes to be committed and pushed, a `partial` result, and remaining work; repeated
 failure asks for a `blocked` result with numbers and attempts. The wrap-up has a 10-minute cap and
 is stopped if it reaches that cap. Outcomes are `budget_exhausted` and `stuck`, alongside
-`completed`, `failed`, and `stopped`. `wait` prints the stop reason followed by the wrap-up result.
+`completed`, `failed`, `refused`, and `stopped`. `wait` prints the stop reason followed by the wrap-up result.
+When a turn fails with a model refusal for possible cybersecurity risk, its outcome is `refused`;
+the supervisor does not retry or rotate accounts. `wait` shows the first 200 characters of the refusal.
 
 Scouts can run alongside tasks and in parallel without `--parallel`, one question per scout. `say`
-continues the same read-only thread; `--check`, `--review`, `--fix-rounds`, and `review` are unavailable
+continues the same read-only thread; `--check`, `--review`, `--review-angles`, `--fix-rounds`, and `review` are unavailable
 for scouts.
 `clean` archives scout threads and removes only its task state and logs, preserving the inspected
 directory.
@@ -181,6 +183,26 @@ Use relative paths with `--base-check`: a command containing the task worktree's
 produces `== base tests: skipped (…)` and is not rerun.
 
 Use `start --max-minutes M --review --fix-rounds 2 --check "<command from Checks>"` by default.
+Keep one review for ordinary PRs. For large or risky PRs involving processes, concurrency, or security,
+add `--review-angles auto` on `start`, `say`, or `review`. With at least `review_angles_min_lines`
+changed lines across `base..HEAD` and uncommitted changes (default 400), `auto` selects
+`correctness,concurrency,tests`; otherwise it runs one ordinary review. For a specific risk, choose a
+comma-separated list from these presets:
+
+- `correctness`: behavior and the brief's "Done when" conditions;
+- `concurrency`: races, processes, signals, shared files and state, retries, and recovery;
+- `security`: secrets, shell and path injection, untrusted input, permissions, and sandbox boundaries;
+- `tests`: weakened or ineffective tests, uncovered brief conditions, and mocks replacing tested code.
+
+On `start` and `say`, `--review-angles` implies `--review`.
+
+Angles run sequentially in fresh threads with ordinary rotation and reset waiting. Each angle gets its
+own review record. The supervisor combines findings, merges duplicate locations and titles, and labels
+each finding with its angles. `wait` prints a runtime and outcome line per angle, then the combined
+review. A refused angle is marked `refused` without preventing the others from running; the verdict
+uses the other results. A review with only refusals stops automatic fixes with
+`auto_fix_stop: "review refused"`.
+
 `--fix-rounds N` on
 `start` or `say` accepts 0–5, defaults to 0, and requires `--review`. Each round sends the review's
 findings directly to the implementation thread, with the same account rotation and reset waiting as
@@ -192,6 +214,8 @@ another review in a fresh thread. That review receives rejected findings and the
 instruction to explain any disagreement before raising them again. From the second review onward,
 reviewers look for regressions introduced by fixes and unmet "Done when" conditions. New edge cases
 outside the brief are P3 only.
+After a review with angles, the next review runs only angles that found defects, plus `correctness`.
+An ordinary single review remains a single review in later rounds.
 
 The cycle stops on `clean`, only P3 findings (`auto_fix_stop: "only P3"`), the round limit, `partial`,
 `blocked`, `needs_decision`, `budget_exhausted`, `stuck`, or `stop`. Claude decides how to handle the
@@ -217,7 +241,7 @@ The user can configure task notifications with `notify` in `~/.codex/codex-worke
 an argv list receiving the event JSON as its final argument. `notify_events` optionally filters event
 types. Hooks run asynchronously and write output or launch errors to the task's `notify.log`; see the
 README for examples.
-`review_done` includes the review's `round`; `turn_finished` fires once at the end of the whole cycle
+`review_done` includes the review's `round` and `angles`; `turn_finished` fires once at the end of the whole cycle
 and includes `guarded_changed`, the number of changed guarded files, and the typed `outcome`, including
 `budget_exhausted` or `stuck`. Separate `budget_exhausted` and `stuck` events obey `notify_events` too.
 

@@ -260,8 +260,15 @@ def execute():
             emit({"type": "turn.failed", "error": error})
         return 1
 
+    def refusal():
+        emit({"type": "turn.failed", "error": {"message": run.get("error",
+             "This content was flagged for possible cybersecurity risk. Please try a different prompt.")}})
+        return 1
+
     if run["mode"] == "auth_error" and run.get("before_thread"):
         return auth_failure()
+    if run["mode"] == "refused" and run.get("before_thread"):
+        return refusal()
     if run.get("rollout_gate"):
         trace({"command": "rollout-waiting", "thread": thread})
         while not Path(run["rollout_gate"]).exists() and not stopped[0]:
@@ -300,6 +307,10 @@ def execute():
     if run.get("commit_files"):
         subprocess.run(["git", "add", "--"] + run["commit_files"], check=True)
         subprocess.run(["git", "commit", "-qm", "Apply fake worker changes"], check=True)
+    for name, contents in run.get("post_commit_write_files", {}).items():
+        Path(name).write_text(contents)
+    if run["mode"] == "refused":
+        return refusal()
     if run["mode"] in ("limit", "usage_error"):
         time.sleep(run.get("limit_after", 0.15))
         value = fixture()
@@ -2110,6 +2121,8 @@ class RotationTests(unittest.TestCase):
                      ("say", "scout-no-writes", "Review it", "--review"),
                      ("say", "scout-no-writes", "Disable fixes", "--fix-rounds", "0"),
                      ("say", "scout-no-writes", "Fix review", "--review", "--fix-rounds", "1"),
+                     ("say", "scout-no-writes", "Review angles", "--review-angles", "auto"),
+                     ("review", "scout-no-writes", "--review-angles", "correctness,concurrency"),
                      ("review", "scout-no-writes")):
             with self.subTest(args=args):
                 result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
@@ -3313,6 +3326,362 @@ class RotationTests(unittest.TestCase):
             'with title "codex-worker"'])
         self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
+
+    def test_review_angles_use_fresh_focused_threads_and_merge_duplicate_findings(self):
+        self.configure(language="en")
+        self.configure_notify()
+        correctness = self.review_result()
+        concurrency = self.review_result()
+        concurrency["findings"][0]["title"] = correctness["findings"][0]["title"].upper()
+        concurrency["findings"][1].update(
+            id="F9", severity="P2", file="src/worker.py", line=28,
+            title="Concurrent recovery overwrites live state")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": correctness},
+            {"mode": "complete", "reply": concurrency}])
+
+        self.start("angles-merge", "--review-angles", "correctness,concurrency")
+        output = self.wait("angles-merge")
+        executions = self.invocations()
+        self.assertEqual([entry["review"] for entry in executions], [False, True, True])
+        self.assertEqual(len({entry["thread"] for entry in executions}), 3)
+        self.assertTrue(all(not entry["resume"] for entry in executions))
+        self.assertEqual(len({entry["ppid"] for entry in executions}), 1)
+        self.assertLess(executions[1]["monotonic"], executions[2]["monotonic"])
+        self.assertIn("Focus on behavior and acceptance criteria", executions[1]["prompt"])
+        self.assertIn("Focus on races, processes, signals", executions[2]["prompt"])
+        self.assertNotIn("Focus on races, processes, signals", executions[1]["prompt"])
+        for entry in executions[1:]:
+            self.assertIn("acceptance criteria", entry["prompt"])
+            self.assert_output_schema(entry, "angles-merge", review=True)
+        state = self.state("angles-merge")
+        self.assertEqual([entry["angle"] for entry in state["reviews"]],
+                         ["correctness", "concurrency"])
+        result = state["review_result"]
+        self.assertEqual(result["verdict"], "defects")
+        self.assertEqual([entry["angle"] for entry in result["angles"]],
+                         ["correctness", "concurrency"])
+        self.assertEqual([finding["id"] for finding in result["findings"]], ["F1", "F2", "F3"])
+        self.assertEqual([finding["angle"] for finding in result["findings"]],
+                         ["correctness,concurrency", "correctness", "concurrency"])
+        self.assertEqual(result["findings"][0]["title"], correctness["findings"][0]["title"])
+        for angle in ("correctness", "concurrency"):
+            self.assertRegex(output, r"== review angle " + angle + r" by main \(\d+(?:\.\d+)? min\): 2 defects")
+        self.assertIn("[correctness,concurrency]", output)
+        self.assertIn("[concurrency]", output)
+        self.assertEqual(output.count(correctness["findings"][0]["detail"]), 1)
+        event = self.notification("angles-merge", "review_done")
+        self.assertEqual(event["angles"], ["correctness", "concurrency"])
+        self.assertEqual((event["verdict"], event["findings"]), ("defects", 3))
+
+    def test_review_angles_auto_counts_committed_and_dirty_lines_at_default_and_configured_threshold(self):
+        cases = (("below", 399, None, 1), ("threshold", 400, None, 3),
+                 ("configured", 14, 14, 3))
+        for label, lines, threshold, expected_count in cases:
+            with self.subTest(label=label):
+                settings = {} if threshold is None else {"review_angles_min_lines": threshold}
+                self.configure(language="en", **settings)
+                (self.home / "exec-count").unlink(missing_ok=True)
+                committed = min(200, lines // 2)
+                contents = "".join("line %s\n" % index for index in range(lines))
+                initial = "".join("line %s\n" % index for index in range(committed))
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "write_files": {"size.txt": initial},
+                     "commit_files": ["size.txt"], "post_commit_write_files": {"size.txt": contents},
+                     "reply": self.work_result()},
+                    {"mode": "complete", "reply": self.review_result(False)}])
+                count = len(self.review_invocations())
+                slug = "angles-auto-" + label
+                self.start(slug, "--review-angles", "auto")
+                output = self.wait(slug)
+                reviews = self.review_invocations()[count:]
+                self.assertEqual(len(reviews), expected_count)
+                state = self.state(slug)
+                if expected_count == 3:
+                    self.assertEqual([entry["angle"] for entry in state["reviews"]],
+                                     ["correctness", "concurrency", "tests"])
+                    self.assertIn("Focus on ineffective or weakened tests", reviews[2]["prompt"])
+                else:
+                    self.assertIn("== review by main (", output)
+                    self.assertNotIn("== review angle", output)
+
+    def test_review_angles_fix_round_keeps_only_finding_angles_and_correctness(self):
+        self.configure(language="en")
+        defect = self.review_result()
+        defect["findings"] = defect["findings"][:1]
+        fixed = self.work_result(findings=[
+            {"id": "F1", "decision": "fixed", "note": "Serialize state recovery."}])
+        clean = self.review_result(False)
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": clean},
+            {"mode": "complete", "reply": defect},
+            {"mode": "complete", "reply": clean},
+            {"mode": "complete", "reply": fixed},
+            {"mode": "complete", "reply": clean},
+            {"mode": "complete", "reply": clean}])
+
+        self.start("angles-fix", "--review-angles", "correctness,concurrency,tests", "--fix-rounds", "1")
+        self.wait("angles-fix")
+        state = self.state("angles-fix")
+        self.assertEqual([entry["angle"] for entry in state["reviews"]],
+                         ["correctness", "concurrency", "tests", "correctness", "concurrency"])
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual(len(state["rounds"]), 1)
+        previous = state["rounds"][0]["review"]
+        self.assertEqual(previous["findings"][0]["angle"], "concurrency")
+        self.assertEqual(state["review_result"]["verdict"], "clean")
+        executions = self.invocations()
+        self.assertEqual(len(executions), 7)
+        self.assertTrue(executions[4]["resume"])
+        self.assertEqual(executions[4]["thread"], executions[0]["thread"])
+        self.assertIn("F1", executions[4]["prompt"])
+        self.assertIn(defect["findings"][0]["title"], executions[4]["prompt"])
+        self.assertEqual(len({entry["thread"] for entry in self.review_invocations()}), 5)
+
+    def test_review_angles_single_and_auto_small_stay_single_after_a_fix_round(self):
+        for selection in ("concurrency", "auto"):
+            with self.subTest(selection=selection):
+                self.configure(language="en")
+                (self.home / "exec-count").unlink(missing_ok=True)
+                defect = self.review_result()
+                defect["findings"] = defect["findings"][:1]
+                fixed = self.work_result(findings=[
+                    {"id": "F1", "decision": "fixed", "note": "Fix the reported behavior."}])
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "reply": self.work_result()},
+                    {"mode": "complete", "reply": defect},
+                    {"mode": "complete", "reply": fixed},
+                    {"mode": "complete", "reply": self.review_result(False)}])
+                count = len(self.invocations())
+                slug = "angles-single-fix-" + selection
+                self.start(slug, "--review-angles", selection, "--fix-rounds", "1")
+                self.wait(slug)
+                executions = self.invocations()[count:]
+                self.assertEqual([entry["review"] for entry in executions], [False, True, False, True])
+                self.assertTrue(executions[2]["resume"])
+                self.assertEqual(executions[2]["thread"], executions[0]["thread"])
+                state = self.state(slug)
+                self.assertEqual(len(state["reviews"]), 2)
+                self.assertEqual(state["auto_fix_stop"], "clean")
+                self.assertEqual(len(state["rounds"]), 1)
+
+    def test_review_angles_auto_counts_untracked_text_without_adding_it_to_git(self):
+        self.configure(language="en", review_angles_min_lines=10)
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"new.txt": "new line\n" * 10},
+             "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("angles-untracked", "--review-angles", "auto")
+        self.wait("angles-untracked")
+        state = self.state("angles-untracked")
+        self.assertEqual([entry["angle"] for entry in state["reviews"]],
+                         ["correctness", "concurrency", "tests"])
+        worktree = Path(state["worktree"])
+        self.assertEqual((worktree / "new.txt").read_text(), "new line\n" * 10)
+        tracked = subprocess.run(["git", "ls-files", "--", "new.txt"], cwd=worktree,
+                                 env=self.env, text=True, capture_output=True, check=True)
+        self.assertEqual(tracked.stdout, "")
+
+    def test_review_angles_minimum_lines_rejects_nonpositive_and_noninteger_settings(self):
+        for threshold in (0, -1, True, "14"):
+            with self.subTest(threshold=threshold):
+                self.configure(review_angles_min_lines=threshold)
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "angles-invalid-threshold",
+                                         "--brief", str(self.brief), "--repo", str(self.repo),
+                                         "--review-angles", "auto"],
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("review_angles_min_lines", result.stdout + result.stderr)
+                self.assertEqual(self.invocations(), [])
+                self.assertFalse((self.home / "claude-tasks" / "angles-invalid-threshold").exists())
+
+    def test_review_angles_size_count_disables_git_drivers_and_skips_binary_files_and_symlinks(self):
+        self.commit_fixture({".gitattributes": "tracked.txt filter=tripwire.worker diff=tripwire\n"})
+        marker = self.root / "git-driver-ran"
+        driver = self.root / "git-driver.py"
+        driver.write_text("from pathlib import Path\n"
+                          "Path(" + repr(str(marker)) + ").write_text('driver ran')\n"
+                          "raise SystemExit(1)\n")
+        command = shlex.join([PYTHON, str(driver)])
+        for key in ("filter.tripwire.worker.clean", "filter.tripwire.worker.process",
+                    "diff.tripwire.textconv", "diff.external"):
+            self.git("config", key, command)
+        self.git("config", "filter.tripwire.worker.required", "true")
+        (self.repo / "tracked.txt").write_text("changed\nmore\n")
+        worker = self.worker()
+        state = {"review_angles": "auto", "base": "origin/main", "worktree": str(self.repo)}
+        config = {"review_angles_min_lines": 3}
+        expected = ["correctness", "concurrency", "tests"]
+        self.assertEqual(worker.selected_review_angles(state, config), expected)
+        self.assertFalse(marker.exists(), "counting a diff must not execute repository Git drivers")
+        (self.repo / "tracked.txt").write_text("initial\n")
+        (self.repo / "binary.bin").write_bytes(b"\0" + b"binary line\n" * 20)
+        outside = self.root / "outside.txt"
+        outside.write_text("outside line\n" * 20)
+        (self.repo / "outside-link.txt").symlink_to(outside)
+        self.assertEqual(worker.selected_review_angles(state, config), [])
+        (self.repo / "new.txt").write_text("one\ntwo\nthree")
+        self.assertEqual(worker.selected_review_angles(state, config), expected)
+        self.assertFalse(marker.exists())
+
+    def test_say_and_standalone_review_accept_explicit_angles_and_keep_working_thread(self):
+        self.configure(language="en")
+        clean = self.review_result(False)
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": clean},
+            {"mode": "complete", "reply": clean},
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": clean}])
+        self.start("angles-followup")
+        self.wait("angles-followup")
+        working = self.state("angles-followup")["thread"]
+        self.cli("review", "angles-followup", "--review-angles", "security,tests")
+        self.wait("angles-followup")
+        self.assertIn("Focus on secrets, shell and path injection", self.review_invocations()[0]["prompt"])
+        self.assertIn("Focus on ineffective or weakened tests", self.review_invocations()[1]["prompt"])
+        self.cli("say", "angles-followup", "Check the followup", "--review-angles", "correctness")
+        self.wait("angles-followup")
+        executions = self.invocations()
+        self.assertEqual([entry["review"] for entry in executions], [False, True, True, False, True])
+        self.assertTrue(executions[3]["resume"])
+        self.assertEqual(executions[3]["thread"], working)
+        state = self.state("angles-followup")
+        self.assertEqual(state["thread"], working)
+        self.assertEqual([entry["angle"] for entry in state["reviews"]], ["security", "tests", "correctness"])
+        self.assertEqual(len({entry["thread"] for entry in self.review_invocations()}), 3)
+
+    def test_review_angles_unknown_and_scout_options_fail_without_a_turn(self):
+        self.configure()
+        self.start("angles-validation")
+        self.wait("angles-validation")
+        count = len(self.invocations())
+        state = self.state("angles-validation")
+        commands = (("start", "angles-invalid", "--brief", str(self.brief), "--repo", str(self.repo)),
+                    ("say", "angles-validation", "Review this"),
+                    ("review", "angles-validation"))
+        for command in commands:
+            with self.subTest(command=command[0]):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(command) +
+                                        ["--review-angles", "correctness,unknown-angle"],
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("unknown-angle", result.stdout + result.stderr)
+                self.assertEqual(len(self.invocations()), count)
+                self.assertEqual(self.state("angles-validation"), state)
+                self.assertFalse((self.home / "claude-tasks" / "angles-invalid").exists())
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "scout", "angles-scout-invalid",
+                                 "Find the parser", "--repo", str(self.repo), "--review-angles", "auto"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("review-angles", result.stdout + result.stderr)
+        self.assertEqual(len(self.invocations()), count)
+        self.assertFalse((self.home / "claude-tasks" / "angles-scout-invalid").exists())
+
+    def test_review_angles_second_angle_quota_rotates_and_preserves_the_full_summary(self):
+        self.configure(language="en")
+        correctness = self.review_result()
+        correctness["findings"] = correctness["findings"][:1]
+        concurrency = self.review_result()
+        concurrency["findings"] = concurrency["findings"][1:]
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": correctness},
+            {"mode": "usage_error"}])
+        self.account(self.other, "B", self.reset + 3600, runs=[
+            {"mode": "complete", "reply": concurrency}])
+
+        self.start("angles-rotate")
+        self.wait("angles-rotate")
+        working = self.state("angles-rotate")["thread"]
+        self.cli("review", "angles-rotate", "--review-angles", "correctness,concurrency")
+        output = self.wait("angles-rotate")
+        reviews = self.review_invocations()
+        self.assertEqual([entry["home"] for entry in reviews],
+                         [str(self.home), str(self.home), str(self.other)])
+        self.assertEqual(reviews[1]["prompt"], reviews[2]["prompt"])
+        self.assertEqual(len({entry["thread"] for entry in reviews}), 3)
+        self.assertTrue(all(not entry["resume"] for entry in reviews))
+        state = self.state("angles-rotate")
+        self.assertEqual(state["thread"], working)
+        self.assertEqual([entry["angle"] for entry in state["reviews"]],
+                         ["correctness", "concurrency", "concurrency"])
+        self.assertEqual([entry["account"] for entry in state["reviews"]], ["main", "main", "second"])
+        result = state["review_result"]
+        self.assertEqual(result["verdict"], "defects")
+        self.assertEqual([entry["id"] for entry in result["findings"]], ["F1", "F2"])
+        self.assertEqual([entry["angle"] for entry in result["findings"]], ["correctness", "concurrency"])
+        self.assertEqual([entry["outcome"] for entry in result["angles"]], ["completed", "completed"])
+        self.assertIn("== review angle concurrency by second (", output)
+        self.assertIn(correctness["findings"][0]["title"], output)
+        self.assertIn(concurrency["findings"][0]["title"], output)
+
+    def test_model_cybersecurity_refusal_before_or_after_thread_does_not_rotate(self):
+        self.configure()
+        message = "This content was flagged for possible cybersecurity risk. " + "x" * 210 + "omitted suffix"
+        for before_thread in (False, True):
+            with self.subTest(before_thread=before_thread):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "refused", "before_thread": before_thread, "error": message}])
+                count = len(self.invocations())
+                slug = "refused-" + ("before" if before_thread else "after")
+                self.start(slug, "--review")
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "refused")
+                self.assertEqual(len(self.invocations()) - count, 1)
+                self.assertFalse(state.get("rotations"))
+                self.assertFalse(state.get("reviews"))
+                self.assertIn("== refused by the model: " + message[:200], output)
+                self.assertNotIn("omitted suffix", output)
+
+    def test_review_angles_refusal_keeps_other_angles_and_marks_the_summary(self):
+        self.configure(language="en")
+        message = "This content was flagged for possible cybersecurity risk. Try a different prompt."
+        defects = self.review_result()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "refused", "error": message},
+            {"mode": "complete", "reply": defects},
+            {"mode": "complete", "reply": self.review_result(False)}])
+
+        self.start("angles-refused", "--review-angles", "security,concurrency,tests")
+        output = self.wait("angles-refused")
+        state = self.state("angles-refused")
+        self.assertEqual(len(self.invocations()), 4)
+        self.assertFalse(state.get("rotations"))
+        self.assertEqual([entry["angle"] for entry in state["reviews"]], ["security", "concurrency", "tests"])
+        self.assertEqual(state["reviews"][0]["outcome"], "refused")
+        result = state["review_result"]
+        self.assertEqual(result["verdict"], "defects")
+        self.assertEqual([entry["outcome"] for entry in result["angles"]],
+                         ["refused", "completed", "completed"])
+        self.assertEqual(result["angles"][0]["refusal"], message)
+        self.assertEqual([entry["angle"] for entry in result["findings"]], ["concurrency", "concurrency"])
+        self.assertIn("== refused by the model: " + message, output)
+        self.assertIn("== review angle concurrency by main (", output)
+        self.assertIn("== review angle tests by main (", output)
+
+    def test_review_angles_all_refused_stop_fix_rounds_without_a_correction(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "refused"},
+            {"mode": "refused"}])
+
+        self.start("angles-all-refused", "--review-angles", "correctness,security", "--fix-rounds", "1")
+        output = self.wait("angles-all-refused")
+        state = self.state("angles-all-refused")
+        self.assertEqual(state["auto_fix_stop"], "review refused")
+        self.assertEqual(len(self.invocations()), 3)
+        self.assertFalse(state.get("rounds"))
+        self.assertFalse(state.get("rotations"))
+        self.assertEqual([entry["outcome"] for entry in state["review_result"]["angles"]],
+                         ["refused", "refused"])
+        self.assertIn("review refused", output)
 
     def test_review_selects_available_account_and_preserves_working_thread(self):
         self.configure()
