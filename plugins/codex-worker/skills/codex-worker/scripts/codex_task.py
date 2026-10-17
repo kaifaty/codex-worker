@@ -163,9 +163,10 @@ def notify(st, cfg, event, message, **fields):
     else:
         args = list(setting) + [json.dumps(payload, ensure_ascii=False)]
     try:
+        # The child keeps this descriptor even if clean unlinks the task directory.
         with (TASKS / st["slug"] / "notify.log").open("ab", buffering=0) as log:
             try:
-                proc = subprocess.Popen(args, cwd=st["worktree"], stdin=subprocess.DEVNULL,
+                proc = subprocess.Popen(args, cwd="/", stdin=subprocess.DEVNULL,
                                         stdout=log, stderr=log, start_new_session=True)
             except (OSError, ValueError) as exc:
                 log.write(f"{event}: notification launch failed: {exc}\n".encode("utf-8", errors="replace"))
@@ -1341,18 +1342,23 @@ def cmd__run(a):
         if stopped():
             st["outcome"] = "stopped"
         st.pop("sleeping", None)
-        st.update(pid=None, turn_finished=time.time())
+        st["turn_finished"] = time.time()
         st.pop("pending", None)
-        save(st)
         if cfg is not None:
+            account = st["account"]
             if st.get("kind") == "review":
-                notify(st, cfg, "review_done", f"review {st['outcome']} on {st.get('review_account', st['account'])}",
-                       outcome=st["outcome"], account=st.get("review_account", st["account"]))
-            message = f"turn {st['outcome']} on {st['account']}"
+                reviews = st.get("reviews", [])[st.get("review_start", 0):]
+                account = st.get("review_account") or (reviews[-1]["account"] if reviews else account)
+                notify(st, cfg, "review_done", f"review {st['outcome']} on {account}",
+                       outcome=st["outcome"], account=account)
+            message = f"turn {st['outcome']} on {account}"
             if check is not None:
                 message += ", check " + check["outcome"]
-            notify(st, cfg, "turn_finished", message, outcome=st["outcome"])
+            notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account)
         reap_notifications()
+        # Publishing idle permits clean to remove both the task and its worktree.
+        st["pid"] = None
+        save(st)
 
 
 def cmd_start(a):
