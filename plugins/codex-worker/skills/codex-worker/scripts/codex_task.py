@@ -839,11 +839,13 @@ def scout_prompt(question, cfg=None):
 
 
 def check_paths(st):
-    """Remember existing relative paths from top-level check command tokens."""
+    """Read saved and existing relative paths from top-level check tokens."""
     paths = set(st.get("check_paths", []))
     root = Path(st["worktree"])
     try:
-        tokens = shlex.split(st.get("check") or "", posix=True)
+        lexer = shlex.shlex(st.get("check") or "", posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        tokens = list(lexer)
     except ValueError:
         tokens = []
     candidates = []
@@ -868,8 +870,7 @@ def check_paths(st):
             continue
         if exists:
             paths.add(relative)
-    st["check_paths"] = sorted(paths)
-    return st["check_paths"]
+    return sorted(paths)
 
 
 def guarded_path(path, st, paths):
@@ -1649,11 +1650,9 @@ def execute_check(st, stopped, cwd, filename):
 
 
 def run_check(st, stopped):
-    check_paths(st)
     result = execute_check(st, stopped, st["worktree"], "check.log")
     if result is None:
         return None
-    check_paths(st)
     st.setdefault("checks", []).append(result)
     save(st)
     return result
@@ -1762,7 +1761,9 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         st.pop("review_skipped", None)
         prompt = followup_prompt(st, message, cfg, source="review")
         save(st)
+        work_paths = check_paths(st)
         run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
+        st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
         result = st.get("result")
         entry["decisions"] = result["findings"] if result is not None else []
         save(st)
@@ -1811,8 +1812,12 @@ def cmd__run(a):
         if st.get("kind") == "review":
             review_turn(st, cfg, pending["prompt"], effort, stopped, stopped_flag.wait, new_turn=True)
         else:
+            work_paths = check_paths(st) if st.get("kind") != "scout" else None
             run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
                      stopped, stopped_flag.wait)
+            if work_paths is not None:
+                st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+                save(st)
         work_result = st.get("result") if st.get("kind") not in ("review", "scout") else None
         if (work_result is not None and work_result["status"] != "done"
                 and pending.get("review_after") and st.get("outcome") == "completed"):
@@ -1895,7 +1900,6 @@ def cmd_start(a):
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
           "created": time.time(), "turns": 0}
-    check_paths(st)
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
@@ -1960,8 +1964,6 @@ def cmd_say(a):
         st["check_paths"] = []
     elif a.check is not None:
         st["check"] = a.check
-    if st.get("check"):
-        check_paths(st)
     if a.no_base_check:
         st["base_check"] = False
     if a.check_timeout is not None:
@@ -2038,11 +2040,7 @@ def cmd_wait(a):
         else:
             raw = last.read_text().strip() if last.exists() else last_message(st) or "(no final message)"
             print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
-    previous_paths = set(st.get("check_paths", []))
-    changes = guarded_changes(st)
-    if not alive(st.get("pid")) and set(st.get("check_paths", [])) - previous_paths:
-        save(st)
-    for line in guarded_lines(changes):
+    for line in guarded_lines(guarded_changes(st)):
         print(line)
     for number, entry in enumerate(st.get("rounds", []), 1):
         findings = (entry.get("review") or {}).get("findings", [])

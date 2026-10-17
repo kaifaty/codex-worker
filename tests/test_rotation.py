@@ -1565,20 +1565,101 @@ class RotationTests(unittest.TestCase):
             with self.subTest(command=command):
                 state = {"worktree": str(self.repo), "check": command}
                 self.assertEqual(worker.check_paths(state), [])
+                self.assertNotIn("check_paths", state)
 
-    def test_check_paths_save_union_and_remember_deleted_files(self):
+    def test_check_paths_separate_shell_punctuation_from_paths(self):
+        self.commit_fixture({"scripts/verify.sh": "exit 0\n"})
+        worker = self.worker()
+        for command in ("sh scripts/verify.sh;", "sh scripts/verify.sh&&true",
+                        "sh scripts/verify.sh|cat", "cat>scripts/verify.sh"):
+            with self.subTest(command=command):
+                state = {"worktree": str(self.repo), "check": command}
+                self.assertEqual(worker.check_paths(state), ["scripts/verify.sh"])
+                self.assertNotIn("check_paths", state)
+
+    def test_check_paths_return_union_without_mutating_state(self):
         self.commit_fixture({"scripts/first.sh": "exit 0\n", "scripts/second.sh": "exit 0\n"})
         worker = self.worker()
         state = {"worktree": str(self.repo), "check": "sh scripts/first.sh"}
         self.assertEqual(worker.check_paths(state), ["scripts/first.sh"])
-        self.assertEqual(state["check_paths"], ["scripts/first.sh"])
+        self.assertNotIn("check_paths", state)
+        state["check_paths"] = ["scripts/first.sh"]
         state["check"] = "sh scripts/second.sh"
+        snapshot = json.loads(json.dumps(state))
         self.assertEqual(worker.check_paths(state), ["scripts/first.sh", "scripts/second.sh"])
+        self.assertEqual(state, snapshot)
         (self.repo / "scripts/first.sh").unlink()
         (self.repo / "scripts/second.sh").unlink()
         state["check"] = "sh 'unterminated"
-        self.assertEqual(worker.check_paths(state), ["scripts/first.sh", "scripts/second.sh"])
-        self.assertEqual(state["check_paths"], ["scripts/first.sh", "scripts/second.sh"])
+        snapshot = json.loads(json.dumps(state))
+        self.assertEqual(worker.check_paths(state), ["scripts/first.sh"])
+        self.assertEqual(state, snapshot)
+
+    def test_guarded_changes_review_prompt_and_status_do_not_write_state(self):
+        self.commit_fixture({"scripts/verify.sh": "exit 0\n"})
+        (self.repo / "scripts/verify.sh").write_text("exit 1\n")
+        worker = self.worker()
+        state = {"slug": "guarded-read-only", "worktree": str(self.repo),
+                 "branch": "test-branch", "base": self.git("rev-parse", "HEAD"),
+                 "account": "main", "turns": 1, "pid": None,
+                 "check": "sh scripts/verify.sh", "check_paths": []}
+        snapshot = json.loads(json.dumps(state))
+        with mock.patch.object(worker, "save") as save:
+            self.assertEqual([change["path"] for change in worker.guarded_changes(state)],
+                             ["scripts/verify.sh"])
+            self.assertIn("scripts/verify.sh", worker.review_prompt(state, {"language": "en"}))
+            with mock.patch.object(worker, "load", return_value=state), \
+                    mock.patch.object(worker, "sh", return_value=""), \
+                    mock.patch.object(worker, "last_message", return_value=""), \
+                    mock.patch("builtins.print"):
+                worker.cmd_status(SimpleNamespace(slug=state["slug"]))
+        save.assert_not_called()
+        self.assertEqual(state, snapshot)
+
+    def test_wait_does_not_overwrite_a_concurrent_say_when_discovering_check_paths(self):
+        worker = self.worker()
+        slug = "guarded-wait-say-race"
+        (worker.TASKS / slug).mkdir(parents=True)
+        state = {"slug": slug, "worktree": str(self.repo), "branch": "test-branch",
+                 "base": self.git("rev-parse", "HEAD"), "account": "main", "thread": "existing-thread",
+                 "rotations": [], "turns": 1, "pid": None, "outcome": "completed",
+                 "check": "sh scripts/verify.sh", "check_paths": []}
+        worker.save(state)
+        script = self.repo / "scripts/verify.sh"
+        script.parent.mkdir()
+        script.write_text("exit 0\n")
+        new_pid = 2 ** 31 - 1
+        original_popen = worker.subprocess.Popen
+        original_guarded_changes = worker.guarded_changes
+        launches = []
+
+        def popen(command, *args, **kwargs):
+            if len(command) > 3 and command[3] == "_run":
+                launches.append(command)
+                return SimpleNamespace(pid=new_pid)
+            return original_popen(command, *args, **kwargs)
+
+        def describe_old_state(old_state):
+            worker.cmd_say(SimpleNamespace(
+                slug=slug, file=None, message="Continue working", effort=None, no_check=False,
+                check=None, check_timeout=None, review=False, fix_rounds=None, no_base_check=False))
+            return original_guarded_changes(old_state)
+
+        with mock.patch.object(worker, "accounts_config", return_value={"language": "en"}), \
+                mock.patch.object(worker, "alive", side_effect=lambda pid: pid == new_pid), \
+                mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(worker, "guarded_changes", side_effect=describe_old_state), \
+                mock.patch.object(worker, "save", wraps=worker.save) as save, \
+                mock.patch("builtins.print") as printer:
+            worker.cmd_wait(SimpleNamespace(slug=slug, timeout=0, through_sleep=False))
+        self.assertEqual(len(launches), 1)
+        save.assert_called_once()
+        current = worker.load(slug)
+        self.assertEqual((current["turns"], current["pid"], current["outcome"]),
+                         (2, new_pid, "running"))
+        self.assertEqual(current["check_paths"], [], "only the supervisor may save newly found paths")
+        output = "\n".join(str(call.args[0]) for call in printer.call_args_list)
+        self.assertIn("== guarded files changed: scripts/verify.sh (+1 −0)", output)
 
     def test_check_assignment_script_is_guarded_restored_and_reviewed(self):
         self.configure(language="en")
@@ -1792,7 +1873,13 @@ class RotationTests(unittest.TestCase):
             {"mode": "complete", "remove_files": ["scripts/verify.sh"]},
             {"mode": "complete", "reply": self.review_result(False)}])
         slug = "guarded-later-deleted-check"
-        self.start(slug, "--check", "test ! -e scripts/verify.sh || sh scripts/verify.sh")
+        state_path = self.home / "claude-tasks" / slug / "state.json"
+        saved_path_check = ("import json; from pathlib import Path; "
+                            "assert json.loads(Path(%r).read_text())['check_paths'] == ['scripts/verify.sh']"
+                            % str(state_path))
+        command = (PYTHON + " -I -c " + shlex.quote(saved_path_check) +
+                   " && { test ! -e scripts/verify.sh || sh scripts/verify.sh; }")
+        self.start(slug, "--check", command)
         self.wait(slug)
         self.assertEqual(self.state(slug)["check_paths"], ["scripts/verify.sh"])
         self.notification(slug, "turn_finished")
