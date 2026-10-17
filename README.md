@@ -4,7 +4,8 @@ Let Claude plan and review while Codex implements in its own git worktree. This 
 moves substantial coding work to your ChatGPT subscription, saving Claude subscription usage for the
 parts where you want Claude's judgment.
 
-Claude writes a bounded brief, starts Codex, and waits in the background. Codex commits and opens a PR.
+Claude writes a bounded brief, starts Codex, and waits in the background. Codex commits and opens a PR,
+or the supervisor publishes its changes when the optional workspace sandbox is enabled.
 Optional Codex reviews run in fresh threads, and the supervisor can send findings back for bounded
 fix rounds. Claude checks the final diff and review and handles merging. Optional account monitoring
 can pause a task until a usage window resets.
@@ -127,7 +128,7 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
 | `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M`, add `--review --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
@@ -170,6 +171,8 @@ then the wrap-up. The saved check runs; automatic review and fix rounds do not.
 Pass the brief's Checks command as `start --check "CMD"`. The supervisor runs `/bin/sh -c CMD` in the
 task worktree after every completed implementation turn, including follow-ups. `say --check "CMD"`
 replaces the saved command; `say --no-check` removes it. `--check-timeout SEC` defaults to 1800 seconds.
+In workspace sandbox mode, checks run through `codex sandbox` with the same write permissions as the
+worker and reviews.
 Failed, manually stopped, and paused turns do not run checks. Turns ending with `budget_exhausted`
 or `stuck` still run the saved check and skip automatic review and fix rounds.
 
@@ -213,6 +216,8 @@ A minimal configuration is:
 | Key | Default | Meaning |
 |---|---|---|
 | `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated scout, handoff, review, fix, and reset-continuation prompts. Claude writes the brief in the user's configured language. |
+| `sandbox` | `"off"` | `"off"` or `"workspace"`; limit worker, review, and check writes to the worktree and `writable_dirs`. `start --sandbox` overrides it for the task; `say` inherits it. |
+| `writable_dirs` | `[]` | Additional writable directories, such as build caches; `~` is expanded and paths are made absolute. |
 | `accounts` | Absent | Explicit account list; its presence enables automatic limit monitoring and rotation. Without it, tasks use the existing `~/.codex` login. |
 | `switch_at` | `99` | Used-percentage threshold for configured accounts, greater than 0 and at most 100. |
 | `credits` | `false` | Allow continuing on credits if no configured account has ordinary usage available. |
@@ -234,6 +239,32 @@ always English.
 
 `CODEX_TASK_HOME` can select another main Codex home. Settings, the rules override, task state, and
 worktrees then resolve under that home.
+
+## Optional workspace sandbox
+
+The sandbox is off by default. To enable it, add these settings to `~/.codex/codex-worker.json`:
+
+```json
+{
+  "sandbox": "workspace",
+  "writable_dirs": ["~/.gradle", "~/.npm"]
+}
+```
+
+`start --sandbox off|workspace` overrides the setting for one task, and `say` inherits the saved mode.
+Workers, fresh and resumed reviews, and saved checks use `workspace-write` with network access.
+Scouts remain read-only. Writes outside the worktree are blocked, protecting task state and saved
+checks, other repositories, `~/.ssh`, and `~/.codex`. Temporary directories remain writable, and each
+entry in `writable_dirs` explicitly grants additional write access. Builds using caches outside the
+worktree fail until those cache directories are added. Reading the entire disk, including tokens,
+and network access are **not** restricted.
+
+The worker leaves changes in the worktree and returns a `commit_message` whose first line is the
+subject. After each completed work turn, including fix rounds and any result status, the supervisor
+commits changes before checking them, with Git hooks disabled. It pushes without force and creates a
+PR if `gh` is available and the branch has none. Failed or stopped turns are not committed. Empty
+messages use `<slug>: turn <N>`. Push or PR failures do not fail the turn; `wait` shows the publication
+result or error and `== sandbox: workspace`. `status` also shows the mode.
 
 ## Task notifications
 
