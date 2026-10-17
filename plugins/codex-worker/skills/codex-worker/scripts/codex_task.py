@@ -160,8 +160,8 @@ def codex_binary():
     return CODEX or resolve_codex()
 
 
-def sh(cmd, cwd=None, check=True):
-    r = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True)
+def sh(cmd, cwd=None, check=True, errors="strict"):
+    r = subprocess.run(cmd, cwd=cwd, text=True, capture_output=True, errors=errors)
     if check and r.returncode != 0:
         die(f"{' '.join(cmd)} failed:\n{r.stderr.strip() or r.stdout.strip()}")
     return r.stdout.rstrip()
@@ -904,8 +904,10 @@ def guarded_changes(st):
             item["added"] += int(added) if added != "-" else 0
             item["removed"] += int(removed) if removed != "-" else 0
             item["deleted"] |= path in deleted
+            # Patch contents can use any source-file encoding; ASCII hunk and
+            # skip markers remain readable even when other bytes are replaced.
             patch = sh(args + ["--unified=0"] + revisions + ["--", path],
-                       cwd=root, check=False)
+                       cwd=root, check=False, errors="replace")
             line_number = 0
             in_hunk = False
             for line in patch.splitlines():
@@ -1595,7 +1597,58 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
 
-def execute_check(st, stopped, cwd, filename):
+def relocate_check_command(command, source, target):
+    """Move absolute path arguments into the base worktree, preserving shell syntax."""
+    source = Path(os.path.abspath(source))
+    target = Path(os.path.abspath(target))
+    word = re.compile(r"""(?:[^\s;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\.)+""")
+
+    def relocate(match):
+        raw = match.group()
+        # Decode only the literal prefix. Keep expansions and their quote
+        # context intact, rather than turning $variables or globs into text.
+        literal, quote, index = [], "", 0
+        while index < len(raw):
+            char = raw[index]
+            if char == quote:
+                quote = ""
+            elif char in "\"'" and not quote:
+                quote = char
+            elif char == "\\" and quote != "'" and index + 1 < len(raw):
+                following = raw[index + 1]
+                if not quote or following in '$`"\\\n':
+                    if following != "\n":
+                        literal.append(following)
+                    index += 2
+                    continue
+                literal.append(char)
+            elif quote != "'" and (char in "$`" or (not quote and char in "*?[")):
+                break
+            else:
+                literal.append(char)
+            index += 1
+        token = "".join(literal)
+        prefix, candidate = "", token
+        if not token.startswith("/") and "=" in token:
+            prefix, candidate = token.split("=", 1)
+            prefix += "="
+        if not candidate.startswith("/"):
+            return raw
+        try:
+            relative = Path(os.path.normpath(candidate)).relative_to(source)
+        except ValueError:
+            return raw
+        rebased = str(target / relative) + ("/" if candidate.endswith("/") else "")
+        if prefix and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=", prefix) and raw.startswith(prefix):
+            replacement = prefix + shlex.quote(rebased)
+        else:
+            replacement = shlex.quote(prefix + rebased)
+        return replacement + quote + raw[index:]
+
+    return word.sub(relocate, command)
+
+
+def execute_check(st, stopped, cwd, filename, command=None):
     """Run the saved check after work, owning and reaping its process group."""
     if stopped():
         return None
@@ -1605,7 +1658,7 @@ def execute_check(st, stopped, cwd, filename):
     code = None
     with (TASKS / st["slug"] / filename).open("wb") as log:
         try:
-            proc = subprocess.Popen(["/bin/sh", "-c", st["check"]], cwd=cwd,
+            proc = subprocess.Popen(["/bin/sh", "-c", st["check"] if command is None else command], cwd=cwd,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             st["check_pid"] = proc.pid
             save(st)
@@ -1670,7 +1723,8 @@ def run_base_check(st, stopped):
                                     "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
                                    input="\0".join(sorted(guarded)) + "\0", text=True,
                                    cwd=worktree, check=True, capture_output=True)
-                execution = execute_check(st, stopped, worktree, "base-check.log")
+                command = relocate_check_command(st["check"], st["worktree"], worktree)
+                execution = execute_check(st, stopped, worktree, "base-check.log", command=command)
                 if execution is not None:
                     result = {key: execution[key] for key in ("outcome", "exit", "seconds")}
                     if result["outcome"] == "stopped":

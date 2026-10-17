@@ -10,6 +10,7 @@ import io
 import json
 import os
 import runpy
+import shlex
 import signal
 import subprocess
 import sys
@@ -269,7 +270,7 @@ def execute():
     for name, contents in run.get("write_files", {}).items():
         path = Path(name)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(contents)
+        path.write_text(contents, encoding=run.get("write_encodings", {}).get(name))
     for name in run.get("remove_files", []):
         Path(name).unlink(missing_ok=True)
     if run.get("commit_files"):
@@ -1413,6 +1414,75 @@ class RotationTests(unittest.TestCase):
         self.assertRegex(prompt.lower(), r"targeted|focused|specific")
         self.assertLess(output.index("== check `"), output.index("== review by "))
 
+    def test_guarded_changes_decode_latin1_patches_for_every_diff_layer(self):
+        original = ("# coding: latin-1\n"
+                    "import unittest\n"
+                    "class Latin1Tests(unittest.TestCase):\n"
+                    "    def test_cafe(self):\n"
+                    "        self.assertEqual('café', 'café')\n")
+        changed = original.replace("    def test_cafe(self):\n",
+                                   "    @unittest.skip('café')\n    def test_cafe(self):\n")
+        changed = changed.replace("self.assertEqual('café', 'café')", "self.assertIn('café', 'café')")
+        path = self.repo / "tests/test_latin1.py"
+        path.parent.mkdir()
+        path.write_bytes(original.encode("latin-1"))
+        self.git("add", "--", "tests/test_latin1.py")
+        self.git("commit", "--quiet", "-m", "Add Latin-1 test fixture")
+        worker = self.worker()
+        state = {"worktree": str(self.repo), "base": self.git("rev-parse", "HEAD")}
+        path.write_bytes(changed.encode("latin-1"))
+        for layer in ("working", "index", "committed"):
+            with self.subTest(layer=layer):
+                changes = worker.guarded_changes(state)
+                self.assertEqual(len(changes), 1)
+                self.assertEqual((changes[0]["path"], changes[0]["added"], changes[0]["removed"]),
+                                 ("tests/test_latin1.py", 2, 1))
+                self.assertEqual(len(changes[0]["disabled"]), 1)
+                self.assertEqual(changes[0]["disabled"][0]["line"], 4)
+                self.assertIn("@unittest.skip", changes[0]["disabled"][0]["text"])
+            if layer == "working":
+                self.git("add", "--", "tests/test_latin1.py")
+            elif layer == "index":
+                self.git("commit", "--quiet", "-m", "Change Latin-1 test fixture")
+
+    def test_latin1_guarded_patch_finishes_check_review_and_notification(self):
+        self.configure(language="en")
+        self.configure_notify()
+        original = ("# coding: latin-1\n"
+                    "import unittest\n"
+                    "class Latin1Tests(unittest.TestCase):\n"
+                    "    def test_cafe(self):\n"
+                    "        self.assertEqual('café', 'café')\n"
+                    "if __name__ == '__main__':\n"
+                    "    unittest.main()\n")
+        changed = original.replace("    def test_cafe(self):\n",
+                                   "    @unittest.skip('café')\n    def test_cafe(self):\n")
+        changed = changed.replace("self.assertEqual('café', 'café')", "self.assertIn('café', 'café')")
+        path = self.repo / "tests/test_latin1.py"
+        path.parent.mkdir()
+        path.write_bytes(original.encode("latin-1"))
+        self.git("add", "--", "tests/test_latin1.py")
+        self.git("commit", "--quiet", "-m", "Add Latin-1 test fixture")
+        self.git("push", "--quiet", "origin", "main")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tests/test_latin1.py": changed},
+             "write_encodings": {"tests/test_latin1.py": "latin-1"},
+             "commit_files": ["tests/test_latin1.py"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("guarded-latin1", "--review", "--check", PYTHON + " -I tests/test_latin1.py")
+        output = self.wait("guarded-latin1")
+        state = self.state("guarded-latin1")
+        self.assertIsNone(state["pid"])
+        self.assertFalse(state.get("error"))
+        self.assertEqual(state["checks"][-1]["outcome"], "passed")
+        self.assertIn("== guarded files changed: tests/test_latin1.py (+2 −1)", output)
+        self.assertIn("== guarded tests disabled: tests/test_latin1.py:4 @unittest.skip", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertIn("tests/test_latin1.py", self.review_invocations()[0]["prompt"])
+        self.assertEqual(self.notification("guarded-latin1", "turn_finished")["guarded_changed"], 1)
+        self.assertEqual((Path(state["worktree"]) / "tests/test_latin1.py").read_bytes(),
+                         changed.encode("latin-1"))
+
     def test_guarded_changes_print_counts_and_reach_review_and_notification(self):
         self.configure(language="en")
         self.configure_notify()
@@ -1534,6 +1604,65 @@ class RotationTests(unittest.TestCase):
         self.assertEqual((Path(state["worktree"]) / "tests/test_a.py").read_text(), changes["tests/test_a.py"])
         self.assertFalse((Path(state["worktree"]) / "tests/test_removed.py").exists())
         self.assertTrue((Path(state["worktree"]) / "tests/test_new.py").is_file())
+
+    def test_base_check_relocates_absolute_test_and_environment_paths(self):
+        self.configure(language="en")
+        slug = "guarded-absolute"
+        test_name = "tests/test a'quoted.py"
+        base_test = ("import os\nfrom pathlib import Path\n"
+                     "print('restored absolute test ran', flush=True)\n"
+                     "assert Path(os.environ['TASK_VALUE']).read_text() == 'expected\\n', 'base assertion failed'\n")
+        self.commit_fixture({test_name: base_test, "value.txt": "expected\n"})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {
+                test_name: "print('weakened absolute test passed')\n", "value.txt": "broken\n"},
+             "commit_files": [test_name, "value.txt"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
+        command = ("TASK_VALUE=" + shlex.quote(str(worktree / "value.txt")) + " " + shlex.quote(PYTHON)
+                   + " -I \\\n" + shlex.quote(str(worktree / test_name)) + " && printf 'check completed\\n'")
+        self.start(slug, "--review", "--check", command, "--base-check")
+        output = self.wait(slug)
+        state = self.state(slug)
+        check = state["checks"][-1]
+        self.assertEqual(state["check"], command, "the saved command must remain unchanged")
+        self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
+        self.assertEqual((check["base_check"]["outcome"], check["base_check"]["exit"]), ("failed", 1))
+        self.assertIn("restored absolute test ran", output)
+        self.assertIn("base assertion failed", output)
+        self.assertIn("== base tests: FAILED", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertIn("Base tests: failed", self.review_invocations()[0]["prompt"])
+        self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
+        self.assertEqual((worktree / "value.txt").read_text(), "broken\n")
+        self.assertIn("weakened absolute test", (worktree / test_name).read_text())
+
+    def test_relocated_check_preserves_shell_operators_options_and_external_paths(self):
+        worker = self.worker()
+        source = self.root / "task original'quoted"
+        target = self.root / "base temporary'quoted"
+        sibling = self.root / (source.name + "-sibling")
+        for directory in (source, target, sibling):
+            directory.mkdir()
+        script = "import sys\nfrom pathlib import Path\nprint(Path(sys.argv[1].split('=', 1)[1]).read_text().strip())\n"
+        for directory, value in ((source, "original"), (target, "base"), (sibling, "external")):
+            (directory / "check script.py").write_text(script)
+            (directory / "value.txt").write_text(value + "\n")
+        for argument in (shlex.quote(str(source / "check script.py")),
+                         "\\\n" + shlex.quote(str(source / "check script.py")),
+                         '"' + str(source) + '/$CHECK_NAME"', shlex.quote(str(source)) + "/check*.py"):
+            with self.subTest(argument=argument):
+                command = ("CHECK_NAME='check script.py'; " + shlex.quote(PYTHON) + " -I " + argument
+                           + " --input=" + shlex.quote(str(source / "value.txt"))
+                           + " | cat > " + shlex.quote(str(source / "result.txt"))
+                           + " && cat " + shlex.quote(str(sibling / "value.txt")))
+                relocated = worker.relocate_check_command(command, source, target)
+                result = subprocess.run(["/bin/sh", "-c", relocated], cwd=target, env=self.env,
+                                        text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "external\n")
+                self.assertEqual((target / "result.txt").read_text(), "base\n")
+                self.assertFalse((source / "result.txt").exists())
 
     def test_say_disables_base_check_and_keeps_it_disabled(self):
         self.configure(language="en")
