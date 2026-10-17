@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
-  codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
+  codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py review <slug> [--effort E] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
@@ -16,7 +16,7 @@
 
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
 credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_review_minutes (30),
-repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
+review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
 Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without quota monitoring or rotation.
 State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
@@ -64,6 +64,13 @@ RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
 GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+REVIEW_ANGLES = {
+    "correctness": "Focus on behavior and acceptance criteria (Done when), including regressions and unmet requirements.",
+    "concurrency": "Focus on races, processes, signals, files and state shared by parallel commands. Check repeated runs and recovery after interruption.",
+    "security": "Focus on secrets, shell and path injection, untrusted input, permissions and sandbox boundaries.",
+    "tests": "Focus on ineffective or weakened tests, uncovered brief requirements, and mocks replacing the code under test.",
+}
+AUTO_REVIEW_ANGLES = ["correctness", "concurrency", "tests"]
 
 
 def object_schema(properties):
@@ -212,6 +219,7 @@ def accounts_config():
     cfg.setdefault("reset_credit_min_hours", 12)
     cfg.setdefault("max_turn_minutes", None)
     cfg.setdefault("max_review_minutes", 30)
+    cfg.setdefault("review_angles_min_lines", 400)
     cfg.setdefault("repeat_limit", 3)
     cfg.setdefault("sandbox", "off")
     cfg.setdefault("writable_dirs", [])
@@ -230,6 +238,8 @@ def accounts_config():
             die(key + " must be a positive finite number")
     if type(cfg["repeat_limit"]) is not int or cfg["repeat_limit"] < 1:
         die("repeat_limit must be a positive integer")
+    if type(cfg["review_angles_min_lines"]) is not int or cfg["review_angles_min_lines"] < 1:
+        die("review_angles_min_lines must be a positive integer")
     if cfg["language"] not in ("en", "ru"):
         die('language must be "en" or "ru"')
     notification = cfg.get("notify")
@@ -776,6 +786,9 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("turn_stop", None)
     st.pop("wrapup", None)
     st.pop("publish", None)
+    st.pop("review_result", None)
+    st.pop("review_angle", None)
+    st.pop("refusal", None)
     if kind != "review":
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
@@ -1204,6 +1217,17 @@ def auth_error(event):
         "oauth refresh token was rejected", "failed to refresh token"))
 
 
+def refusal_message(event):
+    """Policy refusals are terminal model outcomes, not account failures."""
+    if event.get("type") != "turn.failed":
+        return None
+    error = event.get("error")
+    message = (error.get("message") if isinstance(error, dict) else error) or event.get("message")
+    if isinstance(message, str) and "cybersecurity risk" in message.lower():
+        return message
+    return None
+
+
 def earliest_reset(infos, cfg):
     resets = [(reset_time(i, cfg), i["name"]) for i in infos if i.get("logged_in") and not i.get("duplicate")]
     resets = [(stamp, name) for stamp, name in resets if stamp is not None]
@@ -1569,6 +1593,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     current_info = None
     failed = False
     authentication_failed = False
+    refusal = None
     final_message = ""
     st["exec_event_start"] = len(events(st))
     save(st)
@@ -1630,7 +1655,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                     if reviewing and not wrapup:
                                         review_entry = {"account": account["name"], "thread": thread,
                                                         "started": attempt_started, "finished": None, "result": None,
-                                                        "round": len(st.get("rounds", []))}
+                                                        "round": len(st.get("rounds", [])),
+                                                        "angle": st.get("review_angle") or "correctness"}
                                         st.setdefault("reviews", []).append(review_entry)
                                     elif not reviewing:
                                         st["thread"] = thread
@@ -1643,6 +1669,10 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                 if (event.get("type") == "item.completed"
                                         and (event.get("item") or {}).get("type") == "agent_message"):
                                     final_message = event["item"].get("text", "")
+                                refusal = refusal_message(event)
+                                if refusal is not None:
+                                    st["refusal"] = refusal
+                                    return "refused", None
                                 if control.repeated(event):
                                     return "stuck", None
                                 if limit_error(event):
@@ -1689,12 +1719,16 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                 st.pop("codex_pid", None)
                 message = last.read_text(encoding="utf-8").strip() if last.exists() else final_message
                 if wrapup:
-                    st["wrapup"]["result"] = parse_result(message, reviewing=reviewing)
+                    st["wrapup"]["result"] = None if refusal else parse_result(message, reviewing=reviewing)
+                    if refusal:
+                        st["wrapup"]["refusal"] = refusal
                 elif review_entry is not None:
                     review_entry["finished"] = time.time()
-                    review_entry["result"] = parse_result(message, reviewing=True)
+                    review_entry["result"] = None if refusal else parse_result(message, reviewing=True)
+                    if refusal:
+                        review_entry.update(outcome="refused", refusal=refusal)
                 elif not reviewing and st.get("kind") != "scout":
-                    st["result"] = parse_result(message)
+                    st["result"] = None if refusal else parse_result(message)
                 save(st)
     if reviewing and not review_fallback and not thread and code == 2:
         with (d / "stderr.log").open("rb") as errors:
@@ -1735,12 +1769,16 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
         st["result"] = st["wrapup"]["result"]
     elif review_entry is not None and st["wrapup"]["outcome"] == "completed":
         review_entry.update(result=st["wrapup"]["result"], finished=time.time())
-    st["outcome"] = "stopped" if stopped() else reason["outcome"]
+    if review_entry is not None and st["wrapup"]["outcome"] == "refused":
+        review_entry.update(outcome="refused", refusal=st["refusal"], result=None, finished=time.time())
+    st["outcome"] = ("stopped" if stopped() else "refused" if st["wrapup"]["outcome"] == "refused"
+                     else reason["outcome"])
     save(st)
 
 
 def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
+    st.pop("refusal", None)
     reviewing = st.get("kind") == "review"
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
@@ -1819,7 +1857,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
             wrapup_turn(st, cfg, account, effort, stopped, reason,
                         review_entry=reviews[-1] if reviews else None)
             break
-        if result in ("completed", "failed") or not cfg["enabled"]:
+        if result in ("completed", "failed", "refused") or not cfg["enabled"]:
             st["outcome"] = result
             break
         if result == "auth":
@@ -1998,24 +2036,123 @@ def saved_check(st, cfg, stopped, review_after=True):
     return check
 
 
-def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False):
-    start = len(st.get("reviews", []))
+def selected_review_angles(st, cfg):
+    selection = st.get("review_angles")
+    if selection != "auto":
+        return selection or []
+    # Count committed and uncommitted changes separately, including staged edits.
+    # Disable clean/process filters too: numstat still reads worktree contents.
+    configured = subprocess.run(GIT + ["config", "--null", "--name-only", "--get-regexp",
+                                       r"^filter\..*\.(clean|smudge|process)$"],
+                                cwd=st["worktree"], text=True, capture_output=True)
+    if configured.returncode not in (0, 1):
+        configured.check_returncode()
+    diff_git = list(GIT)
+    drivers = {key[len("filter."):key.rfind(".")] for key in configured.stdout.split("\0") if key}
+    for driver in sorted(drivers):
+        for command in ("clean=", "smudge=", "process=", "required=false"):
+            diff_git += ["-c", f"filter.{driver}.{command}"]
+    lines = 0
+    for revisions in ([st["base"] + "..HEAD"], ["HEAD"]):
+        output = sh(diff_git + ["diff", "--no-ext-diff", "--no-textconv", "--numstat"] + revisions,
+                    cwd=st["worktree"])
+        for record in output.splitlines():
+            added, removed, _ = record.split("\t", 2)
+            if added.isdigit() and removed.isdigit():
+                lines += int(added) + int(removed)
+    # New text files are not part of `git diff HEAD` until they are staged.
+    untracked = sh(GIT + ["ls-files", "--others", "--exclude-standard", "-z"], cwd=st["worktree"],
+                   errors="surrogateescape")
+    for name in untracked.split("\0"):
+        path = Path(st["worktree"]) / name
+        if not name or path.is_symlink() or not path.is_file():
+            continue
+        count, tail, binary = 0, b"", False
+        with path.open("rb") as stream:
+            for chunk in iter(lambda: stream.read(65536), b""):
+                if b"\0" in chunk:
+                    binary = True
+                    break
+                count += chunk.count(b"\n")
+                tail = chunk[-1:]
+        if not binary:
+            lines += count + int(bool(tail) and tail != b"\n")
+    return list(AUTO_REVIEW_ANGLES) if lines >= cfg["review_angles_min_lines"] else []
+
+
+def merge_reviews(angles):
+    findings, seen = [], {}
+    for entry in angles:
+        for finding in (entry.get("result") or {}).get("findings", []):
+            key = (finding["file"], finding["line"], finding["title"].casefold())
+            if key in seen:
+                previous = seen[key]
+                if entry["angle"] not in previous["angle"].split(","):
+                    previous["angle"] += "," + entry["angle"]
+                # Keep the strongest severity when two views identify the same defect.
+                previous["severity"] = min(previous["severity"], finding["severity"])
+                continue
+            merged = dict(finding, id=f"F{len(findings) + 1}", angle=entry["angle"])
+            findings.append(merged)
+            seen[key] = merged
+    verdict = "defects" if any((entry.get("result") or {}).get("verdict") == "defects"
+                               for entry in angles) else "clean"
+    summary = "\n".join(f"[{entry['angle']}] " +
+                        ((entry.get("result") or {}).get("summary") or entry["outcome"])
+                        for entry in angles)
+    return {"verdict": verdict, "findings": findings, "summary": summary, "angles": angles}
+
+
+def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
+    angles = selected_review_angles(st, cfg) if angles is None else angles
+    records = []
+    result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
+    st.pop("review_result", None)
     save(st)
     try:
-        run_turn(st, cfg, prompt, effort, False, stopped, sleep, new_turn=new_turn)
+        for angle in angles or [None]:
+            if stopped():
+                st["outcome"] = "stopped"
+                break
+            start = len(st.get("reviews", []))
+            started = time.time()
+            st.update(review_angle=angle, outcome="running")
+            focused = prompt + f"\n\nReview angle: {angle}. {REVIEW_ANGLES[angle]}" if angle else prompt
+            run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
+            reviews = st.get("reviews", [])[start:]
+            outcome = "stopped" if stopped() else st["outcome"]
+            result = reviews[-1].get("result") if reviews else None
+            if reviews:
+                reviews[-1]["outcome"] = outcome
+            record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
+                      "account": st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"]),
+                      "started": started, "finished": time.time()}
+            if outcome == "refused":
+                record["refusal"] = st.get("refusal", "")
+            records.append(record)
+            if angles:
+                result = merge_reviews(records)
+            st["review_result"] = result
+            save(st)
+            if outcome not in ("completed", "refused"):
+                break
+        if not stopped() and records and all(entry["outcome"] in ("completed", "refused") for entry in records):
+            st["outcome"] = "refused" if all(entry["outcome"] == "refused" for entry in records) else "completed"
     except (Exception, SystemExit):
         st["outcome"] = "stopped" if stopped() else "failed"
         raise
     finally:
-        reviews = st.get("reviews", [])[start:]
-        result = reviews[-1].get("result") if reviews else None
-        account = st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
+        st.pop("review_angle", None)
+        if st.get("outcome") != "refused":
+            st.pop("refusal", None)
+        account = st.get("review_account") or (records[-1]["account"] if records else st["account"])
         outcome = "stopped" if stopped() else st["outcome"]
         notify(st, cfg, "review_done", f"review {outcome} on {account}",
-               outcome=outcome, account=account,
+               outcome=outcome, account=account, angles=[entry["angle"] for entry in records],
                verdict=result["verdict"] if result else None,
                findings=len(result["findings"]) if result else 0, round=len(st.get("rounds", [])))
+        save(st)
     return result
 
 
@@ -2077,9 +2214,13 @@ def publish_work(st, stopped):
 def auto_fix(st, cfg, review, effort, stopped, sleep):
     """Bounded work/check/review loop under the original supervisor and wait."""
     failed_check = None
+    if st.get("outcome") == "refused":
+        st["auto_fix_stop"] = "review refused"
+        return
     while not stopped() and st.get("outcome") == "completed":
         if failed_check is None:
-            if review is None:
+            if review is None or any(entry["outcome"] == "completed" and entry.get("result") is None
+                                     for entry in review.get("angles", [])):
                 st["auto_fix_stop"] = "review unknown"
                 return
             if review["verdict"] == "clean":
@@ -2125,7 +2266,15 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
             continue
         failed_check = None
         st["work_completed"] = True
-        review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, sleep)
+        next_angles = []
+        if review and len(review.get("angles", [])) > 1:
+            next_angles = ["correctness"]
+            next_angles += [entry["angle"] for entry in review["angles"]
+                            if entry["angle"] != "correctness" and (entry.get("result") or {}).get("findings")]
+        review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, sleep, angles=next_angles)
+        if st.get("outcome") == "refused":
+            st["auto_fix_stop"] = "review refused"
+            return
 
 
 def cmd__run(a):
@@ -2185,7 +2334,8 @@ def cmd__run(a):
         if stopped():
             st["outcome"] = "stopped"
         if st.get("fix_rounds") and (st.get("outcome") != "completed" or not st.get("auto_fix_stop")):
-            st["auto_fix_stop"] = (st.get("outcome") if st.get("outcome") != "completed"
+            st["auto_fix_stop"] = ("review refused" if st.get("outcome") == "refused" and st.get("kind") == "review"
+                                   else st.get("outcome") if st.get("outcome") != "completed"
                                    else st.get("review_skipped", "review unknown"))
         st.pop("sleeping", None)
         st["turn_finished"] = time.time()
@@ -2248,6 +2398,7 @@ def cmd_start(a):
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
           "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"],
+          "review_angles": a.review_angles,
           "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
           "created": time.time(), "turns": 0}
     save(st)
@@ -2301,9 +2452,10 @@ def cmd_scout(a):
 def cmd_say(a):
     st = load(a.slug)
     scouting = st.get("kind") == "scout"
+    angles = getattr(a, "review_angles", None)
     if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
-                     or a.no_base_check):
-        die("scout is read-only; say --check, --check-timeout, --review, --fix-rounds and --no-base-check are not supported")
+                     or a.no_base_check or angles is not None):
+        die("scout is read-only; say --check, --check-timeout, --review, --review-angles, --fix-rounds and --no-base-check are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -2311,6 +2463,7 @@ def cmd_say(a):
     cfg = accounts_config()
     minutes = getattr(a, "max_minutes", None)
     st["max_turn_minutes"] = minutes if minutes is not None else cfg.get("max_turn_minutes")
+    st["review_angles"] = angles
     if a.no_check:
         st["check"] = None
         st["check_paths"] = []
@@ -2333,6 +2486,7 @@ def cmd_review(a):
         die("scout is read-only; review is not supported")
     require_idle(st)
     cfg = accounts_config()
+    st["review_angles"] = a.review_angles
     spawn(st, review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
     print(f"reviewing {a.slug}, pid {st['pid']}")
 
@@ -2399,8 +2553,11 @@ def cmd_wait(a):
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
     if st.get("turn_stop"):
         print("== turn stopped: " + turn_stop_message(st["turn_stop"]))
+    if st.get("outcome") == "refused" and st.get("kind") != "review":
+        print("== refused by the model: " + st.get("refusal", "")[:200])
     d = TASKS / a.slug
-    if st.get("kind") != "review" or st.get("work_completed"):
+    if (st.get("kind") != "review" or st.get("work_completed")) and not (
+            st.get("outcome") == "refused" and st.get("kind") != "review"):
         last = d / "last.md"
         if (st.get("exhausted") or sleeping) and len(events(st)) == st.get("event_start", 0):
             # Paused before any exec: the thread's last message belongs to an earlier turn.
@@ -2446,7 +2603,28 @@ def cmd_wait(a):
         print("== review skipped: " + st["review_skipped"])
     if st.get("kind") == "review" or st.get("rounds"):
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
-        if reviews:
+        aggregate = st.get("review_result")
+        if aggregate and aggregate.get("angles"):
+            for entry in aggregate["angles"]:
+                minutes = (entry["finished"] - entry["started"]) / 60
+                heading = f"== review angle {entry['angle']} by {entry['account']} ({minutes:.1f} min):"
+                result = entry.get("result")
+                if entry["outcome"] == "refused":
+                    print(heading + " refused")
+                    print("== refused by the model: " + entry.get("refusal", "")[:200])
+                elif result is None:
+                    print(heading + " " + entry["outcome"] + " (result unknown)")
+                else:
+                    count = len(result["findings"])
+                    print(heading + (f" {count} defect{'s' if count != 1 else ''}" if count else " no defects"))
+            print(aggregate["summary"])
+            for finding in aggregate["findings"]:
+                print(f"[{finding['severity']}] [{finding['angle']}] {finding['id']} {finding['file']}:{finding['line']} — {finding['title']}")
+                print(finding["detail"])
+                print("verify: " + finding["verify"])
+        elif st.get("outcome") == "refused":
+            print("== refused by the model: " + st.get("refusal", "")[:200])
+        elif reviews:
             entry = reviews[-1]
             minutes = ((entry.get("finished") or time.time()) - entry["started"]) / 60
             heading = f"== review by {entry['account']} ({minutes:.1f} min):"
@@ -2471,11 +2649,15 @@ def cmd_wait(a):
             print("(Codex did not run review)")
     if st.get("fix_rounds"):
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
-        trajectory = " → ".join(str(len(entry["result"]["findings"])) for entry in reviews
-                                if entry.get("result") is not None) or "unknown"
+        if (st.get("review_result") or {}).get("angles"):
+            results = [entry.get("review") for entry in st.get("rounds", [])] + [st["review_result"]]
+        else:
+            results = [entry.get("result") for entry in reviews]
+        trajectory = " → ".join(str(len(result["findings"])) for result in results if result is not None) or "unknown"
         reason = st.get("auto_fix_stop", st.get("outcome", "unknown"))
         print(f"== auto-fix: {len(st.get('rounds', []))} rounds, findings {trajectory}; stop: {reason}")
-    failed = [e for e in events(st)[st.get("exec_event_start", st.get("event_start", 0)):] if e.get("type") in ("turn.failed", "error")]
+    failed = [e for e in events(st)[st.get("exec_event_start", st.get("event_start", 0)):]
+              if e.get("type") in ("turn.failed", "error") and refusal_message(e) is None]
     if failed:
         print("== errors:", json.dumps(failed[-1], ensure_ascii=False)[:500])
     if st.get("error"):
@@ -2680,6 +2862,17 @@ def max_minutes(value):
     return minutes
 
 
+def review_angles(value):
+    if value == "auto":
+        return value
+    angles = [angle.strip() for angle in value.split(",")]
+    unknown = [angle for angle in angles if angle not in REVIEW_ANGLES]
+    if unknown:
+        raise argparse.ArgumentTypeError(f"unknown review angle: {','.join(unknown)!r}; "
+                                         "choose correctness,concurrency,security,tests or auto")
+    return list(dict.fromkeys(angles))
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2694,6 +2887,8 @@ def main():
                    help="write sandbox for this task (default: sandbox setting, off)")
     s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
+    s.add_argument("--review-angles", type=review_angles, metavar="LIST",
+                   help="review with comma-separated presets or auto (implies --review)")
     s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
                    help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
     s.add_argument("--check", help="shell command to run after completed work turns; saved for follow-ups")
@@ -2714,6 +2909,8 @@ def main():
     s.add_argument("--effort", default=None)
     s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
+    s.add_argument("--review-angles", type=review_angles, metavar="LIST",
+                   help="review with comma-separated presets or auto (implies --review)")
     s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
                    help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
     checks = s.add_mutually_exclusive_group()
@@ -2724,6 +2921,8 @@ def main():
     s = sub.add_parser("review")
     s.add_argument("slug")
     s.add_argument("--effort", default=None)
+    s.add_argument("--review-angles", type=review_angles, metavar="LIST",
+                   help="comma-separated presets or auto (default: one review)")
     s = sub.add_parser("wait")
     s.add_argument("slug")
     s.add_argument("--timeout", type=int, default=0)
@@ -2753,6 +2952,8 @@ def main():
             scout_parser.error("argument --file: not allowed with argument question")
     else:
         a = p.parse_args()
+    if a.cmd in ("start", "say") and a.review_angles is not None:
+        a.review = True
     if a.cmd in ("start", "say") and a.fix_rounds is not None and not a.review:
         p.error("--fix-rounds requires --review")
     if a.cmd in ("start", "scout", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):

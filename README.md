@@ -128,11 +128,11 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--review [--review-angles LIST] [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M`, add `--review --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
-| `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M`, add `--review [--review-angles LIST] --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
+| `review <slug> [--effort E] [--review-angles LIST]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `accounts` | Show login, plan, limits, reset times, credits, and availability in English. |
@@ -144,6 +144,17 @@ Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
 `~/.codex/claude-tasks/<slug>/`. Turns continue independently of Claude's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
+
+Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
+add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and
+uncommitted changes (configurable with `review_angles_min_lines`), `auto` runs `correctness,concurrency,tests`;
+smaller diffs keep one review. To choose the focus explicitly, pass a comma-separated list from
+`correctness,concurrency,security,tests`. Each angle runs sequentially in a fresh thread; findings are
+merged and duplicates combined, with their angles shown by `wait`. Later fix rounds repeat only
+angles with findings, plus `correctness`; a single review stays single. The flag implies `--review`
+on `start` and `say`. Scouts do not support review angles.
+Model cybersecurity refusals end the turn as `refused` without retrying or rotating; other review
+angles continue, and a review with only refusals stops fixes with `auto_fix_stop: "review refused"`.
 
 `--fix-rounds` accepts 0–5 (default 0), requires `--review`, and is unavailable for scouts. The loop
 stops on a clean review, only P3 findings (`auto_fix_stop: "only P3"`), the round limit, a worker result
@@ -224,6 +235,7 @@ A minimal configuration is:
 | `wait_for_reset` | `true` | When configured accounts are exhausted, wait for reset and continue; `false` stops instead. |
 | `max_turn_minutes` | Absent | Default active implementation exec budget for `start` and `say`; `--max-minutes M` overrides it. Unset means no time cap. |
 | `max_review_minutes` | `30` | Separate active exec budget for each review or scout turn. |
+| `review_angles_min_lines` | `400` | Changed-line threshold for `--review-angles auto`; counts `base..HEAD` and uncommitted changes. |
 | `repeat_limit` | `3` | Matching failures of the same command that trigger `stuck`; success for that command resets its count. |
 | `notify` | Absent | `"macos"` for desktop notifications, or an argv list that receives the event JSON as its final argument. |
 | `notify_events` | All events | Optional list of event types to send. |
@@ -285,7 +297,7 @@ and a short `message`. Event types are `turn_finished` (`outcome`, `result`, als
 and `guarded_changed`, the number of changed guarded files),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
-(`verdict`, finding count, and `round`), plus `budget_exhausted` and `stuck`.
+(`verdict`, finding count, `round`, and `angles`), plus `budget_exhausted` and `stuck`.
 `turn_finished` is sent once when the entire cycle ends, with `outcome` including `budget_exhausted`
 or `stuck` when a guard stopped the turn. The separate guard events also obey `notify_events`.
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
