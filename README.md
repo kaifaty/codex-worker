@@ -65,7 +65,7 @@ The skill handles these commands for Claude. To run them yourself, set `T` to th
 
 ```sh
 T="$HOME/.claude/skills/codex-worker/scripts/codex_task.py"
-python3 -I "$T" start csv-export --brief brief.md --review --fix-rounds 2 --check "python3 -m unittest tests.test_csv_export"
+python3 -I "$T" start csv-export --brief brief.md --max-minutes 45 --review --fix-rounds 2 --check "python3 -m unittest tests.test_csv_export"
 python3 -I "$T" wait csv-export
 python3 -I "$T" status csv-export
 ```
@@ -89,7 +89,7 @@ Check the actual diff, latest review, and rejection reasons: the worker's claims
 Send remaining findings through `say` or record issues after the round limit:
 
 ```sh
-python3 -I "$T" say csv-export --file fixes.md --review --fix-rounds 2
+python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
 python3 -I "$T" wait csv-export
 ```
 
@@ -127,10 +127,10 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--review [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; add `--review --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M`, add `--review --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
 | `review <slug> [--effort E]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
@@ -145,17 +145,33 @@ a time unless `start --parallel` is explicitly used for tasks whose builds and t
 The default base is the remote's default branch.
 
 `--fix-rounds` accepts 0–5 (default 0), requires `--review`, and is unavailable for scouts. The loop
-stops on a clean review, the round limit, a worker result requiring intervention, or `stop`. A failed
-check after a fix uses the next available round to send the last 40 lines of `check.log` to the worker;
+stops on a clean review, only P3 findings (`auto_fix_stop: "only P3"`), the round limit, a worker result
+requiring intervention, or `stop`. Claude decides what to do with P3 findings. From the second review,
+reviewers focus on regressions from fixes and unmet completion conditions; new edge cases outside the
+brief are P3. Fix turns reject disproportionate work outside those conditions as `out of scope` and
+put it in `remaining`. A failed check after a fix uses the next available round to send the last 40
+lines of `check.log` to the worker;
 without a remaining round, it stops without another review. Reviews are told the command and result
 of a passing saved check and may run only focused checks for a specific finding, not repeat the suite.
+
+`--max-minutes M` on `start` and `say` caps active implementation exec time, including continuations after
+account rotation; reset sleeps and account waits do not count. The default is `max_turn_minutes`, or
+no cap if unset. Reviews and scouts use a separate `max_review_minutes` budget (30 by default).
+Repeating a command's same nonzero exit code and last 2 KB of output `repeat_limit` times (default 3)
+also stops a turn; other commands do not reset its count, but success for that command does.
+Either stop kills the exec process group and starts a wrap-up in the same thread, capped at 10 minutes:
+time exhaustion asks for commits, a push, and a `partial` result; repeated failure asks for a `blocked`
+result with evidence. The typed turn outcome is `budget_exhausted` or `stuck`. `wait` prints
+`== turn stopped: time budget 90 min exhausted` or `== turn stopped: repeated failure ×3: <command>`,
+then the wrap-up. The saved check runs; automatic review and fix rounds do not.
 
 ## Checks after each turn
 
 Pass the brief's Checks command as `start --check "CMD"`. The supervisor runs `/bin/sh -c CMD` in the
 task worktree after every completed implementation turn, including follow-ups. `say --check "CMD"`
 replaces the saved command; `say --no-check` removes it. `--check-timeout SEC` defaults to 1800 seconds.
-Failed, stopped, and paused turns do not run checks.
+Failed, manually stopped, and paused turns do not run checks. Turns ending with `budget_exhausted`
+or `stuck` still run the saved check and skip automatic review and fix rounds.
 
 Output goes to the task's `check.log`. `wait` prints the exit code and duration; on failure or timeout,
 it also prints the last 40 output lines. A failed check skips a requested automatic review. Results
@@ -201,6 +217,9 @@ A minimal configuration is:
 | `switch_at` | `99` | Used-percentage threshold for configured accounts, greater than 0 and at most 100. |
 | `credits` | `false` | Allow continuing on credits if no configured account has ordinary usage available. |
 | `wait_for_reset` | `true` | When configured accounts are exhausted, wait for reset and continue; `false` stops instead. |
+| `max_turn_minutes` | Absent | Default active implementation exec budget for `start` and `say`; `--max-minutes M` overrides it. Unset means no time cap. |
+| `max_review_minutes` | `30` | Separate active exec budget for each review or scout turn. |
+| `repeat_limit` | `3` | Matching failures of the same command that trigger `stuck`; success for that command resets its count. |
 | `notify` | Absent | `"macos"` for desktop notifications, or an argv list that receives the event JSON as its final argument. |
 | `notify_events` | All events | Optional list of event types to send. |
 
@@ -231,7 +250,9 @@ and a short `message`. Event types are `turn_finished` (`outcome`, `result`, als
 and `guarded_changed`, the number of changed guarded files),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
-(`verdict`, finding count, and `round`). `turn_finished` is sent once when the entire cycle ends.
+(`verdict`, finding count, and `round`), plus `budget_exhausted` and `stuck`.
+`turn_finished` is sent once when the entire cycle ends, with `outcome` including `budget_exhausted`
+or `stuck` when a guard stopped the turn. The separate guard events also obey `notify_events`.
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
 with `curl`; the appended argument supplies the value for `--data-binary`:
 

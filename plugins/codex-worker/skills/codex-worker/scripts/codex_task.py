@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--max-minutes M] [--review [--fix-rounds N]] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--review [--fix-rounds N]] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E]             fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
@@ -15,7 +15,8 @@
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
 
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
-credits (false), wait_for_reset (true), notify and notify_events. Legacy claude-accounts.json is a fallback.
+credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_review_minutes (30),
+repeat_limit (3), notify and notify_events. Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without quota monitoring or rotation.
 State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
 CODEX_TASK_HOME and CODEX_TASK_CODEX override the main home and CLI binary (also for tests).
@@ -24,6 +25,7 @@ The internal _run <slug> supervisor survives the caller and opens a new thread o
 import argparse
 import fcntl
 import fnmatch
+import hashlib
 import json
 import math
 import os
@@ -55,6 +57,8 @@ ACCOUNT_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_ACCOUNT_RETRY_SECONDS",
 MAX_ACCOUNT_RETRIES = 6
 SLEEP_STEP = float(os.environ.get("CODEX_TASK_SLEEP_STEP", "60"))
 RESET_MARGIN = float(os.environ.get("CODEX_TASK_RESET_MARGIN", "120"))
+# Tests can shorten minutes without changing the supervisor's monotonic clock.
+MINUTE_SECONDS = float(os.environ.get("CODEX_TASK_MINUTE_SECONDS", "60"))
 RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
@@ -182,6 +186,18 @@ def accounts_config():
     cfg.setdefault("wait_for_reset", True)
     cfg.setdefault("use_reset_credits", False)
     cfg.setdefault("reset_credit_min_hours", 12)
+    cfg.setdefault("max_turn_minutes", None)
+    cfg.setdefault("max_review_minutes", 30)
+    cfg.setdefault("repeat_limit", 3)
+    for key in ("max_turn_minutes", "max_review_minutes"):
+        value = cfg[key]
+        if key == "max_turn_minutes" and value is None:
+            continue
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value <= 0):
+            die(key + " must be a positive finite number")
+    if type(cfg["repeat_limit"]) is not int or cfg["repeat_limit"] < 1:
+        die("repeat_limit must be a positive integer")
     if cfg["language"] not in ("en", "ru"):
         die('language must be "en" or "ru"')
     notification = cfg.get("notify")
@@ -693,6 +709,8 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("error", None)
     st.pop("review_skipped", None)
     st.pop("auto_fix_stop", None)
+    st.pop("turn_stop", None)
+    st.pop("wrapup", None)
     if kind != "review":
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
@@ -884,7 +902,11 @@ def guarded_path(path, st, paths):
             or any(fnmatch.fnmatchcase(path, pattern.removeprefix("./")) for pattern in st.get("guards", [])))
 
 
-DISABLED_TEST = re.compile(r"\b(?:skip|skipif|xfail|only)\b|@unittest\.skip\w*|@Disabled\b|\bt\.Skip\(", re.I)
+DISABLED_TEST = re.compile(
+    r"@unittest\.(?:skip\w*|expectedFailure)\b|\bself\.skipTest\s*\("
+    r"|\bpytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.skip\s*\("
+    r"|\.(?:skip|only)\s*\(|\b(?:xit|xdescribe)\s*\("
+    r"|@(?:Disabled|Ignore)\b|\bt\.Skip\s*\(", re.I)
 
 
 def guarded_changes(st):
@@ -967,6 +989,11 @@ def review_prompt(st, cfg=None):
     brief = TASKS / st["slug"] / "brief.md"
     ru = cfg.get("language", "en") == "ru"
     context = ""
+    if st.get("rounds"):
+        context += (("Начиная со второго ревью ищи регрессии, внесённые исправлениями, и невыполненные "
+                     "пункты «Готово, когда». Новые граничные случаи вне брифа отмечай только как P3.\n") if ru else
+                    ("From the second review onward, look for regressions introduced by the fixes and unmet "
+                     "acceptance criteria (Done when). Report new edge cases outside the brief only as P3.\n"))
     guarded = guarded_lines(guarded_changes(st))
     if guarded:
         context += "\n".join(guarded) + "\n"
@@ -1051,11 +1078,15 @@ def fix_prompt(st, review, check, cfg):
             prompt += (f"\n{finding['id']} [{finding['severity']}] {finding['file']}:{finding['line']} "
                        f"— {finding['title']}\n{finding['detail']}\nverify: {finding['verify']}\n")
     prompt += (("\n\nПроверь каждую находку по коду. Настоящие дефекты исправь, где разумно — с тестом. "
-                "Неверные отклони с причиной в одну строку. Закоммить и запушь изменения. "
+                "Неверные отклони с причиной в одну строку. Если находка требует непропорциональной "
+                "сложности ради случая вне «Готово, когда», отклони её с причиной out of scope "
+                "и вынеси в remaining. Закоммить и запушь изменения. "
                 "Верни итог по схеме работы; в findings укажи для каждой находки id, "
                 "decision fixed или rejected и note с пояснением. Если находок нет, findings пуст.\n") if ru else
                ("\n\nVerify every finding against the code. Fix real defects, adding a test where reasonable. "
-                "Reject incorrect findings with a one-line reason. Commit and push the changes. "
+                "Reject incorrect findings with a one-line reason. If a finding requires disproportionate "
+                "complexity for a case outside the acceptance criteria (Done when), reject it with the reason "
+                "out of scope and list it in remaining. Commit and push the changes. "
                 "Return the work result schema; in findings give each finding's id, decision fixed or rejected, "
                 "and an explanatory note. When there are no findings, use an empty findings array.\n"))
     return prompt
@@ -1340,18 +1371,105 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
     return None
 
 
-def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False):
+class TurnControl:
+    """Limits belong to a phase, surviving exec retries but excluding account waits."""
+
+    def __init__(self, minutes, repeat_limit):
+        self.minutes = minutes
+        self.seconds = None if minutes is None else minutes * MINUTE_SECONDS
+        self.elapsed = 0.0
+        self.repeat_limit = repeat_limit
+        self.failures = {}
+        self.reason = None
+
+    def expired(self, started):
+        if self.seconds is not None and self.elapsed + time.monotonic() - started >= self.seconds:
+            self.reason = {"outcome": "budget_exhausted", "minutes": self.minutes}
+            return True
+        return False
+
+    def repeated(self, event):
+        item = event.get("item") or {}
+        if event.get("type") != "item.completed" or item.get("type") != "command_execution":
+            return False
+        command, code = item.get("command"), item.get("exit_code")
+        if not isinstance(command, str) or type(code) is not int:
+            return False
+        if code == 0:
+            self.failures.pop(command, None)
+            return False
+        output = item.get("aggregated_output", "")
+        if not isinstance(output, str):
+            return False
+        digest = hashlib.sha256(output.encode("utf-8")[-2048:]).hexdigest()
+        signature = (code, digest)
+        previous, count = self.failures.get(command, (None, 0))
+        count = count + 1 if signature == previous else 1
+        self.failures[command] = (signature, count)
+        if count >= self.repeat_limit:
+            self.reason = {"outcome": "stuck", "command": command, "exit_code": code,
+                           "output_sha256": digest, "count": count}
+            return True
+        return False
+
+
+def turn_stop_message(reason):
+    if reason["outcome"] == "budget_exhausted":
+        return f"time budget {reason['minutes']:g} min exhausted"
+    return f"repeated failure ×{reason['count']}: {reason['command']}"
+
+
+def wrapup_prompt(st, reason, cfg):
+    ru = cfg.get("language", "en") == "ru"
+    reviewing = st.get("kind") == "review"
+    if reason["outcome"] == "budget_exhausted":
+        prompt = ("Время хода вышло. " if ru else "The turn's time budget has expired. ")
+        if st.get("kind") not in ("review", "scout"):
+            prompt += ("Закоммить то, что работает, и запушь. " if ru else
+                       "Commit what works and push it. ")
+        if not reviewing:
+            prompt += ("Коротко подведи итог со status partial и списком оставшегося в remaining. " if ru else
+                       "Give a short final result with status partial and a list of remaining work in remaining. ")
+    else:
+        prompt = ((f"Команда {reason['command']!r} упала одинаково {reason['count']} раз "
+                   f"(exit_code {reason['exit_code']}, SHA-256 хвоста вывода {reason['output_sha256']}). "
+                   "Остановись. Приложи числа и что пробовал. ") if ru else
+                  (f"Command {reason['command']!r} failed identically {reason['count']} times "
+                   f"(exit_code {reason['exit_code']}, output tail SHA-256 {reason['output_sha256']}). "
+                   "Stop. Report numerical evidence and what you tried. "))
+        if not reviewing:
+            prompt += "Короткий итог со status blocked. " if ru else "Give a short final result with status blocked. "
+    prompt += ("На сворачивание не больше 10 минут; не продолжай реализацию и не запускай ревью. " if ru else
+               "You have at most 10 minutes to wrap up; do not continue implementation or start a review. ")
+    if st.get("kind") in ("review", "scout"):
+        prompt += ("Режим только чтения: не меняй файлы, не коммить и не пушь. " if ru else
+                   "Stay read-only: do not change files, commit or push. ")
+    if reviewing:
+        prompt += (("Ответь JSON по схеме ревью: в findings верни находки, найденные к этому моменту; "
+                    "verdict defects, если находки есть, иначе clean. В summary отметь, что ревью не завершено.") if ru else
+                   ("Return JSON matching the review schema: include findings found so far in findings; "
+                    "use verdict defects if any findings exist, otherwise clean. In summary state that the review is incomplete."))
+    elif st.get("kind") != "scout":
+        prompt += "Ответь JSON по схеме работы." if ru else "Return JSON matching the work result schema."
+    return prompt
+
+
+def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
+            control=None, wrapup=False, wrapup_thread=None):
     """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
     d = TASKS / st["slug"]
     prepare_home(account)
     reviewing = st.get("kind") == "review"
-    thread = "" if reviewing else st.get("thread", "")
+    control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
+                                     else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
+                                     cfg.get("repeat_limit", 3))
+    thread = wrapup_thread if wrapup else "" if reviewing else st.get("thread", "")
     review_entry = None
     last = d / ("review.md" if reviewing else "last.md")
     if last.exists():
         last.unlink()
     args = [codex_binary(), "exec"]
-    if reviewing:
+    if reviewing and not wrapup:
         # Some CLI versions reject --base together with custom instructions.
         if not review_fallback:
             args += ["review", "--base", st["base"]]
@@ -1360,9 +1478,9 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         args += ["resume", thread, "--json", "-o", str(last)]
     else:
         args += ["--json", "-C", st["worktree"], "-o", str(last)]
-    if st.get("kind") == "scout":
+    if st.get("kind") == "scout" or (reviewing and wrapup):
         args += ["-c", 'sandbox_mode="read-only"']
-    else:
+    if st.get("kind") != "scout":
         schema = d / ("review-schema.json" if reviewing else "result-schema.json")
         schema.write_text(json.dumps(REVIEW_SCHEMA if reviewing else RESULT_SCHEMA, indent=2), encoding="utf-8")
         args += ["--output-schema", str(schema)]
@@ -1383,11 +1501,30 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
             return "stopped", None
         error_start = errors.tell()
         attempt_started = time.time()
+        active_started = time.monotonic()
         proc = subprocess.Popen(args, cwd=st["worktree"], env=account_env(account), stdin=subprocess.DEVNULL,
                                 stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
         st["codex_pid"] = proc.pid
         save(st)
         buf = b""
+
+        def quota_decision(local, why, allow_credits):
+            # Quota RPCs and reset-journal locks run while exec is still alive.
+            def cancelled():
+                return stopped() or control.expired(active_started)
+
+            try:
+                decision = on_limit(local, why, allow_credits, cancelled)
+            except RuntimeError:
+                if not cancelled():
+                    raise
+                decision = None
+            if stopped():
+                return "stopped", None
+            if control.expired(active_started):
+                return "budget_exhausted", None
+            return ("limit", decision) if decision is not None or not allow_credits else None
+
         try:
             with selectors.DefaultSelector() as sel:
                 sel.register(proc.stdout, selectors.EVENT_READ)
@@ -1396,6 +1533,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                     if stopped():
                         terminate(proc)
                         return "stopped", None
+                    if control.expired(active_started):
+                        return "budget_exhausted", None
                     for key, _ in sel.select(0.2):
                         chunk = os.read(key.fileobj.fileno(), 65536)
                         if not chunk:
@@ -1412,12 +1551,12 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                     continue
                                 if event.get("type") == "thread.started":
                                     thread = event["thread_id"]
-                                    if reviewing:
+                                    if reviewing and not wrapup:
                                         review_entry = {"account": account["name"], "thread": thread,
                                                         "started": attempt_started, "finished": None, "result": None,
                                                         "round": len(st.get("rounds", []))}
                                         st.setdefault("reviews", []).append(review_entry)
-                                    else:
+                                    elif not reviewing:
                                         st["thread"] = thread
                                     if not reviewing and not any(t["account"] == account["name"] and t["thread"] == thread for t in st["threads"]):
                                         st["threads"].append({"account": account["name"], "thread": thread, "started": time.time()})
@@ -1428,6 +1567,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                 if (event.get("type") == "item.completed"
                                         and (event.get("item") or {}).get("type") == "agent_message"):
                                     final_message = event["item"].get("text", "")
+                                if control.repeated(event):
+                                    return "stuck", None
                                 if limit_error(event):
                                     reason = "usage limit"
                                 if auth_error(event):
@@ -1435,10 +1576,15 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                 # `error` events also carry retries ("Reconnecting... 2/5") of turns that complete.
                                 if event.get("type") == "turn.failed":
                                     failed = True
+                    if wrapup:
+                        # A wrap-up gets one bounded attempt, without quota waits or retries.
+                        if authentication_failed or reason:
+                            return "failed", None
+                        continue
                     if authentication_failed:
                         return ("auth" if cfg["enabled"] else "failed"), None
                     if reason:
-                        return ("limit", on_limit(current_info, reason, False)) if cfg["enabled"] else ("failed", None)
+                        return quota_decision(current_info, reason, False) if cfg["enabled"] else ("failed", None)
                     if cfg["enabled"] and thread and proc.poll() is None:
                         now = time.monotonic()
                         if path is None and now >= next_search:
@@ -1454,18 +1600,21 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                             if limits is not None:
                                 current_info = dict(account, logged_in=True, limits=limits)
                                 if exhausted(current_info, cfg):
-                                    decision = on_limit(current_info, limit_reason(current_info, cfg), True)
+                                    decision = quota_decision(current_info, limit_reason(current_info, cfg), True)
                                     if decision is not None:
-                                        return "limit", decision
+                                        return decision
                 code = proc.wait()
         finally:
             try:
                 terminate(proc)
             finally:
+                control.elapsed += max(0, time.monotonic() - active_started)
                 proc.stdout.close()
                 st.pop("codex_pid", None)
                 message = last.read_text(encoding="utf-8").strip() if last.exists() else final_message
-                if review_entry is not None:
+                if wrapup:
+                    st["wrapup"]["result"] = parse_result(message, reviewing=reviewing)
+                elif review_entry is not None:
                     review_entry["finished"] = time.time()
                     review_entry["result"] = parse_result(message, reviewing=True)
                 elif not reviewing and st.get("kind") != "scout":
@@ -1476,13 +1625,50 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
             errors.seek(error_start)
             error = errors.read().decode("utf-8", errors="replace")
         if all(part in error for part in ("cannot be used with", "--base", "PROMPT")):
-            return monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=True)
+            return monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=True,
+                           control=control)
     return ("completed" if code == 0 and not failed else "failed"), None
+
+
+def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
+    """Publish the typed stop and allow exactly one short resume on its thread."""
+    st["turn_stop"] = dict(reason, at=time.time())
+    st["outcome"] = reason["outcome"]
+    st["review_skipped"] = reason["outcome"]
+    st["wrapup"] = {"outcome": "not_run", "result": None}
+    save(st)
+    notify(st, cfg, reason["outcome"], turn_stop_message(reason), account=account["name"], **reason)
+    thread = ((review_entry or {}).get("thread") if st.get("kind") == "review"
+              else st.get("thread"))
+    if not thread or stopped():
+        return
+    if st.get("kind") not in ("review", "scout"):
+        st["result"] = None
+    try:
+        result, _ = monitor(st, cfg, account, wrapup_prompt(st, reason, cfg), effort, stopped,
+                            lambda *args: None, control=TurnControl(10, cfg.get("repeat_limit", 3)),
+                            wrapup=True, wrapup_thread=thread)
+        st["wrapup"]["outcome"] = result
+    except (Exception, SystemExit) as exc:
+        st["wrapup"].update(outcome="failed", error=str(exc))
+    if st["wrapup"]["outcome"] != "completed":
+        st["wrapup"]["result"] = None
+        last = TASKS / st["slug"] / ("review.md" if st.get("kind") == "review" else "last.md")
+        last.unlink(missing_ok=True)
+    if st.get("kind") not in ("review", "scout"):
+        st["result"] = st["wrapup"]["result"]
+    elif review_entry is not None and st["wrapup"]["outcome"] == "completed":
+        review_entry.update(result=st["wrapup"]["result"], finished=time.time())
+    st["outcome"] = "stopped" if stopped() else reason["outcome"]
+    save(st)
 
 
 def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
     reviewing = st.get("kind") == "review"
+    minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
+               else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
+    control = TurnControl(minutes, cfg.get("repeat_limit", 3))
     visited = set()
     rotations = 0
     rotation = None
@@ -1524,8 +1710,8 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
         notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
-    def on_limit(local, reason, allow_credits):
-        infos = task_snapshots(st, cfg, stopped)
+    def on_limit(local, reason, allow_credits, cancelled):
+        infos = task_snapshots(st, cfg, cancelled)
         current = next((i for i in infos if i["name"] == account["name"]), {})
         if local and exhausted(local, cfg):
             # The RPC may lag the local rollout; keep its fresh credit balance.
@@ -1542,11 +1728,20 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
     while not stopped():
         st.pop("reset_reconciled", None)
         visited.add(account["name"])
-        result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit)
+        review_start = len(st.get("reviews", []))
+        result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control)
+        if result in ("auth", "limit") and control.expired(time.monotonic()):
+            result = "budget_exhausted"
         if result != "auth":
             st.setdefault("auth_failures", {})[account["name"]] = 0
         if stopped() or result == "stopped":
             st["outcome"] = "stopped"
+            break
+        if result in ("budget_exhausted", "stuck"):
+            reason = dict(control.reason, active_seconds=round(control.elapsed, 3))
+            reviews = st.get("reviews", [])[review_start:]
+            wrapup_turn(st, cfg, account, effort, stopped, reason,
+                        review_entry=reviews[-1] if reviews else None)
             break
         if result in ("completed", "failed") or not cfg["enabled"]:
             st["outcome"] = result
@@ -1751,6 +1946,9 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
             if review["verdict"] == "clean":
                 st["auto_fix_stop"] = "clean"
                 return
+            if review["findings"] and all(finding["severity"] == "P3" for finding in review["findings"]):
+                st["auto_fix_stop"] = "only P3"
+                return
         if len(st["rounds"]) >= st["fix_rounds"]:
             st["auto_fix_stop"] = "check " + failed_check["outcome"] if failed_check else "rounds_exhausted"
             return
@@ -1767,6 +1965,10 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         result = st.get("result")
         entry["decisions"] = result["findings"] if result is not None else []
         save(st)
+        if not stopped() and st.get("outcome") in ("budget_exhausted", "stuck"):
+            entry["check"] = saved_check(st, cfg, stopped, review_after=False)
+            save(st)
+            return
         if stopped() or st.get("outcome") != "completed":
             return
         if result is None or result["status"] != "done":
@@ -1823,7 +2025,9 @@ def cmd__run(a):
                 and pending.get("review_after") and st.get("outcome") == "completed"):
             st["review_skipped"] = "result " + work_result["status"]
             save(st)
-        if st.get("kind") not in ("review", "scout") and st.get("outcome") == "completed" and st.get("check") and not stopped():
+        if (st.get("kind") not in ("review", "scout")
+                and st.get("outcome") in ("completed", "budget_exhausted", "stuck")
+                and st.get("check") and not stopped()):
             check = saved_check(st, cfg, stopped, pending.get("review_after"))
         if (st.get("kind") != "scout" and st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
                 and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")):
@@ -1899,6 +2103,7 @@ def cmd_start(a):
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
+          "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
           "created": time.time(), "turns": 0}
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
@@ -1959,6 +2164,8 @@ def cmd_say(a):
     if not msg or not msg.strip():
         die("empty message")
     cfg = accounts_config()
+    minutes = getattr(a, "max_minutes", None)
+    st["max_turn_minutes"] = minutes if minutes is not None else cfg.get("max_turn_minutes")
     if a.no_check:
         st["check"] = None
         st["check_paths"] = []
@@ -2031,6 +2238,8 @@ def cmd_wait(a):
     state = "paused" if sleeping else "finished"
     print(f"== {a.slug}: turn {st.get('turns')} {state} after "
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
+    if st.get("turn_stop"):
+        print("== turn stopped: " + turn_stop_message(st["turn_stop"]))
     d = TASKS / a.slug
     if st.get("kind") != "review" or st.get("work_completed"):
         last = d / "last.md"
@@ -2038,7 +2247,8 @@ def cmd_wait(a):
             # Paused before any exec: the thread's last message belongs to an earlier turn.
             print("(Codex did not run this turn)")
         else:
-            raw = last.read_text().strip() if last.exists() else last_message(st) or "(no final message)"
+            raw = ("(no wrap-up result)" if st.get("wrapup", {}).get("outcome") not in (None, "completed")
+                   else last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
             print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
     for line in guarded_lines(guarded_changes(st)):
         print(line)
@@ -2084,9 +2294,12 @@ def cmd_wait(a):
             result = entry.get("result")
             if result is None:
                 print(heading)
-                print("== result: unknown (unstructured final message)")
-                review = d / "review.md"
-                print(review.read_text().strip() if review.exists() else "(no final review)")
+                if st.get("kind") == "review" and st.get("wrapup"):
+                    print("(review interrupted; no wrap-up result)")
+                else:
+                    print("== result: unknown (unstructured final message)")
+                    review = d / "review.md"
+                    print(review.read_text().strip() if review.exists() else "(no final review)")
             else:
                 count = len(result["findings"])
                 print(heading + (f" {count} defect{'s' if count != 1 else ''}" if count else " no defects"))
@@ -2296,6 +2509,16 @@ def check_timeout(value):
     return seconds
 
 
+def max_minutes(value):
+    try:
+        minutes = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("max minutes must be a positive finite number")
+    if not math.isfinite(minutes) or minutes <= 0:
+        raise argparse.ArgumentTypeError("max minutes must be a positive finite number")
+    return minutes
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -2306,6 +2529,7 @@ def main():
     s.add_argument("--base", default=None, help="default: the remote's default branch (origin/HEAD)")
     s.add_argument("--effort", default=None, help="default: model_reasoning_effort from ~/.codex/config.toml")
     s.add_argument("--parallel", action="store_true")
+    s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
     s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
                    help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
@@ -2325,6 +2549,7 @@ def main():
     s.add_argument("message", nargs="?")
     s.add_argument("--file")
     s.add_argument("--effort", default=None)
+    s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
     s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
                    help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")

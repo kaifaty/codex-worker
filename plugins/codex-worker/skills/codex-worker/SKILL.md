@@ -51,7 +51,7 @@ choose `references/rules.md` or `references/rules.ru.md`; `~/.codex/codex-worker
 replaces either file. Use that override for another
 language or your own rules; `{branch}` and `{base}` are replaced with the task's branch and PR target.
 
-The same language setting selects the scout, handoff, review, fix, and reset-continuation prompts written by
+The same language setting selects the scout, handoff, review, fix, wrap-up, and reset-continuation prompts written by
 the script. Scouts use their own read-only instructions instead of task rules. Account status output
 is always English. The old `~/.codex/claude-accounts.json` is read only
 when `codex-worker.json` is absent.
@@ -74,10 +74,10 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --review --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] --max-minutes M --review --fix-rounds 2 --check "<command from Checks>" [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; reads the existing directory (default `.`) with a read-only sandbox and creates no worktree or branch; `wait` prints its concise report |
 | Wait for the cycle | `wait <slug>` as a **background** Bash command: it re-invokes you when the full review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` disables inherited base tests |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M` and optionally `--review --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` disables inherited base tests |
 | First review | `review <slug> [--effort E]` (only when idle), then `wait`; `--review` on `start`/`say` runs it after a `done` result and a passing check, or an unstructured result for compatibility |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
@@ -91,6 +91,22 @@ The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
 
+Choose `--max-minutes M` for every implementation `start` and `say` according to the task's size;
+split a task whose safe budget would be very long. Without the flag, `max_turn_minutes` in
+`~/.codex/codex-worker.json` is the default; if both are absent, there is no time cap. The budget counts
+active exec time across account rotations, excluding reset sleeps and account waits. Reviews and
+scouts have their own `max_review_minutes` budget (default 30), which does not consume implementation
+time.
+
+The supervisor also detects repeated command failures: the same command, nonzero exit code, and
+last 2 KB of output must match `repeat_limit` times (default 3). Other commands do not reset the count;
+a successful run of that command does. Time exhaustion or repeated failure stops the exec process
+group and requests a wrap-up in the same thread, in the configured language. Time exhaustion asks
+for working changes to be committed and pushed, a `partial` result, and remaining work; repeated
+failure asks for a `blocked` result with numbers and attempts. The wrap-up has a 10-minute cap and
+is stopped if it reaches that cap. Outcomes are `budget_exhausted` and `stuck`, alongside
+`completed`, `failed`, and `stopped`. `wait` prints the stop reason followed by the wrap-up result.
+
 Scouts can run alongside tasks and in parallel without `--parallel`, one question per scout. `say`
 continues the same read-only thread; `--check`, `--review`, `--fix-rounds`, and `review` are unavailable
 for scouts.
@@ -102,7 +118,9 @@ automatic review. `--check-timeout SEC` defaults to 1800; output goes to the tas
 Failure or timeout skips the requested review, and `wait` shows the result and the last 40 output
 lines. Results of `partial`, `blocked`, or `needs_decision` also skip automatic review, with
 `review_skipped: "result <status>"`; the saved check still runs. Failed, stopped, and paused turns do
-not run checks. Inside an automatic fix cycle, an incomplete result stops immediately before checks.
+not run checks. A `budget_exhausted` or `stuck` outcome still runs the saved check as objective evidence,
+but skips automatic review and fix rounds. Inside an automatic fix cycle, other incomplete results
+stop immediately before checks.
 
 The supervisor guards test directories (`tests/`, `test/`, `__tests__/`, `spec/`), test filenames
 (`test_*`, `*_test.*`, `*.test.*`, `*.spec.*`), and CI paths (`.github/workflows/`,
@@ -125,16 +143,23 @@ across turns; `say --no-base-check` disables it.
 Use relative paths with `--base-check`: a command containing the task worktree's absolute path
 produces `== base tests: skipped (…)` and is not rerun.
 
-Use `start --review --fix-rounds 2 --check "<command from Checks>"` by default. `--fix-rounds N` on
+Use `start --max-minutes M --review --fix-rounds 2 --check "<command from Checks>"` by default.
+`--fix-rounds N` on
 `start` or `say` accepts 0–5, defaults to 0, and requires `--review`. Each round sends the review's
 findings directly to the implementation thread, with the same account rotation and reset waiting as
 `say`. Codex must verify each finding against the code, fix real defects with tests where useful,
-reject incorrect findings with a one-line reason, then commit and push. The saved check runs before
+reject incorrect findings with a one-line reason, then commit and push. A finding requiring
+disproportionate complexity for a case outside "Done when" must be rejected as `out of scope`, with
+the reason in its finding decision and the deferred work in `remaining`. The saved check runs before
 another review in a fresh thread. That review receives rejected findings and their reasons, with an
-instruction to explain any disagreement before raising them again.
+instruction to explain any disagreement before raising them again. From the second review onward,
+reviewers look for regressions introduced by fixes and unmet "Done when" conditions. New edge cases
+outside the brief are P3 only.
 
-The cycle stops on `clean`, the round limit, `partial`, `blocked`, `needs_decision`, or `stop`. A check
-failure after a fix spends the next available round on the last 40 lines of `check.log` instead of
+The cycle stops on `clean`, only P3 findings (`auto_fix_stop: "only P3"`), the round limit, `partial`,
+`blocked`, `needs_decision`, `budget_exhausted`, `stuck`, or `stop`. Claude decides how to handle the
+remaining P3 findings. A check failure after a fix spends the next available round on the last 40
+lines of `check.log` instead of
 review findings. If no round remains, it stops without another review. A single `wait` follows the
 cycle and prints round finding counts and decisions, rejected findings with reasons, check results,
 the latest review in full, a finding-count history, and the stop reason. If the task sleeps at a limit,
@@ -156,7 +181,8 @@ an argv list receiving the event JSON as its final argument. `notify_events` opt
 types. Hooks run asynchronously and write output or launch errors to the task's `notify.log`; see the
 README for examples.
 `review_done` includes the review's `round`; `turn_finished` fires once at the end of the whole cycle
-and includes `guarded_changed`, the number of changed guarded files.
+and includes `guarded_changed`, the number of changed guarded files, and the typed `outcome`, including
+`budget_exhausted` or `stuck`. Separate `budget_exhausted` and `stuck` events obey `notify_events` too.
 
 ## Multiple subscriptions
 
@@ -208,10 +234,14 @@ parallel, one question each, and `wait` for their reports. Verify key facts by r
 `file:line` locations; use `say` for follow-up questions.
 
 1. Write the brief to a temporary file outside the repository, such as the session scratchpad or a
-   temporary directory, so it cannot enter a checkout commit. Run `start --review --fix-rounds 2
+   temporary directory, so it cannot enter a checkout commit. Choose `--max-minutes M` by task size
+   and run `start --max-minutes M --review --fix-rounds 2
    --check "<command from Checks>"`, then one `wait` in the background for the whole cycle. Tell the
    user in a line what went to Codex and that you will report back; don't sit and poll.
-2. When `wait` returns, first read `result`. For `needs_decision`, decide yourself if the decision is
+2. When `wait` returns, first read the turn outcome and `result`. After `budget_exhausted`, use the
+   check, wrap-up, and remaining work to decide whether to continue with a budgeted `say` or split
+   the task. After `stuck`, investigate the repeated failure yourself or take it to the user; do not
+   start another automatic fix cycle. For `needs_decision`, decide yourself if the decision is
    within the task; otherwise ask the user, then send the decision with `say`. For `blocked`, resolve
    the blocker or take it to the user. For `partial`, send `say` with the next instructions. For
    `done`, read the check result and latest review from its fresh thread; if there was no
@@ -229,7 +259,9 @@ parallel, one question each, and `wait` for their reports. Verify key facts by r
    Follow the repo's review rules; use `/code-review` for big or risky PRs if available. Check its
    numbers against the "Done when" list. A passing check does not replace reading the diff.
 4. Found problems or findings left after the round limit → one `say` with all of them, each with what's
-   wrong, what to do and how it is checked; use `--review --fix-rounds 2` for another bounded cycle.
+   wrong, what to do and how it is checked; choose `--max-minutes M` and use `--review --fix-rounds 2`
+   for another bounded cycle. Decide yourself whether P3 findings and work rejected as `out of scope`
+   belong in a separate task.
    Record deferred work in issues when appropriate. Same stop rule: after two rounds on the same
    point, take it to the user.
 5. Good → merge per the repo's rules, then `clean`. Report to the user: what Codex did, what you checked,
