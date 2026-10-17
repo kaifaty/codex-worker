@@ -173,10 +173,13 @@ def execute():
     value = fixture()
     prompt = argv[-1]
     output = Path(argv[argv.index("-o") + 1]) if "-o" in argv else None
+    schema = Path(argv[argv.index("--output-schema") + 1]) if "--output-schema" in argv else None
     invocation = {"command": "exec", "resume": resumed, "review": review,
                   "prompt": prompt, "pid": os.getpid(), "ppid": os.getppid(),
                   "argv": sys.argv[1:], "cwd": os.getcwd(),
-                  "output": str(output) if output else None}
+                  "output": str(output) if output else None,
+                  "schema_path": str(schema) if schema else None,
+                  "output_schema": json.loads(schema.read_text()) if schema else None}
     if review and value.get("review_prompt_conflict"):
         trace(dict(invocation, thread="", mode="review_prompt_conflict"))
         print("error: the argument '--base <BRANCH>' cannot be used with '[PROMPT]'", file=sys.stderr,
@@ -291,6 +294,8 @@ def execute():
     for n in range(run.get("reconnects", 0)):
         emit({"type": "error", "message": f"Reconnecting... {n + 1}/5 (stream disconnected before completion)"})
     reply = run.get("reply", "done")
+    if not isinstance(reply, str):
+        reply = json.dumps(reply, ensure_ascii=False)
     message(reply)
     if output:
         output.write_text(reply + "\n")
@@ -637,6 +642,218 @@ class RotationTests(unittest.TestCase):
         index = argv.index('sandbox_mode="read-only"')
         self.assertGreater(index, 0)
         self.assertEqual(argv[index - 1], "-c")
+        self.assertNotIn("--output-schema", argv)
+        self.assertIsNone(invocation["schema_path"])
+        self.assertIsNone(invocation["output_schema"])
+
+    def work_result(self, status="done", **changes):
+        result = {"status": status, "summary": "Implemented the typed final result.",
+                  "checks": [{"command": "python3 -I tests/test_rotation.py", "outcome": "passed",
+                              "details": "3 tests passed, 0 failed"}],
+                  "pr": "https://example.test/pull/42", "questions": [], "remaining": []}
+        result.update(changes)
+        return result
+
+    def review_result(self, defects=True):
+        findings = [
+            {"id": "F1", "severity": "P2", "file": "src/parser.py", "line": 12,
+             "title": "Empty input raises an exception", "detail": "An empty line reaches the index lookup.",
+             "verify": "Pass an empty line and assert that parsing succeeds."},
+            {"id": "F2", "severity": "P3", "file": "src/format.py", "line": 7,
+             "title": "Summary loses the final word", "detail": "The slice excludes the last token.",
+             "verify": "Format three words and check that all three remain."}]
+        return {"verdict": "defects" if defects else "clean", "findings": findings if defects else [],
+                "summary": "Found two defects." if defects else "No defects found."}
+
+    def assert_output_schema(self, invocation, slug, review=False):
+        filename = "review-schema.json" if review else "result-schema.json"
+        expected = self.home / "claude-tasks" / slug / filename
+        self.assertIn("--output-schema", invocation["argv"])
+        self.assertEqual(invocation["schema_path"], str(expected))
+        schema = invocation["output_schema"]
+        self.assertEqual(schema, json.loads(expected.read_text()))
+
+        def strict(value):
+            if isinstance(value, dict):
+                if value.get("type") == "object" or "properties" in value:
+                    self.assertIs(value.get("additionalProperties"), False, value)
+                    self.assertCountEqual(value.get("required", []), value.get("properties", {}), value)
+                for child in value.values():
+                    strict(child)
+            elif isinstance(value, list):
+                for child in value:
+                    strict(child)
+
+        strict(schema)
+        self.assertEqual(schema["type"], "object")
+        properties = schema["properties"]
+        expected_fields = (set(self.review_result()) if review else set(self.work_result()))
+        self.assertEqual(set(properties), expected_fields)
+        field = "verdict" if review else "status"
+        choices = (["clean", "defects"] if review else
+                   ["done", "partial", "blocked", "needs_decision"])
+        self.assertCountEqual(properties[field]["enum"], choices)
+
+    def test_typed_work_result_prints_summary_checks_pr_and_persists_for_status(self):
+        self.configure()
+        self.configure_notify()
+        result = self.work_result()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": result}])
+        self.start("typed-done")
+        output = self.wait("typed-done")
+        self.assert_output_schema(self.invocations()[0], "typed-done")
+        self.assertEqual(self.state("typed-done")["result"], result)
+        self.assertRegex(output, r"min\n== result: done\n")
+        for text in (result["summary"], result["checks"][0]["command"], "passed",
+                     result["checks"][0]["details"], result["pr"]):
+            self.assertIn(text, output)
+        self.assertNotIn(json.dumps(result, ensure_ascii=False), output)
+        status = self.cli("status", "typed-done")
+        self.assertIn("done", status)
+        self.assertIn(result["summary"], status)
+        event = self.notification("typed-done", "turn_finished")
+        self.assertEqual(event["result"], result)
+        self.assertIn("done", event["message"])
+
+    def test_incomplete_results_skip_automatic_review_but_run_checks_and_request_input(self):
+        self.configure()
+        self.configure_notify()
+        for status, label in (("needs_decision", "NEEDS DECISION"), ("blocked", "BLOCKED"),
+                              ("partial", "PARTIAL")):
+            with self.subTest(status=status):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                questions = ["Which existing API should receive the result?", "Keep the legacy spelling?"]
+                result = self.work_result(status, questions=questions, remaining=["Connect the selected API."],
+                                          checks=[{"command": "fixture check", "outcome": "not_run",
+                                                   "details": "0 runs while awaiting a decision"}])
+                self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": result}])
+                slug = "typed-" + status.replace("_", "-")
+                before = len(self.invocations())
+                self.start(slug, "--review", "--check", "printf 'check complete\\n' > check-ran")
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(len(self.invocations()) - before, 1)
+                self.assert_output_schema(self.invocations()[-1], slug)
+                self.assertEqual(state["result"], result)
+                self.assertEqual(state["review_skipped"], "result " + status)
+                self.assertEqual(len(state["checks"]), 1)
+                self.assertEqual((Path(state["worktree"]) / "check-ran").read_text(), "check complete\n")
+                self.assertIn("== result: " + label, output)
+                self.assertIn("== review skipped: result " + status, output)
+                for number, question in enumerate(questions, 1):
+                    self.assertIn("%s. %s" % (number, question), output)
+                self.assertIn(result["remaining"][0], output)
+                self.assertEqual(self.notification(slug, "turn_finished")["result"], result)
+                if status in ("blocked", "needs_decision"):
+                    event = self.notification(slug, "needs_input")
+                    self.assertEqual(event["result"], result)
+                    self.assertEqual(event["question"], questions[0])
+                else:
+                    self.assertFalse(any(event["event"] == "needs_input" for event in self.notifications(slug)))
+
+    def test_unstructured_and_invalid_work_results_keep_legacy_automatic_review(self):
+        self.configure()
+        self.configure_notify()
+        invalid_results = ["Legacy final message without JSON", '{"status": "done"',
+                           self.work_result(status="finished"), self.work_result(extra="unexpected"),
+                           self.work_result(checks=[{"command": "check", "outcome": "passed"}]),
+                           self.work_result(checks=[{"command": "check", "outcome": "passed",
+                                                    "details": "1 passed", "extra": "unexpected"}]),
+                           self.work_result(questions="Choose the API")]
+        for number, result in enumerate(invalid_results):
+            with self.subTest(result=result):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": result},
+                    {"mode": "complete", "reply": "Legacy review remains readable"}])
+                slug = "typed-invalid-%s" % number
+                self.start(slug, "--review")
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertIsNone(state["result"])
+                self.assertEqual(len(state["reviews"]), 1)
+                self.assertIsNone(state["reviews"][0]["result"])
+                self.assertNotIn("review_skipped", state)
+                self.assertIn("== result: unknown (unstructured final message)", output)
+                raw = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False)
+                self.assertIn(raw, output)
+                self.assertIn("Legacy review remains readable", output)
+                self.assertIsNone(self.notification(slug, "turn_finished")["result"])
+
+    def test_typed_reviews_print_findings_and_clean_verdict_and_notify_counts(self):
+        self.configure()
+        self.configure_notify()
+        for defects in (True, False):
+            with self.subTest(defects=defects):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                result, review = self.work_result(), self.review_result(defects)
+                self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": result},
+                    {"mode": "complete", "reply": review}])
+                slug = "typed-review-" + ("defects" if defects else "clean")
+                self.start(slug, "--review")
+                output = self.wait(slug)
+                self.assert_output_schema(self.review_invocations()[-1], slug, review=True)
+                state = self.state(slug)
+                self.assertEqual(state["result"], result)
+                self.assertEqual(state["reviews"][-1]["result"], review)
+                expected = "2 defects" if defects else "no defects"
+                self.assertRegex(output, r"== review by main \(\d+(?:\.\d+)? min\): " + expected)
+                self.assertIn(review["summary"], output)
+                for finding in review["findings"]:
+                    self.assertIn("[{severity}] {id} {file}:{line} — {title}".format(**finding), output)
+                    self.assertIn(finding["detail"], output)
+                    self.assertIn(finding["verify"], output)
+                event = self.notification(slug, "review_done")
+                self.assertEqual(event["verdict"], review["verdict"])
+                self.assertEqual(event["findings"], len(review["findings"]))
+
+    def test_invalid_standalone_review_keeps_raw_text_and_the_working_result(self):
+        self.configure()
+        self.configure_notify()
+        result, review = self.work_result(), self.review_result()
+        review["findings"][0]["line"] = True  # A JSON boolean is not a schema integer.
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": result},
+            {"mode": "complete", "reply": review}])
+        self.start("typed-invalid-review")
+        self.wait("typed-invalid-review")
+        self.cli("review", "typed-invalid-review")
+        output = self.wait("typed-invalid-review")
+        state = self.state("typed-invalid-review")
+        self.assertEqual(state["result"], result)
+        self.assertIsNone(state["reviews"][-1]["result"])
+        self.assert_output_schema(self.review_invocations()[-1], "typed-invalid-review", review=True)
+        self.assertIn(json.dumps(review, ensure_ascii=False), output)
+        event = self.notification("typed-invalid-review", "review_done")
+        self.assertIsNone(event["verdict"])
+        self.assertEqual(event["findings"], 0)
+
+    def test_typed_say_resumes_with_schema_and_handoff_uses_summary_and_remaining(self):
+        self.configure()
+        first = self.work_result("partial", summary="Implemented the parser.",
+                                 remaining=["Add the empty-input case."])
+        second = self.work_result("partial", summary="Covered the empty-input case.",
+                                  remaining=["Document the output contract."])
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": first},
+            {"mode": "complete", "reply": second}])
+        self.start("typed-handoff")
+        self.wait("typed-handoff")
+        self.cli("say", "typed-handoff", "Continue with the input case.")
+        self.wait("typed-handoff")
+        executions = self.invocations()
+        self.assertTrue(executions[1]["resume"])
+        self.assertEqual(executions[1]["thread"], executions[0]["thread"])
+        for execution in executions:
+            self.assert_output_schema(execution, "typed-handoff")
+        self.account(self.home, "A", self.reset, used=99)
+        self.cli("say", "typed-handoff", "Finish the documentation.")
+        self.wait("typed-handoff")
+        rotated = self.invocations()[-1]
+        self.assertEqual(rotated["home"], str(self.other))
+        self.assertFalse(rotated["resume"])
+        self.assert_output_schema(rotated, "typed-handoff")
+        self.assertIn(second["summary"], rotated["prompt"])
+        self.assertIn(second["remaining"][0], rotated["prompt"])
+        self.assertNotIn(json.dumps(second, ensure_ascii=False), rotated["prompt"])
+        self.assertNotIn('"checks":', rotated["prompt"])
 
     def assert_scout_output(self, output):
         for section in ("commits on", "== uncommitted", "== check `", "== review"):
@@ -1727,6 +1944,8 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(fallback["cwd"], working["worktree"])
         self.assertEqual(Path(fallback["output"]).name, "review.md")
         self.assertEqual(fallback["prompt"], rejected["prompt"])
+        self.assert_output_schema(rejected, "review-fallback", review=True)
+        self.assert_output_schema(fallback, "review-fallback", review=True)
         self.assertIn("git diff " + working["base"], fallback["prompt"])
         self.assertEqual(fallback["ppid"], rejected["ppid"])
         state = self.state("review-fallback")
@@ -1758,6 +1977,8 @@ class RotationTests(unittest.TestCase):
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[1]["thread"], executions[0]["thread"])
         self.assertEqual(executions[1]["home"], str(self.home))
+        for execution in executions:
+            self.assert_output_schema(execution, "reset-resume")
         self.assertEqual(executions[1]["prompt"],
                          "Лимит подписки сбросился. Продолжай с того места, где остановился.")
         self.assertIn("Продолжение после сброса завершено", second)
@@ -2656,6 +2877,8 @@ with open(sys.argv[1], "a+") as journal:
                 self.assertEqual(executions[0]["thread"], executions[1]["thread"])
                 self.assertTrue(executions[1]["resume"])
                 self.assertEqual(executions[1]["home"], str(self.home))
+                for execution in executions:
+                    self.assert_output_schema(execution, slug)
                 self.assertEqual(executions[1]["prompt"], prompts[language])
                 self.assertIn("Recovered after authentication", output)
                 self.assertFalse(self.state(slug).get("needs_login"))
@@ -2679,6 +2902,8 @@ with open(sys.argv[1], "a+") as journal:
         executions = self.invocations()
         self.assertEqual(len(executions), 4)
         self.assertEqual([execution["review"] for execution in executions], [False, False, True, True])
+        for execution in executions:
+            self.assert_output_schema(execution, "auth-work-review-counter", review=execution["review"])
         self.assertTrue(all(execution["home"] == str(self.home) for execution in executions))
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[0]["thread"], executions[1]["thread"])
@@ -2698,6 +2923,8 @@ with open(sys.argv[1], "a+") as journal:
         self.assertEqual(executions[1]["prompt"], executions[0]["prompt"])
         self.assertIn(self.brief.read_text().strip(), executions[1]["prompt"])
         self.assertEqual(executions[1]["home"], str(self.home))
+        for execution in executions:
+            self.assert_output_schema(execution, "auth-before-thread")
         self.assertIn("Original task completed after early authentication failure", output)
         state = self.state("auth-before-thread")
         self.assertEqual(len(state["threads"]), 1)
