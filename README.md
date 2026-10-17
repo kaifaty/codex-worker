@@ -173,6 +173,8 @@ passing check, the supervisor reruns the command in a temporary detached worktre
 `HEAD`, with guarded files restored from the base (new files removed, deleted files restored), then
 removes that worktree. `wait` shows `== base tests: passed/FAILED` and a log tail. Failure is advisory:
 review still runs. The setting persists until `say --no-base-check` disables it.
+Literal `sh -c` commands are inspected recursively; a command expanded by the outer shell produces
+an explicit base-check failure when its paths cannot be safely relocated.
 
 ## Settings and language
 

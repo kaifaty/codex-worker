@@ -1546,6 +1546,46 @@ class RotationTests(unittest.TestCase):
         self.assertNotIn("src/a.py", guarded)
         self.assertEqual(state["checks"][-1]["outcome"], "passed")
 
+    def test_check_paths_find_assignments_options_and_literal_equals_paths(self):
+        files = {"scripts/verify.sh": "exit 0\n", "scripts/check=literal.sh": "exit 0\n",
+                 "config/check.toml": "enabled = true\n"}
+        self.commit_fixture(files)
+        command = ('CHECK_SCRIPT=scripts/verify.sh; EMPTY=; sh "$CHECK_SCRIPT" '
+                   '--config=config/check.toml scripts/check=literal.sh')
+        paths = self.worker().check_paths({"worktree": str(self.repo), "check": command})
+        self.assertEqual(paths, sorted(files))
+        self.assertNotIn(".", paths, "an empty assignment must not guard every repository file")
+
+    def test_check_assignment_script_is_guarded_restored_and_reviewed(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.commit_fixture({"scripts/verify.sh": "exit 1\n"})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"scripts/verify.sh": "exit 0\n"},
+             "commit_files": ["scripts/verify.sh"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        command = 'CHECK_SCRIPT=scripts/verify.sh; sh "$CHECK_SCRIPT"'
+        self.start("guarded-assignment", "--review", "--check", command, "--base-check")
+        output = self.wait("guarded-assignment")
+        state = self.state("guarded-assignment")
+        self.assertEqual(state["check"], command, "the saved command must remain unchanged")
+        self.assertEqual(state["check_paths"], ["scripts/verify.sh"])
+        check = state["checks"][-1]
+        self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
+        self.assertEqual((check["base_check"]["outcome"], check["base_check"]["exit"]), ("failed", 1))
+        self.assertIn("== guarded files changed: scripts/verify.sh (+1 −1)", output)
+        self.assertIn("== base tests: FAILED", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertIn("scripts/verify.sh", self.review_invocations()[0]["prompt"])
+        self.assertIn("Base tests: failed", self.review_invocations()[0]["prompt"])
+        self.assertLess(output.index("== base tests: FAILED"), output.index("== review by "))
+        self.assertEqual(self.notification("guarded-assignment", "turn_finished")["guarded_changed"], 1)
+        worktrees = self.git("worktree", "list", "--porcelain")
+        paths = {line[len("worktree "):] for line in worktrees.splitlines() if line.startswith("worktree ")}
+        self.assertEqual(paths, {str(self.repo), state["worktree"]})
+        self.assertNotIn("detached", worktrees)
+        self.assertEqual((Path(state["worktree"]) / "scripts/verify.sh").read_text(), "exit 0\n")
+
     def test_builtin_guards_cover_nested_tests_names_and_ci_and_untracked_files(self):
         self.configure(language="en")
         guarded_names = ("pkg/tests/a.py", "pkg/test/a.py", "pkg/__tests__/a.js", "pkg/spec/a.rb",
@@ -1611,12 +1651,14 @@ class RotationTests(unittest.TestCase):
         test_name = "tests/test a'quoted.py"
         base_test = ("import os\nfrom pathlib import Path\n"
                      "print('restored absolute test ran', flush=True)\n"
-                     "assert Path(os.environ['TASK_VALUE']).read_text() == 'expected\\n', 'base assertion failed'\n")
-        self.commit_fixture({test_name: base_test, "value.txt": "expected\n"})
+                     "assert Path(os.environ['TASK_VALUE']).read_text() == 'expected\\n', 'base input not restored'\n"
+                     "assert Path(os.environ['TASK_VALUE']).parent == Path(__file__).resolve().parents[1], 'environment path not relocated'\n"
+                     "assert Path('src/a.txt').read_text() == 'expected\\n', 'base assertion failed'\n")
+        self.commit_fixture({test_name: base_test, "value.txt": "expected\n", "src/a.txt": "expected\n"})
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "write_files": {
-                test_name: "print('weakened absolute test passed')\n", "value.txt": "broken\n"},
-             "commit_files": [test_name, "value.txt"]},
+                test_name: "print('weakened absolute test passed')\n", "value.txt": "broken\n", "src/a.txt": "broken\n"},
+             "commit_files": [test_name, "value.txt", "src/a.txt"]},
             {"mode": "complete", "reply": self.review_result(False)}])
         worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
         command = ("TASK_VALUE=" + shlex.quote(str(worktree / "value.txt")) + " " + shlex.quote(PYTHON)
@@ -1636,6 +1678,94 @@ class RotationTests(unittest.TestCase):
         self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
         self.assertEqual((worktree / "value.txt").read_text(), "broken\n")
         self.assertIn("weakened absolute test", (worktree / test_name).read_text())
+
+    def test_base_check_relocates_nested_shell_commands(self):
+        self.configure(language="en")
+        self.configure_notify()
+        test_name = "tests/test nested'a.py"
+        original = "print('restored nested base test', flush=True)\nassert False, 'nested base assertion'\n"
+        changed = "print('weakened nested test')\n"
+        self.commit_fixture({test_name: original})
+        runs = []
+        for _ in range(2):
+            runs.extend([{"mode": "complete", "write_files": {test_name: changed}, "commit_files": [test_name]},
+                         {"mode": "complete", "reply": self.review_result(False)}])
+        self.account(self.home, "A", self.reset, runs=runs)
+        for depth in (1, 2):
+            with self.subTest(depth=depth):
+                slug = "guarded-nested-" + str(depth)
+                worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
+                command = shlex.quote(PYTHON) + " -I " + shlex.quote(str(worktree / test_name))
+                for _ in range(depth):
+                    command = "sh -c " + shlex.quote(command)
+                self.start(slug, "--review", "--check", command, "--base-check")
+                output = self.wait(slug)
+                state = self.state(slug)
+                check = state["checks"][-1]
+                self.assertEqual(state["check"], command)
+                self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
+                self.assertEqual((check["base_check"]["outcome"], check["base_check"]["exit"]), ("failed", 1))
+                self.assertIn("restored nested base test", check["base_check"]["tail"])
+                self.assertIn("nested base assertion", check["base_check"]["tail"])
+                self.assertNotIn("weakened nested test", check["base_check"]["tail"])
+                self.assertIn("== base tests: FAILED", output)
+                self.assertEqual(len(self.review_invocations()), depth)
+                self.assertEqual(self.notification(slug, "turn_finished")["guarded_changed"], 1)
+                self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
+                self.assertEqual((worktree / test_name).read_text(), changed)
+
+    def test_nested_shell_relocation_preserves_flags_wrappers_and_string_data(self):
+        worker = self.worker()
+        source, target = self.root / "task 'source", self.root / "base 'target"
+        script = "scripts/verify nested's.sh"
+        for directory, label in ((source, "original"), (target, "base")):
+            (directory / "scripts").mkdir(parents=True)
+            (directory / script).write_text("printf '" + label + " check\\n'\n")
+        body = "sh " + shlex.quote(str(source / script))
+        display = "sh -c " + shlex.quote(body)
+        wrappers = ("sh -c ", "/bin/sh -ec ", "command sh -o errexit -c ",
+                    "env NESTED_CHECK=1 /bin/sh -e -c ",
+                    'ASSIGNED_VALUE="$NESTED_MARK" sh -c ',
+                    'env ASSIGNED_VALUE="$NESTED_MARK" sh -c ',
+                    "env 'ASSIGNED_VALUE=literal' sh -c ",
+                    'env "ASSIGNED_VALUE=$NESTED_MARK" sh -c ')
+        invocations = [wrapper + shlex.quote(body) for wrapper in wrappers]
+        invocations.append("sh -c " + shlex.quote(invocations[0]))
+        invocations.append("if true; then " + invocations[0] + "; fi")
+        invocations.append("check_fn() { " + invocations[0] + "; }; check_fn")
+        for invocation in invocations:
+            with self.subTest(invocation=invocation):
+                command = invocation + " && printf '%s\\n' " + shlex.quote(display)
+                relocated = worker.relocate_check_command(command, source, target)
+                result = subprocess.run(["/bin/sh", "-c", relocated], cwd=target, env=self.env,
+                                        text=True, capture_output=True, timeout=5)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual(result.stdout, "base check\n" + display + "\n")
+                self.assertIn(script, worker.check_paths({"check": command, "worktree": str(source)}))
+        assigned_body = "CHECK_SCRIPT=" + shlex.quote(str(source / script)) + '; sh "$CHECK_SCRIPT"'
+        self.assertIn(script, worker.check_paths({"check": "sh -c " + shlex.quote(assigned_body),
+                                                 "worktree": str(source)}))
+
+    def test_base_check_reports_expanded_nested_command_as_unverified(self):
+        self.configure(language="en")
+        self.commit_fixture({"tests/test_a.py": "assert False, 'original base test'\n"})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tests/test_a.py": "print('weakened test')\n"},
+             "commit_files": ["tests/test_a.py"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        slug = "guarded-expanded-shell"
+        worktree = self.home / "worktrees" / ("claude-" + slug) / self.repo.name
+        command = "CHECK_NAME=test_a.py; sh -c \"" + PYTHON + " -I " + str(worktree / "tests") + "/$CHECK_NAME\""
+        self.start(slug, "--review", "--check", command, "--base-check")
+        output = self.wait(slug)
+        check = self.state(slug)["checks"][-1]
+        self.assertEqual((check["outcome"], check["exit"]), ("passed", 0))
+        self.assertEqual(check["base_check"]["outcome"], "failed")
+        self.assertIsNone(check["base_check"]["exit"])
+        self.assertIn("cannot safely relocate an expanded shell -c command", check["base_check"]["tail"])
+        self.assertIn("== base tests: FAILED", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertNotIn("detached", self.git("worktree", "list", "--porcelain"))
 
     def test_relocated_check_preserves_shell_operators_options_and_external_paths(self):
         worker = self.worker()

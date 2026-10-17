@@ -838,18 +838,116 @@ def scout_prompt(question, cfg=None):
     return question.rstrip() + "\n\n" + rules
 
 
+SHELL_WORD = re.compile(r"""(?:[^\s;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\.)+""")
+SHELL_NAMES = {"sh", "bash", "dash", "zsh", "ksh"}
+
+
+def shell_literal_prefix(raw):
+    """Decode a shell word up to its first expansion, retaining the quote context."""
+    literal, quote, index = [], "", 0
+    while index < len(raw):
+        char = raw[index]
+        if char == quote:
+            quote = ""
+        elif char in "\"'" and not quote:
+            quote = char
+        elif char == "\\" and quote != "'" and index + 1 < len(raw):
+            following = raw[index + 1]
+            if not quote or following in '$`"\\\n':
+                if following != "\n":
+                    literal.append(following)
+                index += 2
+                continue
+            literal.append(char)
+        elif quote != "'" and (char in "$`" or (not quote and char in "*?[")):
+            break
+        else:
+            literal.append(char)
+        index += 1
+    return "".join(literal), quote, index
+
+
+def shell_script_words(command):
+    """Locate literal command arguments of shell -c invocations, not string data."""
+    at_command, shell, command_flag, end_options = True, False, False, False
+    wrapper, option_value = "", False
+    previous, comment_end = 0, -1
+    for match in SHELL_WORD.finditer(command):
+        if match.start() < comment_end:
+            continue
+        gap = command[previous:match.start()].replace("\\\n", "")
+        previous = match.end()
+        if re.search(r"[;&|()\n]", gap):
+            at_command, shell, command_flag, end_options = True, False, False, False
+            wrapper, option_value = "", False
+        raw = match.group()
+        if raw.startswith("#"):
+            newline = command.find("\n", match.end())
+            comment_end = len(command) if newline < 0 else newline
+            continue
+        value, quote, consumed = shell_literal_prefix(raw)
+        literal = consumed == len(raw) and not quote
+        if option_value:
+            option_value = False
+            continue
+        if at_command:
+            if literal and raw == value and value in ("!", "if", "then", "elif", "else", "while", "until", "do", "{"):
+                continue
+            assignment = re.match(r"[A-Za-z_][A-Za-z0-9_]*=", value)
+            if assignment and (raw.startswith(assignment[0]) or wrapper == "env"):
+                continue
+            if literal and value in ("env", "command", "exec"):
+                wrapper = value
+                continue
+            if wrapper and literal and value.startswith("-"):
+                if wrapper == "command" and value in ("-v", "-V"):
+                    at_command = False
+                option_value = ((wrapper == "env" and value in ("-u", "--unset", "-C", "--chdir"))
+                                or (wrapper == "exec" and value == "-a"))
+                continue
+            shell = literal and Path(value).name in SHELL_NAMES
+            at_command = False
+        elif shell:
+            if not end_options and literal and value.startswith("-"):
+                if value == "--":
+                    end_options = True
+                elif value in ("-o", "-O", "--rcfile", "--init-file"):
+                    option_value = True
+                elif not value.startswith("--") and "c" in value[1:]:
+                    command_flag = True
+                continue
+            if command_flag:
+                yield match, value if literal else None
+            shell = False
+
+
+def check_commands(command, depth=0):
+    """Inspect nested literal shell scripts without evaluating their expansions."""
+    yield command
+    if depth < 16:
+        for _, script in shell_script_words(command):
+            if script is not None:
+                yield from check_commands(script, depth + 1)
+
+
 def check_paths(st):
     """Read literal repository paths from the shell command without executing it."""
     paths = set(st.get("check_paths", []))
     root = Path(st["worktree"])
     try:
-        lexer = shlex.shlex(st.get("check") or "", posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
+        tokens = []
+        for command in check_commands(st.get("check") or ""):
+            lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+            lexer.whitespace_split = True
+            tokens.extend(lexer)
     except ValueError:
         return sorted(paths)
     for token in tokens:
-        candidate = token.split("=", 1)[-1] if token.startswith("-") and "=" in token else token
+        candidate = token
+        if "=" in token:
+            name, value = token.split("=", 1)
+            if token.startswith("-") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
+                candidate = value
         if not candidate:
             continue
         path = Path(os.path.abspath(root / candidate))
@@ -1597,37 +1695,27 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
 
-def relocate_check_command(command, source, target):
+def relocate_check_command(command, source, target, depth=0):
     """Move absolute path arguments into the base worktree, preserving shell syntax."""
     source = Path(os.path.abspath(source))
     target = Path(os.path.abspath(target))
-    word = re.compile(r"""(?:[^\s;&|<>()'"\\]+|'[^']*'|"(?:\\.|[^"\\])*"|\\.)+""")
+    if depth > 16:
+        raise ValueError("base check shell nesting exceeds 16 levels")
+    scripts = {}
+    for match, script in shell_script_words(command):
+        if script is None:
+            raise ValueError("base check cannot safely relocate an expanded shell -c command")
+        relocated = relocate_check_command(script, source, target, depth + 1)
+        if relocated != script:
+            scripts[match.start()] = shlex.quote(relocated)
 
     def relocate(match):
         raw = match.group()
+        if match.start() in scripts:
+            return scripts[match.start()]
         # Decode only the literal prefix. Keep expansions and their quote
         # context intact, rather than turning $variables or globs into text.
-        literal, quote, index = [], "", 0
-        while index < len(raw):
-            char = raw[index]
-            if char == quote:
-                quote = ""
-            elif char in "\"'" and not quote:
-                quote = char
-            elif char == "\\" and quote != "'" and index + 1 < len(raw):
-                following = raw[index + 1]
-                if not quote or following in '$`"\\\n':
-                    if following != "\n":
-                        literal.append(following)
-                    index += 2
-                    continue
-                literal.append(char)
-            elif quote != "'" and (char in "$`" or (not quote and char in "*?[")):
-                break
-            else:
-                literal.append(char)
-            index += 1
-        token = "".join(literal)
+        token, quote, index = shell_literal_prefix(raw)
         prefix, candidate = "", token
         if not token.startswith("/") and "=" in token:
             prefix, candidate = token.split("=", 1)
@@ -1645,7 +1733,7 @@ def relocate_check_command(command, source, target):
             replacement = shlex.quote(prefix + rebased)
         return replacement + quote + raw[index:]
 
-    return word.sub(relocate, command)
+    return SHELL_WORD.sub(relocate, command)
 
 
 def execute_check(st, stopped, cwd, filename, command=None):
@@ -1733,7 +1821,7 @@ def run_base_check(st, stopped):
                 if (worktree / ".git").exists():
                     subprocess.run(["git", "worktree", "remove", "--force", str(worktree)],
                                    cwd=st["worktree"], check=True, capture_output=True)
-    except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
+    except (OSError, ValueError, subprocess.CalledProcessError, SystemExit) as exc:
         detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         if isinstance(detail, bytes):
             detail = detail.decode("utf-8", errors="replace")
