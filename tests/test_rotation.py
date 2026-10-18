@@ -9223,6 +9223,44 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                          [(first_created, 2, 34, 3, "defects"), (second_created, 2, 74, 7, "clean")])
         self.assertEqual([row["created"] for row in report["tasks"]], [second_created, first_created])
 
+    def test_report_text_distinguishes_reused_slugs_and_repositories_in_local_time(self):
+        first_created = datetime.datetime(2026, 1, 2, 1, 34, tzinfo=datetime.timezone.utc).timestamp()
+        second_created = first_created + 25 * 3600
+        identities = [("repo", first_created), ("repo", second_created), ("other-repo", first_created)]
+        rows = [{"v": 1, "at": time.time() - 10, "repo": repo, "slug": "same-slug",
+                 "created": created, "phase": "work", "turn": 1, "outcome": "completed"}
+                for repo, created in identities]
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual(report["summary"]["tasks"], 3)
+        self.assertCountEqual([(task["repo"], task["created"]) for task in report["tasks"]], identities)
+        self.assertTrue(all("started" not in task for task in report["tasks"]))
+        for zone, first_started, second_started in (
+                ("UTC0", "01-02 01:34", "01-03 02:34"),
+                ("EST5", "01-01 20:34", "01-02 21:34")):
+            with self.subTest(TZ=zone):
+                self.env["TZ"] = zone  # Change only the CLI child's zone; tests run in parallel.
+                text = self.cli("report")
+                header, *task_lines = text.split("Tasks by cost:\n", 1)[1].splitlines()
+                self.assertEqual(header.split("  ")[:3], ["slug", "repo", "started"])
+                self.assertEqual(len(task_lines), 3)
+                self.assertCountEqual([line.split("  ")[:3] for line in task_lines],
+                                      [["same-slug", "repo", first_started],
+                                       ["same-slug", "repo", second_started],
+                                       ["same-slug", "other-repo", first_started]])
+
+    def test_report_text_shows_dash_when_created_is_unknown(self):
+        row = {"v": 1, "at": time.time() - 10, "repo": "repo", "slug": "legacy-slug",
+               "phase": "work", "started": time.time() - 100, "outcome": "completed"}
+        (self.home / "codex-worker-log.jsonl").write_text(json.dumps(row) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertIsNone(report["tasks"][0]["created"])
+        text = self.cli("report")
+        header, task_line = text.split("Tasks by cost:\n", 1)[1].splitlines()
+        self.assertEqual(header.split("  ")[:3], ["slug", "repo", "started"])
+        self.assertEqual(task_line.split("  ")[:3], ["legacy-slug", "repo", "-"])
+
     def test_report_legacy_turn_restart_splits_reused_slug_but_say_and_fix_stay_together(self):
         now = time.time()
         rows = []

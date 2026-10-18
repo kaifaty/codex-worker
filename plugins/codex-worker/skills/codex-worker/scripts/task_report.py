@@ -397,10 +397,13 @@ def render_report(report):
                          f"({account['tokens']['total']:,.0f} tokens, {account['turns']} turns)")
     else:
         lines.append("  none")
-    lines.extend(("", "Tasks by cost:", "slug  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop  auto-fix stop"))
+    lines.extend(("", "Tasks by cost:", "slug  repo  started  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop  auto-fix stop"))
     for task in report["tasks"]:
         budget = task["max_task_weekly_percent"]
-        lines.append(f"{task['slug']}  {task['turns']}  {task['rounds']}  {task['active_minutes']:.1f}  "
+        created = task["created"]
+        started = "-" if created is None else time.strftime("%m-%d %H:%M", time.localtime(created))
+        lines.append(f"{task['slug']}  {task['repo']}  {started}  "
+                     f"{task['turns']}  {task['rounds']}  {task['active_minutes']:.1f}  "
                      f"{task['tokens']['total']:,.0f}  {task['weekly_used_percent']:.2f}  "
                      f"{task['last_verdict'] or '-'}  "
                      + ("-" if budget is None else f"{budget:g}") + f"  {task['budget_stop'] or '-'}"

@@ -2,7 +2,10 @@
 
 Use `report` to check whether fix rounds and review angles pay for their cost before changing
 defaults. It prints persistent stage totals, then tasks ordered by weekly-window usage, then tokens.
+In `Tasks by cost`, `slug` is followed by `repo` (the repository directory name used by `--repo`)
+and `started` (task creation time in local time, `MM-DD HH:MM`, or `-` when unknown).
 Task rows include the task weekly budget and the budget stop kind (`minutes` or `weekly`).
+JSON task records retain the `created` timestamp.
 
 ## The journal
 
