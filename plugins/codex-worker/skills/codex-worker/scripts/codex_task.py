@@ -865,13 +865,13 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("auto_fix_escalations", None)
     st.pop("turn_stop", None)
     st.pop("wrapup", None)
-    st.pop("publish", None)
     st.pop("review_result", None)
     st.pop("review_angle", None)
     st.pop("refusal", None)
     st.pop("stop_request", None)
     st.pop("signal", None)
     if kind != "review":
+        st.pop("publish", None)
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
         proc = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "_run", st["slug"]],
@@ -2764,10 +2764,13 @@ def publish_pr(st, stopped):
         stage = "origin remote"
         remote_url = run(GIT + ["remote", "get-url", "origin"])
         stage = "gh repo view"
-        run([gh, "repo", "view", remote_url, "--json", "nameWithOwner"])
+        repository = json.loads(run([gh, "repo", "view", remote_url, "--json", "nameWithOwner"]))["nameWithOwner"]
         stage = "gh pr list"
         prs = json.loads(run([gh, "pr", "list", "--head", st["branch"], "--state", "all",
-                             "--json", "url,state", "--repo", remote_url]))
+                             "--json", "url,state,headRepository", "--repo", remote_url]))
+        # --head also matches fork branches with the same name.
+        prs = [item for item in prs if
+               (item.get("headRepository") or {}).get("nameWithOwner", "").casefold() == repository.casefold()]
         # Prefer the current open PR if this branch name has been reused.
         pr = next((item for item in prs if item["state"] == "OPEN"), prs[0] if prs else None)
         result = st.get("result") or {}
@@ -3231,7 +3234,7 @@ def cmd_wait(a):
     if st.get("sandbox") == "workspace":
         print("== sandbox: workspace")
     publication = st.get("publish")
-    if publication:
+    if publication and (st.get("kind") != "review" or st.get("work_completed")):
         if publication["sha"]:
             subject = sh(GIT + ["log", "-1", "--format=%s", publication["sha"]], cwd=st["worktree"], check=False)
             line = f"== committed {publication['sha']} " + json.dumps(subject, ensure_ascii=False)

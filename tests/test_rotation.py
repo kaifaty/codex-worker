@@ -454,15 +454,22 @@ if args[:2] == ["repo", "view"]:
         sys.exit(1)
     print(json.dumps({"nameWithOwner": "fixture/repo"}))
 elif args[:2] == ["pr", "list"]:
-    entry = state.get(branch, "")
-    if isinstance(entry, str):
-        entry = {"url": entry, "state": "OPEN"} if entry else {}
-    url = entry.get("url", "")
+    entries = state.get(branch, [])
+    if not isinstance(entries, list):
+        entries = [entries] if entries else []
+    prs = []
+    for entry in entries:
+        entry = {"url": entry, "state": "OPEN"} if isinstance(entry, str) else dict(entry)
+        entry.setdefault("number", 42)
+        entry.setdefault("headRepository", {"nameWithOwner": "fixture/repo"})
+        prs.append(entry)
     if "--jq" in args:
         expression = args[args.index("--jq") + 1]
-        print(("42 " + entry["state"] + " " + url if "number" in expression else url) if url else "")
+        print("\n".join(str(entry["number"]) + " " + entry["state"] + " " + entry["url"]
+                        if "number" in expression else entry["url"] for entry in prs))
     else:
-        print(json.dumps([dict(entry, number=42)] if url else []))
+        fields = args[args.index("--json") + 1].split(",")
+        print(json.dumps([{key: entry[key] for key in fields} for entry in prs]))
 elif args[:2] == ["pr", "create"]:
     if os.environ.get("CODEX_FAKE_GH_CREATE_ERROR"):
         print("fixture PR creation failed", file=sys.stderr)
@@ -1206,6 +1213,51 @@ class RotationTests(unittest.TestCase):
         self.assertIn("PR: " + publication["pr"], output)
         self.assertNotIn(result["pr"], output)
 
+    def test_pr_supervisor_ignores_fork_prs_with_the_same_branch_name(self):
+        self.configure(language="en")
+        for own_state in ("OPEN", "CLOSED", "MERGED", None):
+            with self.subTest(own_state=own_state):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                slug = "pr-head-repo-" + (own_state or "missing").lower()
+                own_url = "https://example.test/pull/42"
+                prs = [{"url": "https://example.test/pull/99", "state": "OPEN",
+                        "headRepository": {"nameWithOwner": "other/repo"}},
+                       {"url": "https://example.test/pull/98", "state": "OPEN",
+                        "headRepository": {"nameWithOwner": "fixture/another-repo"}},
+                       {"url": "https://example.test/pull/97", "state": "OPEN",
+                        "headRepository": None}]
+                if own_state:
+                    prs.append({"url": own_url, "state": own_state,
+                                "headRepository": {"nameWithOwner": "Fixture/Repo"}})
+                Path(self.env["CODEX_FAKE_GH_STATE"]).write_text(json.dumps({"codex/" + slug: prs}))
+                before = len(self.gh_writes())
+                result = self.work_result(pr_title="Publish our task", pr_body="Describe our complete PR.")
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {"tracked.txt": slug + "\n"},
+                    "commit_files": ["tracked.txt"], "push": True, "reply": result}])
+                self.start(slug)
+                self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "completed")
+                publication = state["publish"]
+                writes = self.gh_writes()[before:]
+                if own_state == "OPEN":
+                    self.assertEqual((publication["action"], publication["pr"]), ("updated", own_url))
+                    edit, = writes
+                    self.assertEqual(edit["argv"][:3], ["pr", "edit", own_url])
+                    self.assertEqual(edit["body"], result["pr_body"])
+                elif own_state:
+                    self.assertEqual((publication["action"], publication["pr"]), ("skipped", own_url))
+                    self.assertEqual(publication["error"], "pr " + own_state.lower())
+                    self.assertFalse(writes)
+                else:
+                    self.assertEqual(publication["action"], "created")
+                    create, = writes
+                    self.assertEqual(create["argv"][:2], ["pr", "create"])
+                    self.assertEqual(create["body"], result["pr_body"])
+                for foreign in prs[:3]:
+                    self.assertFalse(any(foreign["url"] in event["argv"] for event in writes))
+
     def test_pr_supervisor_fix_round_updates_only_with_a_nonempty_body(self):
         self.configure(language="en")
         for body in ("Describe the entire PR after fixing the defect.\n", ""):
@@ -1411,6 +1463,39 @@ class RotationTests(unittest.TestCase):
         self.assertIn("Generated with", attribution)
         self.assertIn("pr_body", attribution)
         self.assertNotIn("gh", rules)
+
+    def test_pr_standalone_review_preserves_receipt_without_replaying_publication(self):
+        for sandbox in ("off", "workspace"):
+            with self.subTest(sandbox=sandbox):
+                self.configure(language="en", sandbox=sandbox)
+                (self.home / "exec-count").unlink(missing_ok=True)
+                slug = "pr-review-receipt-" + sandbox
+                work = {"mode": "complete", "write_files": {"tracked.txt": slug + "\n"},
+                        "reply": self.work_result(pr_title="Keep the published task visible",
+                                                  pr_body="Describe the complete task.")}
+                if sandbox == "off":
+                    work.update(commit_files=["tracked.txt"], push=True)
+                self.account(self.home, "A", self.reset, runs=[
+                    work, {"mode": "complete", "reply": self.review_result(False)}])
+                self.start(slug)
+                work_output = self.wait(slug)
+                publication = self.state(slug)["publish"]
+                url = publication["pr"]
+                self.assertEqual(publication["action"], "created")
+                self.assertIn("== PR created " + url, work_output)
+                if sandbox == "workspace":
+                    self.assertIn("== committed ", work_output)
+                self.assertIn("PR: " + url, self.cli("status", slug))
+                writes = self.gh_writes()
+                self.cli("review", slug)
+                review_output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "completed")
+                self.assertEqual(state["publish"], publication)
+                self.assertIn("PR: " + url, self.cli("status", slug))
+                self.assertEqual(self.gh_writes(), writes)
+                self.assertNotIn("== PR created ", review_output)
+                self.assertNotIn("== committed ", review_output)
 
     def test_workspace_rotation_and_review_fallback_keep_the_sandbox_and_scout_stays_read_only(self):
         self.configure(language="en", sandbox="workspace", writable_dirs=[str(self.root / "cache")])
