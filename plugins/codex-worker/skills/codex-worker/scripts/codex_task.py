@@ -1823,8 +1823,13 @@ def warn_weekly_headroom(st, cfg, infos):
                   if info.get("logged_in") and not info.get("duplicate")
                   for used in [weekly_used(info.get("limits", {}))] if used is not None)
     if budget - st.get("weekly_used_percent", 0) > reserve:
-        st["weekly_budget_warning"] = (f"бюджет {budget:g}%, запас до switch_at по аккаунтам {reserve:g}%: "
-                                       "задача может уснуть до сброса")
+        if cfg.get("language", "en") == "ru":
+            warning = (f"бюджет {budget:g}%, запас до switch_at по аккаунтам {reserve:g}%: "
+                       "задача может уснуть до сброса")
+        else:
+            warning = (f"budget {budget:g}%, account headroom to switch_at {reserve:g}%: "
+                       "task may sleep until reset")
+        st["weekly_budget_warning"] = warning
 
 
 class TurnControl:

@@ -1964,6 +1964,24 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
         self.assertFalse(state["rotations"])
 
+    def test_weekly_budget_headroom_warning_uses_configured_language_and_defaults_to_english(self):
+        worker = self.worker()
+        infos = [{"logged_in": True, "limits": {"secondary": {"minutes": 10080, "used": 96}}},
+                 {"logged_in": True, "limits": {"secondary": {"minutes": 10080, "used": 96}}}]
+        english = "budget 10%, account headroom to switch_at 6%: task may sleep until reset"
+        russian = "бюджет 10%, запас до switch_at по аккаунтам 6%: задача может уснуть до сброса"
+        for language, expected in (("en", english), ("ru", russian), (None, english)):
+            with self.subTest(language=language):
+                cfg = {"switch_at": 99}
+                if language is not None:
+                    cfg["language"] = language
+                state = {"max_task_weekly_percent": 10, "weekly_used_percent": 0}
+                worker.warn_weekly_headroom(state, cfg, infos)
+                self.assertEqual(state["weekly_budget_warning"], expected)
+                state["weekly_used_percent"] = 5
+                worker.warn_weekly_headroom(state, cfg, infos)
+                self.assertNotIn("weekly_budget_warning", state)
+
     def test_weekly_budget_warns_only_when_remaining_budget_exceeds_account_reserve(self):
         self.configure()
         self.account(self.home, "A", self.reset, used=96, runs=[
