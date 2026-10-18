@@ -1704,6 +1704,100 @@ class RotationTests(unittest.TestCase):
                          ("budget_exhausted", 5, "weekly"))
         self.assertEqual(task["weekly_used_percent"], 6)
 
+    def test_final_weekly_budget_publishes_completed_workspace_work_before_check(self):
+        self.configure(language="en", sandbox="workspace")
+        subject = "Publish completed budgeted work"
+        result = self.work_result(commit_message=subject)
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": "completed implementation\n"},
+             "reply": result, "weekly_used_before": 10, "weekly_used_after": 16,
+             "final_usage_after_completion": True}])
+        command = ('test -z "$(git status --porcelain)" && '
+                   'test "$(git log -1 --format=%s)" = "' + subject + '"')
+        self.start("weekly-workspace-publish", "--max-weekly", "5", "--review", "--check", command)
+        output = self.wait("weekly-workspace-publish")
+        state = self.state("weekly-workspace-publish")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual((state["turn_stop"]["weekly"], state["turn_stop"]["spent"]), (5, 6))
+        self.assertEqual(state["weekly_used_percent"], 6)
+        self.assertEqual(state["result"], result)
+        self.assertEqual([(check["cmd"], check["outcome"]) for check in state["checks"]],
+                         [(command, "passed")])
+        publish = state["publish"]
+        self.assertEqual(publish["sha"], self.git("rev-parse", state["branch"]))
+        self.assertEqual(self.git("log", "-1", "--format=%s", state["branch"]), subject)
+        self.assertEqual(self.git("rev-list", "--count", state["branch"]), "2")
+        self.assertEqual(self.git("-C", state["worktree"], "status", "--porcelain"), "")
+        self.assertEqual(self.git("--git-dir", str(self.root / "origin.git"), "rev-parse", state["branch"]),
+                         publish["sha"])
+        self.assertTrue(publish["pushed"])
+        self.assertEqual(publish["pr"], "https://example.test/pull/1")
+        self.assertEqual(publish["error"], "")
+        self.assertEqual([event["argv"][:2] for event in self.gh_invocations()],
+                         [["pr", "list"], ["pr", "create"]])
+        self.assertIn("== committed " + publish["sha"] + " " + json.dumps(subject) +
+                      "; pushed; PR " + publish["pr"], output)
+        self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)
+        self.assertEqual(state["review_skipped"], "budget")
+        self.assertFalse(state.get("rounds"))
+        self.assertEqual(len(self.invocations()), 1, "publication must not need a wrap-up execution")
+        self.assertFalse(self.review_invocations())
+        task = json.loads(self.cli("report", "--slug", "weekly-workspace-publish", "--json"))["tasks"][0]
+        self.assertEqual((task["outcome"], task["max_task_weekly_percent"], task["budget_stop"]),
+                         ("budget_exhausted", 5, "weekly"))
+
+    def test_final_weekly_budget_publishes_completed_workspace_fix_before_check(self):
+        self.configure(language="en", sandbox="workspace")
+        first_subject = "Implement budgeted sandbox work"
+        fix_subject = "Fix budgeted sandbox review findings"
+        review = self.review_result()
+        decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed the reported defect."}
+                     for finding in review["findings"]]
+        result = self.work_result(commit_message=fix_subject, findings=decisions)
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": first_subject + "\n"},
+             "reply": self.work_result(commit_message=first_subject),
+             "weekly_used_before": 10, "weekly_used_after": 11},
+            {"mode": "complete", "reply": review,
+             "weekly_used_before": 11, "weekly_used_after": 12},
+            {"mode": "complete", "write_files": {"tracked.txt": fix_subject + "\n"},
+             "reply": result, "weekly_used_before": 12, "weekly_used_after": 16,
+             "final_usage_after_completion": True}])
+        command = ('test -z "$(git status --porcelain)" && '
+                   'test "$(git log -1 --format=%s)" = "$(cat tracked.txt)"')
+        self.start("weekly-workspace-fix", "--max-weekly", "5", "--review", "--fix-rounds", "2",
+                   "--check", command)
+        output = self.wait("weekly-workspace-fix")
+        state = self.state("weekly-workspace-fix")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual((state["turn_stop"]["weekly"], state["turn_stop"]["spent"]), (5, 6))
+        self.assertEqual(state["weekly_used_percent"], 6)
+        self.assertEqual(state["result"], result)
+        self.assertEqual(state["auto_fix_stop"], "budget")
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual(state["rounds"][0]["check"]["outcome"], "passed")
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertEqual(self.git("log", "-2", "--format=%s", state["branch"]).splitlines(),
+                         [fix_subject, first_subject])
+        self.assertEqual(self.git("rev-list", "--count", state["branch"]), "3")
+        self.assertEqual(self.git("-C", state["worktree"], "status", "--porcelain"), "")
+        publish = state["publish"]
+        self.assertEqual(publish["sha"], self.git("rev-parse", state["branch"]))
+        self.assertEqual(self.git("--git-dir", str(self.root / "origin.git"), "rev-parse", state["branch"]),
+                         publish["sha"])
+        self.assertTrue(publish["pushed"])
+        self.assertEqual(publish["pr"], "https://example.test/pull/1")
+        self.assertEqual(publish["error"], "")
+        self.assertEqual([event["argv"][:2] for event in self.gh_invocations()],
+                         [["pr", "list"], ["pr", "create"], ["pr", "list"]])
+        self.assertIn("== committed " + publish["sha"] + " " + json.dumps(fix_subject) +
+                      "; pushed; PR " + publish["pr"], output)
+        self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False])
+        self.assertTrue(self.invocations()[2]["resume"])
+        self.assertEqual(self.invocations()[0]["thread"], self.invocations()[2]["thread"])
+        self.assertEqual(len(self.sandbox_invocations()), 2)
+
     def test_weekly_budget_after_review_stops_fix_rounds_and_later_angles(self):
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[

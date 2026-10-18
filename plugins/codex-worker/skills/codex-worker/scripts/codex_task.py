@@ -2273,10 +2273,11 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             break
         if weekly_exhausted and result == "completed":
             # The model has finished: keep its result and account the phase once,
-            # then record the budget stop even when no automatic phase follows.
+            # publish completed workspace work, then record the budget stop.
             st["outcome"] = result
             if phase is not None:
                 phase.finish(outcome=result)
+            publish_work(st, stopped)
             stop_at_weekly_budget(st)
             break
         if result in ("budget_exhausted", "stuck"):
