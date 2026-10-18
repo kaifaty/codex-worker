@@ -153,8 +153,9 @@ The supervisor keeps numeric stage telemetry in `<CODEX_TASK_HOME>/codex-worker-
 (default `~/.codex/`); `clean` preserves it. Use `report` to compare review findings, check success,
 fix rounds to clean review, tokens, and weekly-window usage before changing rounds or angle defaults.
 Task rows also show the weekly budget and whether a budget stop was `minutes` or `weekly`.
-Quota sleeps are excluded from active time; weekly usage omits reset crossings and can include other
-activity on a shared account. `--json` exposes the same metrics for external reports; dates use UTC.
+Quota sleeps are excluded from active time; weekly usage counts advances of each account's high-water
+mark and can include other activity on a shared account. `report` sums recorded phase spend, with
+endpoint deltas as a fallback for older journals. `--json` exposes the same metrics; dates use UTC.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
 add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and
@@ -189,8 +190,9 @@ result with evidence. The typed turn outcome is `budget_exhausted` or `stuck`. `
 then the wrap-up. The saved check runs; automatic review and fix rounds do not.
 
 `--max-weekly P` on `start`, `say`, or `review` caps total task usage in percentage points of the
-weekly limit (0 < P ≤ 100), across all phases, follow-ups, and accounts. Reset crossings add zero,
-as in `report`. The default is `max_task_weekly_percent`, or no cap when unset. Exhaustion follows
+weekly limit (0 < P ≤ 100), across all phases, follow-ups, and accounts. Repeated or lower samples add
+zero; a reset timestamp advancing by more than an hour starts a new mark without charging that sample.
+The default is `max_task_weekly_percent`, or no cap when unset. Exhaustion follows
 the time-stop path, runs the saved check, and skips further automatic phases (`auto_fix_stop: "budget"`).
 `wait` prints `== turn stopped: weekly budget 10% exhausted (spent 10.4%)`. An exhausted task
 rejects `say` and `review` until `--max-weekly` exceeds its spend; consider splitting it before raising

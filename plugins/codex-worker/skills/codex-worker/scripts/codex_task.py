@@ -55,7 +55,6 @@ TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
 SKILL = Path(__file__).resolve().parent.parent
 STATS = Path(__file__).resolve().parent / "codex-stats.py"
-weekly_delta = runpy.run_path(str(Path(__file__).with_name("task_report.py")))["_weekly_delta"]
 # Tests can shorten polling without changing the default CLI intervals.
 RATE_POLL_SECONDS = float(os.environ.get("CODEX_TASK_RATE_POLL_SECONDS", "30"))
 ROLLOUT_SEARCH_SECONDS = float(os.environ.get("CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "5"))
@@ -926,21 +925,29 @@ def rollout_path(home, thread):
     return max(paths, key=lambda p: p.stat().st_mtime) if paths else None
 
 
-def rollout_limits(path):
-    """Read the tail only; tolerate a partial last JSON line during append."""
+def rollout_limits(path, on_limits=None):
+    """Replay quota samples when accounting; otherwise read only the latest tail."""
     with path.open("rb") as f:
         size = f.seek(0, os.SEEK_END)
-        f.seek(max(0, size - 262144))
+        f.seek(0 if on_limits else max(0, size - 262144))
         lines = f.read().splitlines()
-    for line in reversed(lines):
+    limits = None
+    for line in lines if on_limits else reversed(lines):
         try:
             event = json.loads(line)
-        except ValueError:
+            payload = event.get("payload") or {}
+            relevant = event.get("type") == "event_msg" and payload.get("type") == "token_count"
+            raw = payload.get("rate_limits") if relevant else None
+            parsed = normalize_limits(raw) if raw else None
+        except (ValueError, TypeError, AttributeError):
             continue
-        payload = event.get("payload") or {}
-        if event.get("type") == "event_msg" and payload.get("type") == "token_count" and payload.get("rate_limits"):
-            return normalize_limits(payload["rate_limits"])
-    return None
+        if parsed is not None:
+            limits = parsed
+            if on_limits:
+                on_limits(limits)
+            else:
+                return limits
+    return limits
 
 
 def telemetry_error(st, exc):
@@ -979,14 +986,9 @@ def rollout_usage(path, offset=0):
                                 sample["tokens"][key] = value
                         if type(weekly) in (int, float) and math.isfinite(weekly) and 0 <= weekly <= 100:
                             sample["weekly"] = weekly
-                            reset = window.get("resets_at", window.get("resetsAt"))
-                            if type(reset) in (int, float) and math.isfinite(reset):
-                                sample["weekly_reset"] = reset
                         if first is None:
                             first = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}
                             last = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}
-                            if "weekly_reset" in sample:
-                                first["weekly_reset"] = sample["weekly_reset"]
                         # Rate-limit-only notifications must not erase cumulative usage.
                         for key, value in sample["tokens"].items():
                             if value is not None:
@@ -996,12 +998,7 @@ def rollout_usage(path, offset=0):
                         if sample["weekly"] is not None:
                             if first["weekly"] is None:
                                 first["weekly"] = sample["weekly"]
-                                if "weekly_reset" in sample:
-                                    first["weekly_reset"] = sample["weekly_reset"]
                             last["weekly"] = sample["weekly"]
-                            last.pop("weekly_reset", None)
-                            if "weekly_reset" in sample:
-                                last["weekly_reset"] = sample["weekly_reset"]
                     except (ValueError, TypeError, AttributeError, OverflowError):
                         continue
         except OSError:
@@ -1068,6 +1065,7 @@ class PhaseTelemetry:
         self.stopped = stopped
         self.started, self.clock = time.time(), time.monotonic()
         self.sleep_seconds = 0.0
+        self.weekly_started = st.get("weekly_used_percent", 0)
         self.finished = False
         self.usage = []
         self.kind = st.get("kind", "work")
@@ -1077,35 +1075,11 @@ class PhaseTelemetry:
         self.rotation_start = len(st.get("rotations", []))
         self.check = None
 
-    def weekly_start(self, account, first, before=None, last=None):
-        start = (first or {}).get("weekly")
-        if start is None:
-            return (before or {}).get("weekly")
-        boundary = self.st.get("weekly_usage_boundaries", {}).get(account)
-        boundary_reset = self.st.get("weekly_usage_resets", {}).get(account)
-        for entry in reversed(self.usage):
-            if entry["account"] == account and entry.get("weekly_used_after") is not None:
-                boundary = entry["weekly_used_after"]
-                boundary_reset = entry.get("weekly_reset_after")
-                break
-        latest = last or first
-        reset = latest.get("weekly_reset")
-        # A reset starts a fresh interval, even if its samples have already
-        # passed the old percentage. A lower final sample also detects resets
-        # when the reset timestamp is missing or has not been updated yet.
-        if (boundary is None
-                or (reset is not None and boundary_reset is not None and reset > boundary_reset)
-                or (latest.get("weekly") is not None and latest["weekly"] < boundary)):
-            return start
-        # An opening sample may lag the previous phase's final notification.
-        # Only exclude the accounted portion within the same weekly window.
-        return max(start, boundary)
-
-    def add_usage(self, account, thread, before, path, offset):
+    def add_usage(self, account, thread, before, path, offset, weekly_spent=0):
         if not thread:
             return
         first, last = rollout_usage(path, offset)
-        weekly_before = self.weekly_start(account, first, before, last)
+        weekly_before = (first or before or {}).get("weekly")
         last = last or before
         tokens = {}
         for key in TOKEN_FIELDS:
@@ -1121,20 +1095,12 @@ class PhaseTelemetry:
                            "weekly_used_before": weekly_before,
                            "weekly_used_after": ((last or {}).get("weekly")
                                                  if (last or {}).get("weekly") is not None else weekly_before),
-                           "weekly_reset_after": (last or {}).get("weekly_reset")})
+                           "weekly_spent": weekly_spent})
 
     def finish(self, outcome=None, result=None):
         if self.finished:
             return
         self.finished = True
-        spent = self.st.get("weekly_used_percent", 0)
-        for entry in self.usage:
-            spent += weekly_delta(entry)
-            after = entry.get("weekly_used_after")
-            if type(after) in (int, float) and 0 <= after <= 100:
-                self.st.setdefault("weekly_usage_boundaries", {})[entry["account"]] = after
-                self.st.setdefault("weekly_usage_resets", {})[entry["account"]] = entry.get("weekly_reset_after")
-        self.st["weekly_used_percent"] = spent
         try:
             st = self.st
             reviewing = self.kind == "review"
@@ -1172,14 +1138,11 @@ class PhaseTelemetry:
                    "rotations": sum("from" in entry and "to" in entry
                                     for entry in st.get("rotations", [])[self.rotation_start:]),
                    "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
-                   "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage}
+                   "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage,
+                   "weekly_spent": st.get("weekly_used_percent", 0) - self.weekly_started}
             write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)
-
-    def weekly_spent(self):
-        return sum(weekly_delta(entry) for entry in self.usage)
-
 
 @contextmanager
 def record_phase(st, phase, stopped):
@@ -1652,6 +1615,9 @@ def exclude_auth_account(st, account, info):
 
 def task_snapshots(st, cfg, stopped, new_turn=False):
     infos = snapshots(cfg, stopped, prepare=True)
+    for info in infos:
+        if info.get("logged_in") and info["name"] not in st.get("weekly_marks", {}):
+            record_weekly_usage(st, info["name"], info.get("limits", {}))
     if cfg.get("use_reset_credits", False):
         for info in infos:
             if (stopped() or not info.get("logged_in") or info.get("duplicate")
@@ -1811,14 +1777,39 @@ def budget_stop(st):
 
 
 def weekly_used(limits):
-    windows = [limits.get(name) for name in ("primary", "secondary")]
-    window = max((w for w in windows if isinstance(w, dict)),
-                 key=lambda w: w.get("minutes") or 0, default={})
+    window = longest_window({"limits": limits})
     value = window.get("used")
     if ((window.get("minutes") or 0) >= 10080 and type(value) in (int, float)
             and math.isfinite(value) and 0 <= value <= 100):
         return value
     return None
+
+
+def record_weekly_usage(st, account, limits):
+    """Charge only advances of an account's high-water mark in its weekly window."""
+    used = weekly_used(limits)
+    if used is None:
+        return 0
+    reset = longest_window({"limits": limits}).get("reset")
+    if type(reset) not in (int, float) or not math.isfinite(reset):
+        reset = None
+    marks = st.setdefault("weekly_marks", {})
+    mark = marks.get(account)
+    if mark is not None and reset is not None and mark["reset"] is not None:
+        # Re-reading a rollout must not replay samples from an older window.
+        if reset < mark["reset"] - 3600:
+            return 0
+        if reset > mark["reset"] + 3600:
+            mark = None
+    if mark is None:
+        marks[account] = {"reset": reset, "used": used}
+        return 0
+    if mark["reset"] is None:
+        mark["reset"] = reset
+    delta = max(0, used - mark["used"])
+    mark["used"] = max(used, mark["used"])
+    st["weekly_used_percent"] = st.get("weekly_used_percent", 0) + delta
+    return delta
 
 
 def weekly_budget_exhausted(st):
@@ -2007,6 +1998,11 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     telemetry = telemetry_phase(st)
     usage_before = rollout_usage(path)[1] if telemetry is not None else None
     usage_offset = previous_size
+    weekly_started = st.get("weekly_used_percent", 0)
+
+    def record_limits(limits):
+        return record_weekly_usage(st, account["name"], limits)
+
     next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
     next_poll = 0.0
     reason = None
@@ -2142,20 +2138,13 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                             size = path.stat().st_size
                             if size == previous_size:
                                 continue
-                            limits = rollout_limits(path)
+                            limits = rollout_limits(path, record_limits)
                             previous_size = size
                             if limits is not None:
                                 # A completed model turn needs no wrap-up while the CLI exits.
                                 # The supervisor checks its final usage after monitor returns.
                                 if control.weekly is not None and not turn_completed:
-                                    first, latest = rollout_usage(path, usage_offset)
-                                    weekly_before = (telemetry.weekly_start(account["name"], first, last=latest)
-                                                     if telemetry else (first or {}).get("weekly"))
-                                    used = weekly_used(limits)
-                                    spent = (st.get("weekly_used_percent", 0)
-                                             + (telemetry.weekly_spent() if telemetry else 0)
-                                             + weekly_delta({"weekly_used_before": weekly_before,
-                                                             "weekly_used_after": used}))
+                                    spent = st.get("weekly_used_percent", 0)
                                     if spent >= control.weekly:
                                         pending_weekly_spent = spent
                                         queued = fcntl.ioctl(proc.stdout.fileno(), termios.FIONREAD, bytes(4))
@@ -2186,12 +2175,16 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                         review_entry.update(outcome="refused", refusal=refusal)
                 elif not reviewing and st.get("kind") != "scout":
                     st["result"] = None if refusal else parse_result(message)
-                if telemetry is not None:
-                    try:
+                try:
+                    final_path = path or rollout_path(account["home"], thread)
+                    if final_path is not None:
+                        rollout_limits(final_path, record_limits)
+                    if telemetry is not None:
                         telemetry.add_usage(account["name"], thread, usage_before,
-                                            path or rollout_path(account["home"], thread), usage_offset)
-                    except Exception as exc:
-                        telemetry_error(st, exc)
+                                            final_path, usage_offset,
+                                            st.get("weekly_used_percent", 0) - weekly_started)
+                except Exception as exc:
+                    telemetry_error(st, exc)
                 save(st)
     if reviewing and not review_fallback and not thread and code == 2:
         with (d / "stderr.log").open("rb") as errors:
@@ -2323,8 +2316,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control)
         phase = telemetry_phase(st)
         weekly_exhausted = (result in ("auth", "limit", "failed", "completed")
-                            and control.weekly_exhausted(
-                                st.get("weekly_used_percent", 0) + (phase.weekly_spent() if phase else 0)))
+                            and control.weekly_exhausted(st.get("weekly_used_percent", 0)))
         if weekly_exhausted and result != "completed":
             result = "budget_exhausted"
         if result in ("auth", "limit") and control.expired(time.monotonic()):

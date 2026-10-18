@@ -236,10 +236,18 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         segments = [entry for entry in usage if isinstance(entry, dict)] if isinstance(usage, list) else []
         if not segments:
             segments = [row]
+        # New phases record the task's increase directly; segment costs only
+        # attribute that increase to accounts. Endpoint deltas remain legacy.
+        weekly_spent = _number(row.get("weekly_spent"))
+        if weekly_spent is not None:
+            task["weekly_used_percent"] += weekly_spent
         touched = set()
         for segment in segments:
-            delta = _weekly_delta(segment)
-            task["weekly_used_percent"] += delta
+            delta = _number(segment.get("weekly_spent")) if weekly_spent is not None else None
+            if delta is None:
+                delta = _weekly_delta(segment)
+            if weekly_spent is None:
+                task["weekly_used_percent"] += delta
             name = _identifier(segment.get("account")) or _identifier(row.get("account"))
             if name is None:
                 continue
