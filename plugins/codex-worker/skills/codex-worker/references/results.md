@@ -35,17 +35,19 @@ original text.
 
 A turn ends as `completed`, `failed`, `refused`, `stopped`, `budget_exhausted` or `stuck`.
 
-- `budget_exhausted`: the turn used up its `--max-minutes` budget.
+- `budget_exhausted`: the turn used up its time budget, or the task used up its `--max-weekly` budget.
 - `stuck`: the same command failed with the same nonzero exit code and the same last 2 KB of output
   `repeat_limit` times. Other commands do not reset the count; a successful run of that command does.
 - `refused`: the model refused for possible cybersecurity risk; `wait` shows the first 200 characters
   of the refusal.
 
 After `budget_exhausted` or `stuck` the supervisor stops the exec process group and asks for a wrap-up
-in the same thread, in the configured language. Time exhaustion asks for working changes to be
+in the same thread, in the configured language. Time or weekly exhaustion asks for working changes to be
 committed and pushed, a `partial` result and the remaining work; repeated failure asks for a `blocked`
 result with numbers and attempts. The wrap-up has a 10-minute cap and is stopped when it reaches it.
-`wait` prints the stop reason, then the wrap-up result.
+`wait` prints the stop reason, then the wrap-up result. For a weekly stop it prints, for example,
+`== turn stopped: weekly budget 10% exhausted (spent 10.4%)`. The saved check runs; automatic review,
+angles, and fix rounds stop. Before increasing the task budget, decide whether to split the work.
 
 ## What `wait` prints
 

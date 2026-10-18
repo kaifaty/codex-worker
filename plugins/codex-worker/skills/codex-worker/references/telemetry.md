@@ -2,6 +2,7 @@
 
 Use `report` to check whether fix rounds and review angles pay for their cost before changing
 defaults. It prints persistent stage totals, then tasks ordered by weekly-window usage, then tokens.
+Task rows include the task weekly budget and the budget stop kind (`minutes` or `weekly`).
 
 ## The journal
 
@@ -17,7 +18,8 @@ Creation time identifies each task, so reusing a slug after `clean` produces a s
   checks and excludes quota sleeps.
 - Weekly usage sums positive within-stage account deltas, omitting reset crossings; shared account
   activity can affect these estimates. Missing rollout measurements stay null in the journal and add no
-  measured usage.
+  measured usage. The task weekly budget uses the same cumulative sum across phases and accounts,
+  including follow-ups and wrap-ups.
 - The rounds-to-clean distribution counts each task's first clean review round: every completed angle
   in that round must be clean and none interrupted. Model refusals follow the supervisor's merged
   verdict.

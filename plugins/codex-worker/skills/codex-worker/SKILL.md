@@ -60,8 +60,9 @@ stop after two failed attempts, push and open a PR but never merge, a typed JSON
 them in the brief.
 
 One task per brief; split independent parts into several tasks (stacked branches with `--base` when one
-builds on another). Decisions that belong to the user are not Codex's to make: put them in the brief as
-settled facts, or ask the user first.
+builds on another). Before starting, split any task that promises more than about 60 minutes of work.
+Decisions that belong to the user are not Codex's to make: put them in the brief as settled facts, or ask
+the user first.
 
 ## Commands
 
@@ -77,11 +78,11 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M --review [--review-angles LIST] --fix-rounds 2 --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M [--max-weekly P] --review [--review-angles LIST] --fix-rounds 2 --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; read-only in the existing directory (default `.`), no worktree or branch |
 | Wait for the cycle | `wait <slug> [--through-sleep]` as a **background** Bash command: it re-invokes you when the whole review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M` and optionally `--review [--review-angles LIST] --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
-| First review | `review <slug> [--effort E] [--review-angles LIST]` (only when idle), then `wait` |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M [--max-weekly P]` and optionally `--review [--review-angles LIST] --fix-rounds 2` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
+| First review | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` (only when idle), then `wait` |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
 | Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` |
@@ -99,13 +100,24 @@ Scouts need no `--parallel`: run several at once, one question each, alongside t
 scout's read-only thread; `--check`, `--review`, `--review-angles`, `--fix-rounds` and `review` don't
 apply to scouts. `clean` on a scout removes only its state and logs, never the inspected directory.
 
-## Time caps and checks
+## Budgets and checks
 
-Pass `--max-minutes M` on every implementation `start` and `say`, sized to the task; split a task whose
-safe budget would be very long. M counts active exec time across account rotations, not reset sleeps
-or account waits. Reviews and scouts have their own cap (`max_review_minutes`, 30 by default). The
+Pass `--max-minutes M` on every implementation `start` and `say`, sized to the task. M counts active
+exec time across account rotations, not reset sleeps or account waits. Reviews and scouts have their own cap (`max_review_minutes`, 30 by default). The
 supervisor also stops a turn that keeps repeating the same failing command, then asks for a wrap-up in
 the same thread.
+
+Use `--max-weekly P` (greater than 0 and at most 100) to cap the task in percentage points of the weekly
+limit. The task accumulates usage across follow-ups, work, reviews, angles, fix rounds, wrap-ups, and
+accounts. Each exec seeds its account's high-water mark without charge from the greater of the saved
+mark and a fresh baseline in the same window: the account-selection snapshot, or its first weekly
+sample when no snapshot is available. Gaps between execs are excluded. Repeated or lower samples add
+zero; a reset timestamp advancing by more than an hour starts a new mark without charging the reset sample.
+The budget counts growth of the account's weekly percentage during task phases; parallel tasks on one account count against each other, so allow extra budget for parallel work.
+The default is `max_task_weekly_percent`, or no weekly cap when
+unset. An exhausted task rejects `say` and `review` until `--max-weekly P` raises its budget above the
+measured spend. Exhaustion wraps up, runs the saved check, and skips further automatic phases. `status`
+and `wait` warn when the remaining budget exceeds account headroom up to `switch_at`.
 
 The saved check runs in the worktree after each completed implementation turn, before review. A failure
 or timeout skips the review, and `wait` shows the last 40 lines of `check.log`.
@@ -117,14 +129,15 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
 
 1. Write the brief to a file outside the repository (the session scratchpad or a temporary directory),
    so it cannot enter a checkout commit. Run
-   `start --max-minutes M --review --fix-rounds 2 --check "<command from Checks>"`, then one background
-   `wait` for the whole cycle. Add `--review-angles auto` for large or risky PRs (processes, concurrency,
+   `start --max-minutes M --max-weekly 10 --review --fix-rounds 2 --check "<command from Checks>"`, then
+   one background `wait` for the whole cycle. Add `--review-angles auto` for large or risky PRs (processes, concurrency,
    security), `--base-check` when behavior must stay the same (refactoring, optimization), and `--guard`
    for test files the check reaches only through `sh -c`. Tell the user in a line what went to Codex and
    that you will report back; don't sit and poll.
 2. When `wait` returns, read the turn outcome and `result` first:
-   - `budget_exhausted`: use the check, wrap-up and remaining work to decide between a budgeted `say`
-     and splitting the task.
+   - `budget_exhausted`: use the check, wrap-up and remaining work to decide whether to split the task
+     before raising an exhausted weekly budget with `say --max-weekly P`. For a time stop, choose a
+     budgeted `say` or split the task.
    - `stuck`: investigate the repeated failure yourself or take it to the user; do not start another
      automatic fix cycle.
    - `refused` (a model refusal for possible cybersecurity risk): it is not retried or rotated.
@@ -170,9 +183,9 @@ with a reason, then checks and reviews again.
 ## Stop rules
 
 - The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop: "only P3"`), the round
-  limit, a review where every angle refused (`auto_fix_stop: "review refused"`), `partial`, `blocked`,
-  `needs_decision`, `budget_exhausted`, `stuck`, `interrupted`, or `stop`. You decide what happens to remaining P3
-  findings.
+  limit, an exhausted task weekly budget (`auto_fix_stop: "budget"`), a review where every angle refused
+  (`auto_fix_stop: "review refused"`), `partial`, `blocked`, `needs_decision`, `budget_exhausted`, `stuck`,
+  `interrupted`, or `stop`. You decide what happens to remaining P3 findings.
 - After two rounds on the same point, take it to the user.
 - After `interrupted`, check the preserved worktree with `git status` and continue through `say`.
   If interruptions repeat, inspect the signal line in `stderr.log`.
