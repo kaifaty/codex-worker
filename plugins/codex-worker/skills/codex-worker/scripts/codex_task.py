@@ -58,6 +58,7 @@ TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
 SKILL = Path(__file__).resolve().parent.parent
 STATS = Path(__file__).resolve().parent / "codex-stats.py"
+ROLLOUT = runpy.run_path(str(Path(__file__).with_name("rollout.py")))
 # Tests can shorten polling without changing the default CLI intervals.
 RATE_POLL_SECONDS = float(os.environ.get("CODEX_TASK_RATE_POLL_SECONDS", "30"))
 ROLLOUT_SEARCH_SECONDS = float(os.environ.get("CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "5"))
@@ -74,8 +75,7 @@ RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
 TELEMETRY_PHASES = []
-TOKEN_FIELDS = {"input": "input_tokens", "cached_input": "cached_input_tokens",
-                "output": "output_tokens", "reasoning": "reasoning_output_tokens"}
+TOKEN_FIELDS = ROLLOUT["TOKEN_FIELDS"]
 GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 REVIEW_ANGLES = {
     "correctness": "Focus on behavior and acceptance criteria (Done when), including regressions and unmet requirements.",
@@ -938,12 +938,10 @@ def rollout_limits(path, on_limits=None, offset=0):
         f.seek(offset if on_limits else max(0, size - 262144))
         lines = f.read().splitlines()
     limits = None
-    for line in lines if on_limits else reversed(lines):
+    for event in ROLLOUT["read_events"](lines if on_limits else reversed(lines)):
         try:
-            event = json.loads(line)
-            payload = event.get("payload") or {}
-            relevant = event.get("type") == "event_msg" and payload.get("type") == "token_count"
-            raw = payload.get("rate_limits") if relevant else None
+            sample = ROLLOUT["decode_token_count"](event)
+            raw = sample.rate_limits if sample is not None and sample.event_type == "event_msg" else None
             parsed = normalize_limits(raw) if raw else None
         except (ValueError, TypeError, AttributeError):
             continue
@@ -970,26 +968,17 @@ def rollout_usage(path, offset=0):
     if path is not None:
         try:
             with path.open("rb") as stream:
-                stream.seek(offset)
-                for line in stream:
+                for event in ROLLOUT["read_events"](stream, offset):
                     try:
-                        event = json.loads(line)
-                        payload = event.get("payload") or {}
-                        if payload.get("type") != "token_count":
+                        decoded = ROLLOUT["decode_token_count"](event)
+                        if decoded is None:
                             continue
-                        usage = (payload.get("info") or {}).get("total_token_usage")
-                        windows = [window for window in
-                                   ((payload.get("rate_limits") or {}).get(name) for name in ("primary", "secondary"))
-                                   if isinstance(window, dict)]
+                        windows = [window for window in decoded.windows if isinstance(window, dict)]
                         window = max(windows, key=lambda w: w.get("window_minutes") or 0, default={})
                         used = window.get("used_percent")
                         # A short window cannot stand in for the weekly quota.
                         weekly = used if (window.get("window_minutes") or 0) >= 10080 else None
-                        sample = {"tokens": {key: None for key in TOKEN_FIELDS}, "weekly": None}
-                        for key, field in TOKEN_FIELDS.items():
-                            value = usage.get(field) if isinstance(usage, dict) else None
-                            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
-                                sample["tokens"][key] = value
+                        sample = {"tokens": decoded.tokens, "weekly": None}
                         if type(weekly) in (int, float) and math.isfinite(weekly) and 0 <= weekly <= 100:
                             sample["weekly"] = weekly
                         if first is None:
