@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
-  codex_task.py review <slug> [--effort E] [--review-angles LIST]  fresh review (task must be idle)
+  codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py review <slug> [--effort E] [--max-weekly P] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
@@ -16,10 +16,10 @@
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
 
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
-credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_review_minutes (30),
+credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
 review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
 Legacy claude-accounts.json is a fallback.
-Without an accounts setting, tasks use main (~/.codex) without quota monitoring or rotation.
+Without an accounts setting, tasks use main (~/.codex) without rotation; weekly budgets still monitor rollout usage.
 State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
 CODEX_TASK_HOME and CODEX_TASK_CODEX override the main home and CLI binary (also for tests).
 The internal _run <slug> supervisor survives the caller and opens a new thread on rotation.
@@ -54,6 +54,7 @@ TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
 SKILL = Path(__file__).resolve().parent.parent
 STATS = Path(__file__).resolve().parent / "codex-stats.py"
+weekly_delta = runpy.run_path(str(Path(__file__).with_name("task_report.py")))["_weekly_delta"]
 # Tests can shorten polling without changing the default CLI intervals.
 RATE_POLL_SECONDS = float(os.environ.get("CODEX_TASK_RATE_POLL_SECONDS", "30"))
 ROLLOUT_SEARCH_SECONDS = float(os.environ.get("CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "5"))
@@ -226,6 +227,7 @@ def accounts_config():
     cfg.setdefault("use_reset_credits", False)
     cfg.setdefault("reset_credit_min_hours", 12)
     cfg.setdefault("max_turn_minutes", None)
+    cfg.setdefault("max_task_weekly_percent", None)
     cfg.setdefault("max_review_minutes", 30)
     cfg.setdefault("review_angles_min_lines", 400)
     cfg.setdefault("repeat_limit", 3)
@@ -246,6 +248,10 @@ def accounts_config():
             die(key + " must be a positive finite number")
     if type(cfg["repeat_limit"]) is not int or cfg["repeat_limit"] < 1:
         die("repeat_limit must be a positive integer")
+    weekly = cfg["max_task_weekly_percent"]
+    if weekly is not None and (type(weekly) not in (int, float) or not 0 < weekly <= 100
+                               or not math.isfinite(weekly)):
+        die("max_task_weekly_percent must be a finite number in (0, 100]")
     if type(cfg["review_angles_min_lines"]) is not int or cfg["review_angles_min_lines"] < 1:
         die("review_angles_min_lines must be a positive integer")
     if cfg["language"] not in ("en", "ru"):
@@ -1035,7 +1041,9 @@ def record_turn_result(st, stopped):
                "turn": st.get("turns", 0), "round": len(st.get("rounds", [])),
                "account": current_turn_account(st), "started": st.get("turn_started"),
                "finished": st.get("turn_finished"), "outcome": st.get("outcome"),
-               "result_status": result.get("status"), "verdict": review.get("verdict")}
+               "result_status": result.get("status"), "verdict": review.get("verdict"),
+               "max_task_weekly_percent": st.get("max_task_weekly_percent"),
+               "budget_stop": budget_stop(st)}
         write_telemetry(st, row, stopped)
     except Exception as exc:
         telemetry_error(st, exc)
@@ -1085,6 +1093,10 @@ class PhaseTelemetry:
         if self.finished:
             return
         self.finished = True
+        spent = self.st.get("weekly_used_percent", 0)
+        for entry in self.usage:
+            spent += weekly_delta(entry)
+        self.st["weekly_used_percent"] = spent
         try:
             st = self.st
             reviewing = self.kind == "review"
@@ -1126,6 +1138,9 @@ class PhaseTelemetry:
             write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)
+
+    def weekly_spent(self):
+        return sum(weekly_delta(entry) for entry in self.usage)
 
 
 @contextmanager
@@ -1750,11 +1765,73 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
     return None
 
 
+def budget_stop(st):
+    reason = st.get("turn_stop") or {}
+    if reason.get("outcome") == "budget_exhausted":
+        return "weekly" if "weekly" in reason else "minutes"
+    return None
+
+
+def weekly_used(limits):
+    windows = [limits.get(name) for name in ("primary", "secondary")]
+    window = max((w for w in windows if isinstance(w, dict)),
+                 key=lambda w: w.get("minutes") or 0, default={})
+    value = window.get("used")
+    if ((window.get("minutes") or 0) >= 10080 and type(value) in (int, float)
+            and math.isfinite(value) and 0 <= value <= 100):
+        return value
+    return None
+
+
+def weekly_budget_exhausted(st):
+    budget = st.get("max_task_weekly_percent")
+    return budget is not None and st.get("weekly_used_percent", 0) >= budget
+
+
+def stop_at_weekly_budget(st):
+    """Do not admit another automatic phase once the completed phases used the budget."""
+    if not weekly_budget_exhausted(st):
+        return False
+    st.update(outcome="budget_exhausted", review_skipped="budget")
+    if budget_stop(st) != "weekly":
+        st["turn_stop"] = {"outcome": "budget_exhausted", "weekly": st["max_task_weekly_percent"],
+                           "spent": st["weekly_used_percent"], "at": time.time()}
+    if st.get("fix_rounds"):
+        st["auto_fix_stop"] = "budget"
+    return True
+
+
+def set_weekly_budget(st, value, cfg):
+    budget = (value if value is not None else
+              st.get("max_task_weekly_percent", cfg.get("max_task_weekly_percent")))
+    spent = st.get("weekly_used_percent", 0)
+    if budget is not None and spent >= budget:
+        die(f"weekly budget {budget:g}% exhausted (spent {spent:g}%); "
+            f"pass --max-weekly with a number greater than {spent:g}")
+    st["max_task_weekly_percent"] = budget
+    st.pop("weekly_budget_warning", None)
+
+
+def warn_weekly_headroom(st, cfg, infos):
+    """Use the quota snapshots already read for account selection, never another RPC."""
+    st.pop("weekly_budget_warning", None)
+    budget = st.get("max_task_weekly_percent")
+    if budget is None:
+        return
+    reserve = sum(cfg["switch_at"] - used for info in infos
+                  if info.get("logged_in") and not info.get("duplicate")
+                  for used in [weekly_used(info.get("limits", {}))] if used is not None)
+    if budget - st.get("weekly_used_percent", 0) > reserve:
+        st["weekly_budget_warning"] = (f"бюджет {budget:g}%, запас до switch_at по аккаунтам {reserve:g}%: "
+                                       "задача может уснуть до сброса")
+
+
 class TurnControl:
     """Limits belong to a phase, surviving exec retries but excluding account waits."""
 
-    def __init__(self, minutes, repeat_limit):
+    def __init__(self, minutes, repeat_limit, weekly=None):
         self.minutes = minutes
+        self.weekly = weekly
         self.seconds = None if minutes is None else minutes * MINUTE_SECONDS
         self.elapsed = 0.0
         self.repeat_limit = repeat_limit
@@ -1764,6 +1841,12 @@ class TurnControl:
     def expired(self, started):
         if self.seconds is not None and self.elapsed + time.monotonic() - started >= self.seconds:
             self.reason = {"outcome": "budget_exhausted", "minutes": self.minutes}
+            return True
+        return False
+
+    def weekly_exhausted(self, spent):
+        if self.weekly is not None and spent >= self.weekly:
+            self.reason = {"outcome": "budget_exhausted", "weekly": self.weekly, "spent": spent}
             return True
         return False
 
@@ -1794,6 +1877,8 @@ class TurnControl:
 
 def turn_stop_message(reason):
     if reason["outcome"] == "budget_exhausted":
+        if "weekly" in reason:
+            return f"weekly budget {reason['weekly']:g}% exhausted (spent {reason['spent']:g}%)"
         return f"time budget {reason['minutes']:g} min exhausted"
     return f"repeated failure ×{reason['count']}: {reason['command']}"
 
@@ -1802,7 +1887,11 @@ def wrapup_prompt(st, reason, cfg):
     ru = cfg.get("language", "en") == "ru"
     reviewing = st.get("kind") == "review"
     if reason["outcome"] == "budget_exhausted":
-        prompt = ("Время хода вышло. " if ru else "The turn's time budget has expired. ")
+        if "weekly" in reason:
+            prompt = ("Бюджет задачи на недельный лимит исчерпан. " if ru else
+                      "The task's weekly limit budget is exhausted. ")
+        else:
+            prompt = ("Время хода вышло. " if ru else "The turn's time budget has expired. ")
         if st.get("kind") not in ("review", "scout"):
             prompt += ("Закоммить то, что работает, и запушь. " if ru else
                        "Commit what works and push it. ")
@@ -1841,7 +1930,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     reviewing = st.get("kind") == "review"
     control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                                      else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
-                                     cfg.get("repeat_limit", 3))
+                                     cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
     thread = wrapup_thread if wrapup else "" if reviewing else st.get("thread", "")
     review_entry = None
     last = d / ("review.md" if reviewing else "last.md")
@@ -1875,11 +1964,13 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     telemetry = telemetry_phase(st)
     usage_before = rollout_usage(path)[1] if telemetry is not None else None
     usage_offset = previous_size
+    weekly_before = None
     next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
     next_poll = 0.0
     reason = None
     current_info = None
     failed = False
+    turn_completed = False
     authentication_failed = False
     refusal = None
     final_message = ""
@@ -1970,6 +2061,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                 # `error` events also carry retries ("Reconnecting... 2/5") of turns that complete.
                                 if event.get("type") == "turn.failed":
                                     failed = True
+                                if event.get("type") == "turn.completed":
+                                    turn_completed = True
                     if wrapup:
                         # A wrap-up gets one bounded attempt, without quota waits or retries.
                         if authentication_failed or reason:
@@ -1979,7 +2072,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                         return ("auth" if cfg["enabled"] else "failed"), None
                     if reason:
                         return quota_decision(current_info, reason, False) if cfg["enabled"] else ("failed", None)
-                    if cfg["enabled"] and thread and proc.poll() is None:
+                    if (cfg["enabled"] or control.weekly is not None) and thread and proc.poll() is None:
                         now = time.monotonic()
                         if path is None and now >= next_search:
                             path = rollout_path(account["home"], thread)
@@ -1992,8 +2085,21 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                             limits = rollout_limits(path)
                             previous_size = size
                             if limits is not None:
+                                # A completed model turn needs no wrap-up while the CLI exits.
+                                # Its final usage is enforced at the next phase boundary.
+                                if control.weekly is not None and not turn_completed:
+                                    if weekly_before is None:
+                                        first, _ = rollout_usage(path, usage_offset)
+                                        weekly_before = (first or {}).get("weekly")
+                                    used = weekly_used(limits)
+                                    spent = (st.get("weekly_used_percent", 0)
+                                             + (telemetry.weekly_spent() if telemetry else 0)
+                                             + weekly_delta({"weekly_used_before": weekly_before,
+                                                             "weekly_used_after": used}))
+                                    if control.weekly_exhausted(spent):
+                                        return "budget_exhausted", None
                                 current_info = dict(account, logged_in=True, limits=limits)
-                                if exhausted(current_info, cfg):
+                                if cfg["enabled"] and exhausted(current_info, cfg):
                                     decision = quota_decision(current_info, limit_reason(current_info, cfg), True)
                                     if decision is not None:
                                         return decision
@@ -2089,7 +2195,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     reviewing = st.get("kind") == "review"
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
-    control = TurnControl(minutes, cfg.get("repeat_limit", 3))
+    control = TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
     visited = set()
     rotations = 0
     rotation = None
@@ -2099,6 +2205,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     account = account_named(cfg, st["account"])
     if cfg["enabled"]:
         infos = task_snapshots(st, cfg, stopped, new_turn=new_turn)
+        warn_weekly_headroom(st, cfg, infos)
         current = next((i for i in infos if i["name"] == st["account"]), {})
         same_account = {i["name"] for i in infos if current.get("account_id")
                         and i.get("account_id") == current["account_id"]}
@@ -2151,6 +2258,10 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         visited.add(account["name"])
         review_start = len(st.get("reviews", []))
         result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control)
+        phase = telemetry_phase(st)
+        if result in ("auth", "limit") and control.weekly_exhausted(
+                st.get("weekly_used_percent", 0) + (phase.weekly_spent() if phase else 0)):
+            result = "budget_exhausted"
         if result in ("auth", "limit") and control.expired(time.monotonic()):
             result = "budget_exhausted"
         if result != "auth":
@@ -2441,6 +2552,8 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             if stopped():
                 st["outcome"] = stop_outcome(st, stopped)
                 break
+            if stop_at_weekly_budget(st):
+                break
             start = len(st.get("reviews", []))
             started = time.time()
             st.update(review_angle=angle, outcome="running")
@@ -2463,7 +2576,8 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             save(st)
             if outcome not in ("completed", "refused"):
                 break
-        if not stopped() and records and all(entry["outcome"] in ("completed", "refused") for entry in records):
+        if (not stopped() and st["outcome"] != "budget_exhausted" and records
+                and all(entry["outcome"] in ("completed", "refused") for entry in records)):
             st["outcome"] = "refused" if all(entry["outcome"] == "refused" for entry in records) else "completed"
     except (Exception, SystemExit):
         st["outcome"] = stop_outcome(st, stopped) or "failed"
@@ -2540,10 +2654,14 @@ def publish_work(st, stopped):
 def auto_fix(st, cfg, review, effort, stopped, sleep):
     """Bounded work/check/review loop under the original supervisor and wait."""
     failed_check = None
+    if stop_at_weekly_budget(st):
+        return
     if st.get("outcome") == "refused":
         st["auto_fix_stop"] = "review refused"
         return
     while not stopped() and st.get("outcome") == "completed":
+        if stop_at_weekly_budget(st):
+            return
         if failed_check is None:
             if review is None or any(entry["outcome"] == "completed" and entry.get("result") is None
                                      for entry in review.get("angles", [])):
@@ -2574,6 +2692,8 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         save(st)
         if not stopped() and st.get("outcome") in ("budget_exhausted", "stuck"):
             entry["check"] = saved_check(st, cfg, stopped, review_after=False)
+            if budget_stop(st) == "weekly":
+                st["auto_fix_stop"] = "budget"
             save(st)
             return
         if stopped() or st.get("outcome") != "completed":
@@ -2592,6 +2712,8 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
             continue
         failed_check = None
         st["work_completed"] = True
+        if stop_at_weekly_budget(st):
+            return
         next_angles = []
         if review and len(review.get("angles", [])) > 1:
             next_angles = ["correctness"]
@@ -2671,7 +2793,8 @@ def cmd__run(a):
                 and st.get("check") and not stopped()):
             check = saved_check(st, cfg, stopped, pending.get("review_after"))
         if (st.get("kind") != "scout" and st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
-                and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")):
+                and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")
+                and not stop_at_weekly_budget(st)):
             st["work_completed"] = True
             review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, stopped_flag.wait)
             if st.get("fix_rounds"):
@@ -2688,7 +2811,8 @@ def cmd__run(a):
             guarded_changed = len(guarded_changes(st)) if cfg is not None else 0
             st["outcome"] = stop_outcome(st, stopped) or st["outcome"]
             if st.get("fix_rounds") and (st["outcome"] != "completed" or not st.get("auto_fix_stop")):
-                st["auto_fix_stop"] = ("review refused" if st["outcome"] == "refused" and st.get("kind") == "review"
+                st["auto_fix_stop"] = ("budget" if budget_stop(st) == "weekly" else
+                                       "review refused" if st["outcome"] == "refused" and st.get("kind") == "review"
                                        else st["outcome"] if st["outcome"] != "completed"
                                        else st.get("review_skipped", "review unknown"))
             st.pop("sleeping", None)
@@ -2756,6 +2880,8 @@ def cmd_start(a):
           "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"],
           "review_angles": a.review_angles,
           "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
+          "max_task_weekly_percent": a.max_weekly if a.max_weekly is not None else cfg.get("max_task_weekly_percent"),
+          "weekly_used_percent": 0,
           "created": time.time(), "turns": 0}
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
@@ -2817,6 +2943,7 @@ def cmd_say(a):
     if not msg or not msg.strip():
         die("empty message")
     cfg = accounts_config()
+    set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     minutes = getattr(a, "max_minutes", None)
     st["max_turn_minutes"] = minutes if minutes is not None else cfg.get("max_turn_minutes")
     st["review_angles"] = angles
@@ -2842,6 +2969,7 @@ def cmd_review(a):
         die("scout is read-only; review is not supported")
     require_idle(st)
     cfg = accounts_config()
+    set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     st["review_angles"] = a.review_angles
     spawn(st, review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
     print(f"reviewing {a.slug}, pid {st['pid']}")
@@ -2864,6 +2992,8 @@ def cmd_wait(a):
         if st.get("pid") and not alive(st["pid"]):
             st["pid"] = None
             save(st)
+    if st.get("weekly_budget_warning"):
+        print(st["weekly_budget_warning"])
     for r in st["rotations"][st.get("rotation_start", 0):]:
         if r.get("event") == "sleep":
             print(f"== sleeping until {local_time(r['until'])} ({r['account'] or 'unknown'}): {r['reason']}")
@@ -3050,6 +3180,8 @@ def describe(st, detail):
     line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {location}  "
             f"account {account}  thread {thread[:13]}" + label
             + "  sandbox " + ("read-only" if scouting else st.get("sandbox", "off")))
+    if st.get("weekly_budget_warning"):
+        line += "\n" + st["weekly_budget_warning"]
     if not detail:
         return line
     if scouting:
@@ -3232,6 +3364,16 @@ def max_minutes(value):
     return minutes
 
 
+def max_weekly(value):
+    try:
+        weekly = float(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("max weekly must be a finite number in (0, 100]")
+    if not math.isfinite(weekly) or not 0 < weekly <= 100:
+        raise argparse.ArgumentTypeError("max weekly must be a finite number in (0, 100]")
+    return weekly
+
+
 def review_angles(value):
     if value == "auto":
         return value
@@ -3256,6 +3398,7 @@ def main():
     s.add_argument("--sandbox", choices=("off", "workspace"), default=None,
                    help="write sandbox for this task (default: sandbox setting, off)")
     s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
+    s.add_argument("--max-weekly", type=max_weekly, metavar="P", help="task weekly percentage point budget (default: max_task_weekly_percent setting)")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
     s.add_argument("--review-angles", type=review_angles, metavar="LIST",
                    help="review with comma-separated presets or auto (implies --review)")
@@ -3278,6 +3421,7 @@ def main():
     s.add_argument("--file")
     s.add_argument("--effort", default=None)
     s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
+    s.add_argument("--max-weekly", type=max_weekly, metavar="P", help="replace the task weekly percentage point budget")
     s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
     s.add_argument("--review-angles", type=review_angles, metavar="LIST",
                    help="review with comma-separated presets or auto (implies --review)")
@@ -3291,6 +3435,7 @@ def main():
     s = sub.add_parser("review")
     s.add_argument("slug")
     s.add_argument("--effort", default=None)
+    s.add_argument("--max-weekly", type=max_weekly, metavar="P", help="replace the task weekly percentage point budget")
     s.add_argument("--review-angles", type=review_angles, metavar="LIST",
                    help="comma-separated presets or auto (default: one review)")
     s = sub.add_parser("wait")

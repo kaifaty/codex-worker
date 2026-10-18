@@ -1,7 +1,8 @@
 # How reviews, angles and fix rounds run
 
 When to choose angles and fix rounds, and when the cycle stops, is in `SKILL.md`. This file covers what
-the supervisor does in between.
+the supervisor does in between. Before each automatic review, angle, or fix round, it checks the
+remaining task weekly budget. Exhaustion skips that phase and stops fixes with `auto_fix_stop: "budget"`.
 
 ## Automatic review
 

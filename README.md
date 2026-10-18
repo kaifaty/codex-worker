@@ -66,7 +66,7 @@ The skill handles these commands for Claude. To run them yourself, set `T` to th
 
 ```sh
 T="$HOME/.claude/skills/codex-worker/scripts/codex_task.py"
-python3 -I "$T" start csv-export --brief brief.md --max-minutes 45 --review --fix-rounds 2 --check "python3 -m unittest tests.test_csv_export"
+python3 -I "$T" start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --check "python3 -m unittest tests.test_csv_export"
 python3 -I "$T" wait csv-export
 python3 -I "$T" status csv-export
 ```
@@ -131,11 +131,11 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--review [--review-angles LIST] [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--max-weekly P] [--review [--review-angles LIST] [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M`, add `--review [--review-angles LIST] --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
-| `review <slug> [--effort E] [--review-angles LIST]` | Run the first review in a fresh Codex thread while the task is idle. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
+| `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` | Summarize persistent costs and outcomes by task, account, and period (default: seven days). |
@@ -152,6 +152,7 @@ The default base is the remote's default branch.
 The supervisor keeps numeric stage telemetry in `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
 (default `~/.codex/`); `clean` preserves it. Use `report` to compare review findings, check success,
 fix rounds to clean review, tokens, and weekly-window usage before changing rounds or angle defaults.
+Task rows also show the weekly budget and whether a budget stop was `minutes` or `weekly`.
 Quota sleeps are excluded from active time; weekly usage omits reset crossings and can include other
 activity on a shared account. `--json` exposes the same metrics for external reports; dates use UTC.
 
@@ -186,6 +187,14 @@ time exhaustion asks for commits, a push, and a `partial` result; repeated failu
 result with evidence. The typed turn outcome is `budget_exhausted` or `stuck`. `wait` prints
 `== turn stopped: time budget 90 min exhausted` or `== turn stopped: repeated failure ×3: <command>`,
 then the wrap-up. The saved check runs; automatic review and fix rounds do not.
+
+`--max-weekly P` on `start`, `say`, or `review` caps total task usage in percentage points of the
+weekly limit (0 < P ≤ 100), across all phases, follow-ups, and accounts. Reset crossings add zero,
+as in `report`. The default is `max_task_weekly_percent`, or no cap when unset. Exhaustion follows
+the time-stop path, runs the saved check, and skips further automatic phases (`auto_fix_stop: "budget"`).
+`wait` prints `== turn stopped: weekly budget 10% exhausted (spent 10.4%)`. An exhausted task
+rejects `say` and `review` until `--max-weekly` exceeds its spend; consider splitting it before raising
+the cap. `status` and `wait` warn if the remaining budget exceeds account headroom up to `switch_at`.
 
 ## Checks after each turn
 
@@ -245,6 +254,7 @@ A minimal configuration is:
 | `wait_for_reset` | `true` | When configured accounts are exhausted, wait for reset and continue; `false` stops instead. |
 | `max_turn_minutes` | Absent | Default active implementation exec budget for `start` and `say`; `--max-minutes M` overrides it. Unset means no time cap. |
 | `max_review_minutes` | `30` | Separate active exec budget for each review or scout turn. |
+| `max_task_weekly_percent` | Absent | Default task weekly budget for `start`; `--max-weekly P` overrides it, and `say` and `review` inherit the task budget. |
 | `review_angles_min_lines` | `400` | Changed-line threshold for `--review-angles auto`; counts `base..HEAD` and uncommitted changes. |
 | `repeat_limit` | `3` | Matching failures of the same command that trigger `stuck`; success for that command resets its count. |
 | `notify` | Absent | `"macos"` for desktop notifications, or an argv list that receives the event JSON as its final argument. |

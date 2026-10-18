@@ -123,6 +123,7 @@ def _task(repo, slug, created):
     return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
+            "max_task_weekly_percent": None, "budget_stop": None,
             "_reviews": {}, "_turns": [], "_latest_turn": 0}
 
 
@@ -296,6 +297,8 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             task["outcome"] = _identifier(final.get("outcome"))
             task["result_status"] = _identifier(final.get("result_status"))
             task["last_verdict"] = _identifier(final.get("verdict"))
+            task["max_task_weekly_percent"] = _number(final.get("max_task_weekly_percent"))
+            task["budget_stop"] = final.get("budget_stop") if final.get("budget_stop") in ("minutes", "weekly") else None
         elif groups:
             task["last_verdict"] = _review_verdict(groups[-1][1])
         if task["outcome"] is not None:
@@ -366,11 +369,13 @@ def render_report(report):
                          f"({account['tokens']['total']:,.0f} tokens, {account['turns']} turns)")
     else:
         lines.append("  none")
-    lines.extend(("", "Tasks by cost:", "slug  turns  rounds  minutes  tokens  weekly %  last verdict"))
+    lines.extend(("", "Tasks by cost:", "slug  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop"))
     for task in report["tasks"]:
+        budget = task["max_task_weekly_percent"]
         lines.append(f"{task['slug']}  {task['turns']}  {task['rounds']}  {task['active_minutes']:.1f}  "
                      f"{task['tokens']['total']:,.0f}  {task['weekly_used_percent']:.2f}  "
-                     f"{task['last_verdict'] or '-'}")
+                     f"{task['last_verdict'] or '-'}  "
+                     + ("-" if budget is None else f"{budget:g}") + f"  {task['budget_stop'] or '-'}")
     if not report["tasks"]:
         lines.append("(no tasks)")
     return "\n".join(lines)

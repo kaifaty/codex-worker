@@ -358,6 +358,12 @@ def execute():
         return 1
     if run["mode"] == "auth_error":
         return auth_failure()
+    if "weekly_update_after" in run:
+        deadline = time.monotonic() + run["weekly_update_after"]
+        while not stopped[0] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if not stopped[0]:
+            rollout_limits()
     deadline = time.monotonic() + run.get("delay", 0)
     while not stopped[0] and time.monotonic() < deadline:
         time.sleep(0.02)
@@ -384,10 +390,18 @@ def execute():
     message(reply)
     if output:
         output.write_text(reply + "\n")
+    completed = {"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}}
+    if run.get("final_usage_after_completion"):
+        # The model turn can finish before the CLI flushes its last quota
+        # sample and exits. Keep that shutdown window visible to the monitor.
+        emit(completed)
     if any(key in run for key in ("token_usage_before", "token_usage_after",
                                  "weekly_used_before", "weekly_used_after")):
         rollout_limits()
-    emit({"type": "turn.completed", "usage": {"input_tokens": 10, "output_tokens": 2}})
+    if run.get("final_usage_after_completion"):
+        time.sleep(0.2)
+    else:
+        emit(completed)
     return 0
 
 command = sys.argv[1]
@@ -1479,6 +1493,319 @@ class RotationTests(unittest.TestCase):
         report = json.loads(self.cli("report", "--slug", "time-cap", "--json"))
         self.assertEqual(report["summary"]["outcomes"], {"budget_exhausted": 1})
         self.assertEqual(report["summary"]["result_status"], {"partial": 1})
+        self.assertEqual(report["tasks"][0]["budget_stop"], "minutes")
+        self.assertIsNone(report["tasks"][0]["max_task_weekly_percent"])
+        self.assertEqual(next(row for row in self.telemetry_journal()
+                              if row["phase"] == "turn")["budget_stop"], "minutes")
+
+    def test_weekly_budget_kills_exec_group_wraps_same_thread_checks_and_skips_review(self):
+        self.configure()
+        result = self.work_result("partial", summary="Saved the weekly-budget checkpoint.",
+                                  remaining=["Complete the remaining integration."])
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "hold", "spawn_child": True, "weekly_used_before": 10,
+             "weekly_used_after": 20.4, "weekly_update_after": 0.35},
+            {"mode": "complete", "reply": result, "weekly_used_before": 20.4,
+             "weekly_used_after": 20.6, "write_files": {"weekly-wrapped.txt": "saved\n"}}])
+        self.start("weekly-cap", "--max-weekly", "10", "--review", "--fix-rounds", "2",
+                   "--check", "test -f weekly-wrapped.txt && printf 'checked\\n' > weekly-check")
+        self.until(lambda: any(event.get("command") == "exec-child" for event in self.trace()))
+        child = next(event["child_pid"] for event in self.trace() if event.get("command") == "exec-child")
+        self.extra_pids.add(child)
+        output = self.wait("weekly-cap", timeout=15)
+        state = self.state("weekly-cap")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["max_task_weekly_percent"], 10)
+        self.assertEqual(state["turn_stop"]["outcome"], "budget_exhausted")
+        self.assertEqual(state["turn_stop"]["weekly"], 10)
+        self.assertAlmostEqual(state["turn_stop"]["spent"], 10.4)
+        self.assertNotIn("minutes", state["turn_stop"])
+        self.assertAlmostEqual(state["weekly_used_percent"], 10.6)
+        self.assertEqual(state["result"], result)
+        self.assertEqual(state["checks"][-1]["outcome"], "passed")
+        self.assertEqual((Path(state["worktree"]) / "weekly-check").read_text(), "checked\n")
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertTrue(executions[1]["resume"])
+        self.assertEqual(executions[1]["thread"], executions[0]["thread"])
+        self.assert_output_schema(executions[1], "weekly-cap")
+        self.assertTrue(executions[1]["prompt"].startswith(
+            "Бюджет задачи на недельный лимит исчерпан."))
+        self.assertFalse(self.review_invocations())
+        self.assertIn("== turn stopped: weekly budget 10% exhausted (spent 10.4%)", output)
+        self.until(lambda: not self.process_is_live(child))
+        self.assertFalse(self.process_is_live(executions[0]["pid"]))
+        self.assertTrue(any(event.get("command") == "signal" and
+                            event.get("pid") == executions[0]["pid"] for event in self.trace()))
+        self.until(lambda: len(self.telemetry_journal()) == 4)
+        self.assertEqual([(row["phase"], row["outcome"]) for row in self.phase_telemetry_journal()],
+                         [("work", "budget_exhausted"), ("wrapup", "completed"), ("check", "passed")])
+        turn = next(row for row in self.telemetry_journal() if row["phase"] == "turn")
+        self.assertEqual((turn["max_task_weekly_percent"], turn["budget_stop"]), (10, "weekly"))
+        report = json.loads(self.cli("report", "--slug", "weekly-cap", "--json"))
+        task = report["tasks"][0]
+        self.assertEqual((task["max_task_weekly_percent"], task["budget_stop"]), (10, "weekly"))
+        self.assertAlmostEqual(task["weekly_used_percent"], state["weekly_used_percent"])
+        text = self.cli("report", "--slug", "weekly-cap")
+        self.assertIn("weekly", text)
+        self.assertIn("budget %", text)
+        self.assertRegex(text, r"weekly-cap\s+.*\s10\s+weekly")
+
+    def test_weekly_budget_usage_matches_report_across_accounts_say_and_reset(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 12},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 12, "weekly_used_after": 15}])
+        self.account(self.other, "B", self.reset + 3600, used=95, runs=[
+            {"mode": "complete", "reply": self.review_result(False),
+             "weekly_used_before": 95, "weekly_used_after": 2}])
+        self.start("weekly-accounts", "--max-weekly", "50")
+        self.wait("weekly-accounts")
+        self.assertEqual(self.state("weekly-accounts")["weekly_used_percent"], 2)
+        path = self.home / "fixture.json"
+        account = json.loads(path.read_text())
+        account["primary"]["resetsAt"] = self.reset + 7200
+        path.write_text(json.dumps(account))
+        self.cli("review", "weekly-accounts")
+        self.wait("weekly-accounts")
+        self.assertEqual(self.review_invocations()[0]["home"], str(self.other))
+        self.assertEqual(self.state("weekly-accounts")["weekly_used_percent"], 2,
+                         "a decrease across reset adds zero, as in task_report._weekly_delta")
+        self.cli("say", "weekly-accounts", "Continue the same task")
+        self.wait("weekly-accounts")
+        state = self.state("weekly-accounts")
+        self.assertEqual(state["weekly_used_percent"], 5)
+        self.assertEqual([event["home"] for event in self.invocations()],
+                         [str(self.home), str(self.other), str(self.home)])
+        report = json.loads(self.cli("report", "--slug", "weekly-accounts", "--json"))
+        self.assertEqual(state["weekly_used_percent"], report["tasks"][0]["weekly_used_percent"])
+        self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
+                         {"main": 5, "second": 0})
+
+    def test_weekly_budget_combines_live_usage_across_rotation_within_one_phase(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "usage_error", "weekly_used_before": 10, "weekly_used_after": 12}])
+        self.account(self.other, "B", self.reset + 3600, runs=[
+            {"mode": "hold", "weekly_used_before": 20, "weekly_used_after": 23.5,
+             "weekly_update_after": 0.35},
+            {"mode": "complete", "reply": self.work_result("partial"),
+             "weekly_used_before": 23.5, "weekly_used_after": 24}])
+        self.start("weekly-rotation", "--max-weekly", "5", "--review")
+        output = self.wait("weekly-rotation", timeout=15)
+        state = self.state("weekly-rotation")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["turn_stop"]["weekly"], 5)
+        self.assertEqual(state["turn_stop"]["spent"], 5.5)
+        self.assertEqual(state["weekly_used_percent"], 6)
+        self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 5.5%)", output)
+        executions = self.invocations()
+        self.assertEqual([event["home"] for event in executions],
+                         [str(self.home), str(self.other), str(self.other)])
+        self.assertNotEqual(executions[0]["thread"], executions[1]["thread"])
+        self.assertTrue(executions[2]["resume"])
+        self.assertEqual(executions[1]["thread"], executions[2]["thread"])
+        self.assertFalse(self.review_invocations())
+        report = json.loads(self.cli("report", "--slug", "weekly-rotation", "--json"))
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], state["weekly_used_percent"])
+        self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
+                         {"main": 2, "second": 4})
+
+    def test_weekly_budget_on_usage_error_wraps_without_waiting_for_subscription_reset(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "usage_error", "weekly_used_before": 10, "weekly_used_after": 16},
+            {"mode": "complete", "reply": self.work_result("partial"),
+             "weekly_used_before": 16, "weekly_used_after": 16}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.start("weekly-before-sleep", "--max-weekly", "5", "--review")
+        output = self.wait("weekly-before-sleep", timeout=12)
+        state = self.state("weekly-before-sleep")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["turn_stop"]["weekly"], 5)
+        self.assertEqual(state["turn_stop"]["spent"], 6)
+        self.assertEqual(state["weekly_used_percent"], 6)
+        self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)
+        executions = self.invocations()
+        self.assertEqual([event["home"] for event in executions], [str(self.home), str(self.home)])
+        self.assertTrue(executions[1]["resume"])
+        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
+        self.assertFalse(state.get("sleeping"))
+        self.assertFalse(state["rotations"])
+        self.assertFalse(self.review_invocations())
+
+    def test_weekly_budget_after_review_stops_fix_rounds_and_later_angles(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 12},
+            {"mode": "complete", "reply": self.review_result(),
+             "weekly_used_before": 12, "weekly_used_after": 15,
+             "final_usage_after_completion": True}])
+        self.start("weekly-between-phases", "--max-weekly", "5", "--fix-rounds", "2",
+                   "--review-angles", "correctness,concurrency")
+        self.wait("weekly-between-phases")
+        state = self.state("weekly-between-phases")
+        self.assertEqual(state["weekly_used_percent"], 5)
+        self.assertEqual(state["auto_fix_stop"], "budget")
+        self.assertFalse(state.get("rounds"))
+        self.assertEqual([entry["angle"] for entry in state["reviews"]], ["correctness"])
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True])
+        self.assertEqual(state["review_result"]["verdict"], "defects")
+
+    def test_weekly_budget_rejects_exhausted_say_and_review_until_budget_is_raised(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 15,
+             "final_usage_after_completion": True},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 15, "weekly_used_after": 16,
+             "final_usage_after_completion": True},
+            {"mode": "complete", "reply": self.review_result(False),
+             "weekly_used_before": 16, "weekly_used_after": 16.5}])
+        self.start("weekly-raise", "--max-weekly", "5", "--review")
+        self.wait("weekly-raise")
+        self.assertEqual(len(self.invocations()), 1, "automatic review must respect the task budget")
+        for args in (("say", "weekly-raise", "Continue"), ("review", "weekly-raise"),
+                     ("say", "weekly-raise", "Continue", "--max-weekly", "5")):
+            with self.subTest(args=args):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
+                                        env=self.env, text=True, capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                for word in ("budget", "spent", "5", "--max-weekly"):
+                    self.assertIn(word, result.stderr.lower())
+        self.assertEqual(len(self.invocations()), 1)
+        self.cli("say", "weekly-raise", "Continue with a larger task budget", "--max-weekly", "6")
+        self.wait("weekly-raise")
+        self.assertEqual(self.state("weekly-raise")["max_task_weekly_percent"], 6)
+        self.assertEqual(self.state("weekly-raise")["weekly_used_percent"], 6)
+        self.cli("review", "weekly-raise", "--max-weekly", "8")
+        self.wait("weekly-raise")
+        self.assertEqual(self.state("weekly-raise")["max_task_weekly_percent"], 8)
+        self.assertEqual(self.state("weekly-raise")["weekly_used_percent"], 6.5)
+        self.assertEqual(len(self.invocations()), 3)
+
+    def test_weekly_budget_polls_rollout_with_rotation_disabled(self):
+        (self.home / "codex-worker.json").write_text(json.dumps({"language": "en"}))
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "hold", "weekly_used_before": 30, "weekly_used_after": 32.5,
+             "weekly_update_after": 0.35},
+            {"mode": "complete", "reply": self.work_result("partial")}])
+        self.start("weekly-no-rotation", "--max-weekly", "2")
+        output = self.wait("weekly-no-rotation", timeout=12)
+        state = self.state("weekly-no-rotation")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertAlmostEqual(state["turn_stop"]["spent"], 2.5)
+        self.assertIn("== turn stopped: weekly budget 2% exhausted (spent 2.5%)", output)
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
+        self.assertIn("weekly", self.invocations()[1]["prompt"].split(".")[0].lower())
+        self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
+        self.assertFalse(state["rotations"])
+
+    def test_weekly_budget_warns_only_when_remaining_budget_exceeds_account_reserve(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, used=96, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 90, "weekly_used_after": 94},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 94, "weekly_used_after": 94}])
+        self.account(self.other, "B", self.reset + 3600, used=96)
+        self.start("weekly-reserve", "--max-weekly", "10")
+        output = self.wait("weekly-reserve")
+        warning = "бюджет 10%, запас до switch_at по аккаунтам 6%: задача может уснуть до сброса"
+        self.assertEqual(self.state("weekly-reserve")["weekly_budget_warning"], warning)
+        self.assertEqual(output.count(warning), 1)
+        self.assertEqual(self.cli("status", "weekly-reserve").count(warning), 1)
+        reads = [event for event in self.trace() if event.get("command") == "quota-snapshot"]
+        self.assertEqual(len(reads), 2, "the warning reuses the account-selection snapshots")
+        self.assertEqual(self.state("weekly-reserve")["weekly_used_percent"], 4)
+        self.cli("say", "weekly-reserve", "Five percentage points remain", "--max-weekly", "9")
+        output = self.wait("weekly-reserve")
+        self.assertFalse(self.state("weekly-reserve").get("weekly_budget_warning"))
+        self.assertNotIn("запас до switch_at", output)
+        self.assertNotIn("запас до switch_at", self.cli("status", "weekly-reserve"))
+        self.assertEqual(len([event for event in self.trace()
+                              if event.get("command") == "quota-snapshot"]), 4)
+
+    def test_weekly_budget_uses_config_default_and_flag_overrides_persist_for_the_task(self):
+        self.configure(language="en", max_task_weekly_percent=5)
+        (self.home / "codex-worker.json").write_text((self.home / "claude-accounts.json").read_text())
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 12},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 12, "weekly_used_after": 13},
+            {"mode": "complete", "reply": self.review_result(False),
+             "weekly_used_before": 13, "weekly_used_after": 14},
+            {"mode": "complete", "reply": self.work_result()}])
+        self.start("weekly-config")
+        self.wait("weekly-config")
+        self.assertEqual(self.state("weekly-config")["max_task_weekly_percent"], 5)
+        self.cli("say", "weekly-config", "Raise the task budget", "--max-weekly", "9")
+        self.wait("weekly-config")
+        self.assertEqual(self.state("weekly-config")["max_task_weekly_percent"], 9)
+        self.cli("review", "weekly-config")
+        self.wait("weekly-config")
+        self.assertEqual(self.state("weekly-config")["max_task_weekly_percent"], 9,
+                         "a follow-up without the flag keeps the task's overridden budget")
+        self.start("weekly-start-override", "--max-weekly", "11")
+        self.wait("weekly-start-override")
+        self.assertEqual(self.state("weekly-start-override")["max_task_weekly_percent"], 11)
+
+    def test_weekly_budget_rejects_invalid_flags_and_settings_before_starting_a_turn(self):
+        self.configure(language="en")
+        for value in ("0", "-1", "100.1", "nan", "inf", "-inf", "invalid"):
+            with self.subTest(command="start", value=value):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "weekly-invalid",
+                                         "--brief", str(self.brief), "--repo", str(self.repo),
+                                         "--max-weekly=" + value], cwd=self.repo, env=self.env,
+                                        text=True, capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("max-weekly", result.stderr)
+                self.assertFalse((self.home / "claude-tasks" / "weekly-invalid").exists())
+        self.start("weekly-valid", "--max-weekly", "100")
+        self.wait("weekly-valid")
+        for command in ("say", "review"):
+            for value in ("0", "-1", "101", "nan", "inf"):
+                with self.subTest(command=command, value=value):
+                    args = [command, "weekly-valid"] + (["Continue"] if command == "say" else [])
+                    result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + args + ["--max-weekly=" + value],
+                                            cwd=self.repo, env=self.env, text=True, capture_output=True,
+                                            timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("max-weekly", result.stderr)
+        for value in (0, -1, 101, True, "10"):
+            with self.subTest(setting=value):
+                self.configure(language="en", max_task_weekly_percent=value)
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "weekly-invalid-setting",
+                                         "--brief", str(self.brief), "--repo", str(self.repo)],
+                                        cwd=self.repo, env=self.env, text=True,
+                                        capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("max_task_weekly_percent", result.stderr)
+                self.assertFalse((self.home / "claude-tasks" / "weekly-invalid-setting").exists())
+        self.assertEqual(len(self.invocations()), 1)
+
+    def test_weekly_usage_accumulates_across_say_without_a_task_budget(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 12},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 12, "weekly_used_after": 14}])
+        self.start("weekly-unbounded")
+        self.wait("weekly-unbounded")
+        self.cli("say", "weekly-unbounded", "Continue the task without a weekly cap")
+        self.wait("weekly-unbounded")
+        state = self.state("weekly-unbounded")
+        self.assertIsNone(state.get("max_task_weekly_percent"))
+        self.assertEqual(state["weekly_used_percent"], 4)
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(len(self.invocations()), 2)
 
     def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
