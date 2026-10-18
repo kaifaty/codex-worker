@@ -6011,6 +6011,42 @@ worker.reap_notifications = reap
         self.assertIn("Ревью через обычный exec", output)
         self.assertNotIn("== errors:", output)
 
+    def test_review_fallback_reuses_selection_snapshot_for_weekly_budget(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, used=8, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 8, "weekly_used_after": 8},
+            {"mode": "complete", "reply": self.review_result(False),
+             "weekly_used_before": 10, "weekly_used_after": 12,
+             "final_usage_after_completion": True}])
+        slug = "review-fallback-weekly"
+        self.start(slug, "--max-weekly", "3")
+        self.wait(slug)
+        self.assertEqual(self.state(slug).get("weekly_used_percent", 0), 0)
+        fixture_path = self.home / "fixture.json"
+        fixture = json.loads(fixture_path.read_text())
+        fixture["review_prompt_conflict"] = True
+        fixture_path.write_text(json.dumps(fixture))
+        self.cli("review", slug)
+        output = self.wait(slug)
+        executions = self.invocations()
+        self.assertEqual(len(executions), 3)
+        rejected, fallback = executions[1:]
+        self.assertEqual(rejected["mode"], "review_prompt_conflict")
+        self.assertFalse(rejected["thread"])
+        self.assertFalse(fallback["review"])
+        self.assertEqual(fallback["prompt"], rejected["prompt"])
+        state = self.state(slug)
+        self.assertEqual(state["weekly_used_percent"], 4)
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual((state["turn_stop"]["weekly"], state["turn_stop"]["spent"]), (3, 4))
+        self.assertIn("== turn stopped: weekly budget 3% exhausted (spent 4%)", output)
+        self.assertEqual([row["weekly_spent"] for row in self.phase_telemetry_journal()], [0, 4])
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], 4)
+        quota_calls = [event for event in self.trace() if event.get("command") == "quota-snapshot"]
+        self.assertEqual(len(quota_calls), 4, "fallback must reuse the selection snapshot")
+
     def test_mid_turn_limit_sleeps_and_resumes_same_thread(self):
         self.configure()  # Omitting wait_for_reset enables automatic continuation.
         self.assertTrue(self.worker().accounts_config()["wait_for_reset"])

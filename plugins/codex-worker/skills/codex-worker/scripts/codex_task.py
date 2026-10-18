@@ -2195,7 +2195,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
             error = errors.read().decode("utf-8", errors="replace")
         if all(part in error for part in ("cannot be used with", "--base", "PROMPT")):
             return monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=True,
-                           control=control)
+                           control=control, quota_snapshot=quota_snapshot)
     return ("completed" if code == 0 and not failed else "failed"), None
 
 
