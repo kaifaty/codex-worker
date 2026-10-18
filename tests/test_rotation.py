@@ -4565,6 +4565,64 @@ worker.save = fail_once
         with self.assertRaises(ProcessLookupError):
             os.killpg(observed["pgid"], 0)
 
+    def test_signal_at_final_stop_flag_read_preserves_signal_metadata(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": "fixture result"}])
+        slug = "signal-at-final-flag-read"
+        observed = self.run_supervisor_fixture(slug, r'''
+import inspect
+source, first_line = inspect.getsourcelines(worker.cmd__run)
+flag_read_line = next(first_line + offset for offset, line in enumerate(source)
+                      if "stopped_flag.is_set()" in line)
+def trace(frame, event, arg):
+    if (event == "line" and frame.f_code.co_name == "stopped"
+            and frame.f_lineno == flag_read_line and not observed):
+        caller = frame.f_back
+        if (caller.f_code.co_name == "stop_outcome"
+                and caller.f_back.f_code.co_name == "cmd__run"):
+            # Deliver after the old metadata check but before the flag read.
+            # Correct ordering captures the flag before transferring metadata,
+            # so a true result always publishes the signal that caused it.
+            observed["before"] = time.time()
+            os.kill(os.getpid(), signal.SIGTERM)
+            # Python 3.9 copies trace-frame locals back after this callback.
+            # Refresh them so that copy cannot undo the real handler's update
+            # to its received_signal closure cell.
+            observed["signal"] = frame.f_locals["received_signal"]
+            observed["after"] = time.time()
+    return trace
+sys.settrace(trace)
+''')
+        self.assertTrue(observed, "fixture did not reach the final stop flag read")
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "interrupted")
+        self.assertIsNone(state["pid"])
+        self.assertIn("signal", state)
+        self.assertEqual(state["signal"], observed["signal"])
+        self.assertEqual(state["signal"]["name"], "SIGTERM")
+        self.assertEqual(state["signal"]["signum"], signal.SIGTERM)
+        self.assertGreaterEqual(state["signal"]["at"], observed["before"])
+        self.assertLessEqual(state["signal"]["at"], observed["after"])
+        self.assertIn("SIGTERM", (self.home / "claude-tasks" / slug / "stderr.log").read_text())
+        interrupted = self.notification(slug, "interrupted")
+        self.assertEqual(interrupted["signal"], state["signal"])
+        expected_time = datetime.datetime.fromtimestamp(state["signal"]["at"]).strftime("%Y-%m-%d %H:%M")
+        message = ("interrupted externally by SIGTERM at " + expected_time +
+                   "; the worktree is kept — check git status and continue with say")
+        self.assertIn(message, interrupted["message"])
+        self.assertNotIn("unknown", interrupted["message"])
+        self.assertIn("== " + message, self.wait(slug))
+        self.assertEqual(self.notification(slug, "turn_finished")["outcome"], "interrupted")
+        rows = [row for row in self.telemetry_journal() if row["slug"] == slug and row["phase"] == "turn"]
+        self.assertEqual(rows[-1]["outcome"], "interrupted")
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
+        self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
+        invocations = self.invocations()
+        self.assertEqual(len(invocations), 1)
+        self.assertFalse(self.process_is_live(invocations[0]["pid"]), "worker escaped its supervisor")
+
     def test_late_signal_keeps_final_publications_consistent(self):
         self.configure(language="en")
         self.configure_notify()

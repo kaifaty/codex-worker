@@ -2622,9 +2622,12 @@ def cmd__run(a):
                 stopped_flag.set()
     def stopped():
         reap_notifications()
+        # Snapshot the flag before copying metadata: True must never be
+        # returned for a signal that arrived after the metadata check.
+        cancelled = stopped_flag.is_set()
         if received_signal is not None and st is not None:
             st.setdefault("signal", received_signal)
-        return stopped_flag.is_set()
+        return cancelled
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
     # The launcher publishes pid and pending before the supervisor becomes the only writer.
