@@ -171,7 +171,12 @@ angles continue, and a review with only refusals stops fixes with `auto_fix_stop
 
 `--fix-rounds` accepts 0–5 (default 0), requires `--review`, and is unavailable for scouts. The loop
 stops on a clean review, only P3 findings (`auto_fix_stop: "only P3"`), the round limit, a worker result
-requiring intervention, or `stop`. Claude decides what to do with P3 findings. From the second review,
+requiring intervention, or `stop`. A P1/P2 finding within two lines of code committed by a previous fix
+round stops it with `auto_fix_stop: "escalate"`; Claude reads that finding and the round's diff, then
+simplifies through `say`, accepts it as P3 or an issue, or permits one focused round with
+`say --review --fix-rounds 1`. `wait` names the originating round and commit and shows each round's
+code additions/deletions excluding guarded files; size is informational. Claude decides what to do
+with P3 findings. From the second review,
 reviewers focus on regressions from fixes and unmet completion conditions; new edge cases outside the
 brief are P3. Fix turns reject disproportionate work outside those conditions as `out of scope` and
 put it in `remaining`. A failed check after a fix uses the next available round to send the last 40

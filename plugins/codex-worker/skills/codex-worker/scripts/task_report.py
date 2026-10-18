@@ -123,6 +123,7 @@ def _task(repo, slug, created):
     return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
+            "auto_fix_stop": None,
             "max_task_weekly_percent": None, "budget_stop": None,
             "_reviews": {}, "_turns": [], "_latest_turn": 0}
 
@@ -286,6 +287,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
     fix_rounds = Counter()
     outcomes = Counter()
     result_status = Counter()
+    auto_fix_stops = Counter()
     for task in tasks.values():
         groups = list(task.pop("_reviews").items())
         verdicts = {group: _review_verdict(review_rows) for group, review_rows in groups}
@@ -294,8 +296,10 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             if row.get("kind") == "review":
                 verdicts[(_round(row.get("turn")), _round(row.get("round")))] = (
                     _identifier(row.get("verdict")) if row.get("outcome") == "completed" else None)
-        for (_, round_number), verdict in verdicts.items():
-            if verdict == "clean":
+        escalated_turns = {_round(row.get("turn")) for row in final_turns
+                           if row.get("auto_fix_stop") == "escalate"}
+        for (turn, round_number), verdict in verdicts.items():
+            if verdict == "clean" and turn not in escalated_turns:
                 fix_rounds[str(round_number)] += 1
                 break
         latest_turn = task.pop("_latest_turn")
@@ -307,12 +311,15 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             task["last_verdict"] = _identifier(final.get("verdict"))
             task["max_task_weekly_percent"] = _number(final.get("max_task_weekly_percent"))
             task["budget_stop"] = final.get("budget_stop") if final.get("budget_stop") in ("minutes", "weekly") else None
+            task["auto_fix_stop"] = _identifier(final.get("auto_fix_stop"))
         elif groups:
             task["last_verdict"] = _review_verdict(groups[-1][1])
         if task["outcome"] is not None:
             outcomes[task["outcome"]] += 1
         if task["result_status"] is not None:
             result_status[task["result_status"]] += 1
+        if task["auto_fix_stop"] is not None:
+            auto_fix_stops[task["auto_fix_stop"]] += 1
         task["tokens"] = _token_summary(task["tokens"])
 
     for account in accounts.values():
@@ -335,6 +342,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
                         "findings": reviews["findings"],
                         "average_findings": _fraction(reviews["findings"], findings_samples)},
             "fix_rounds_to_clean": dict(sorted(fix_rounds.items(), key=lambda item: int(item[0]))),
+            "auto_fix_stops": dict(sorted(auto_fix_stops.items())),
             "outcomes": dict(sorted(outcomes.items())), "result_status": dict(sorted(result_status.items())),
         },
         "accounts": account_rows, "tasks": task_rows,
@@ -367,6 +375,7 @@ def render_report(report):
         f"({_percent(reviews['defect_fraction'])}); average findings: "
         + ("n/a" if average is None else f"{average:.2f}"),
         "Fix rounds to clean: " + _distribution(summary["fix_rounds_to_clean"]),
+        "Auto-fix stops: " + _distribution(summary["auto_fix_stops"]),
         "Outcomes: " + _distribution(summary["outcomes"]),
         "Result status: " + _distribution(summary["result_status"]),
         "", "Account weekly window usage:",
@@ -377,13 +386,14 @@ def render_report(report):
                          f"({account['tokens']['total']:,.0f} tokens, {account['turns']} turns)")
     else:
         lines.append("  none")
-    lines.extend(("", "Tasks by cost:", "slug  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop"))
+    lines.extend(("", "Tasks by cost:", "slug  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop  auto-fix stop"))
     for task in report["tasks"]:
         budget = task["max_task_weekly_percent"]
         lines.append(f"{task['slug']}  {task['turns']}  {task['rounds']}  {task['active_minutes']:.1f}  "
                      f"{task['tokens']['total']:,.0f}  {task['weekly_used_percent']:.2f}  "
                      f"{task['last_verdict'] or '-'}  "
-                     + ("-" if budget is None else f"{budget:g}") + f"  {task['budget_stop'] or '-'}")
+                     + ("-" if budget is None else f"{budget:g}") + f"  {task['budget_stop'] or '-'}"
+                     + f"  {task['auto_fix_stop'] or '-'}")
     if not report["tasks"]:
         lines.append("(no tasks)")
     return "\n".join(lines)

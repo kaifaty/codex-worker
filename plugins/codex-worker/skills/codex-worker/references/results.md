@@ -55,7 +55,9 @@ angles, and fix rounds stop. Before increasing the task budget, decide whether t
 - After a review: findings with IDs, severity, file and line, details and verification steps; with
   angles, a runtime and outcome line per angle before the combined review.
 - After an automatic fix cycle: finding counts and decisions per round, rejected findings with reasons,
-  check results, the latest review in full, a finding-count history, and the stop reason.
+  code additions/deletions excluding guarded files, check results, the latest review in full, a
+  finding-count history, and the stop reason. For `escalate`, the stop line names each P1/P2 finding
+  targeting code from a fix round, that round's number, and its short commit SHA.
 - `guarded files changed` and `== base tests`: see [checks.md](checks.md).
 - `== sandbox: workspace` and publication results: see [sandbox.md](sandbox.md).
 - Account switches, `auto-continue at` and `needs login`: see [accounts.md](accounts.md).

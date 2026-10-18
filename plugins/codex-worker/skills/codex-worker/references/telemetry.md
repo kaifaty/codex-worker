@@ -22,4 +22,5 @@ Creation time identifies each task, so reusing a slug after `clean` produces a s
   including follow-ups and wrap-ups.
 - The rounds-to-clean distribution counts each task's first clean review round: every completed angle
   in that round must be clean and none interrupted. Model refusals follow the supervisor's merged
-  verdict.
+  verdict. The final turn journal row and report record `auto_fix_stop`, including `escalate`;
+  escalated turns do not count as rounds to clean.

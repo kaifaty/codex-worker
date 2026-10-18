@@ -183,9 +183,13 @@ with a reason, then checks and reviews again.
 ## Stop rules
 
 - The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop: "only P3"`), the round
-  limit, an exhausted task weekly budget (`auto_fix_stop: "budget"`), a review where every angle refused
+  limit, a P1/P2 finding targeting code from a previous fix round (`auto_fix_stop: "escalate"`),
+  an exhausted task weekly budget (`auto_fix_stop: "budget"`), a review where every angle refused
   (`auto_fix_stop: "review refused"`), `partial`, `blocked`, `needs_decision`, `budget_exhausted`, `stuck`,
   `interrupted`, or `stop`. You decide what happens to remaining P3 findings.
+- On `escalate`, read the finding and the named fix round's diff. Choose one: simplify with a narrow
+  `say` instruction to remove the extra mechanism; accept the finding as P3 or record an issue; or
+  allow one focused round with `say <slug> "…" --max-minutes M --review --fix-rounds 1`.
 - After two rounds on the same point, take it to the user.
 - After `interrupted`, check the preserved worktree with `git status` and continue through `say`.
   If interruptions repeat, inspect the signal line in `stderr.log`.

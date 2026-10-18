@@ -343,6 +343,13 @@ def execute():
     if run.get("commit_files"):
         subprocess.run(["git", "add", "--"] + run["commit_files"], check=True)
         subprocess.run(["git", "commit", "-qm", "Apply fake worker changes"], check=True)
+    for files in run.get("commit_batches", []):
+        for name, contents in files.items():
+            path = Path(name)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
+        subprocess.run(["git", "add", "--"] + list(files), check=True)
+        subprocess.run(["git", "commit", "-qm", "Commit another fake worker change"], check=True)
     for name, contents in run.get("post_commit_write_files", {}).items():
         Path(name).write_text(contents)
     if run["mode"] == "refused":
@@ -984,6 +991,33 @@ class RotationTests(unittest.TestCase):
              "verify": "Format three words and check that all three remain."}]
         return {"verdict": "defects" if defects else "clean", "findings": findings if defects else [],
                 "summary": "Found two defects." if defects else "No defects found."}
+
+    def provenance_review(self, locations):
+        review = self.review_result()
+        review["findings"] = [dict(review["findings"][0], id="F" + str(index),
+                                   severity=severity, file=filename, line=line)
+                              for index, (severity, filename, line) in enumerate(locations, 1)]
+        return review
+
+    def provenance_runs(self, repeated_review, fix_files=None, workspace=False):
+        source = "".join("VALUE_%s = %s\n" % (number, number) for number in range(1, 31))
+        filename = "src/provenance.py"
+        changes = fix_files if fix_files is not None else {
+            filename: source.replace("VALUE_15 = 15\n", "VALUE_15 = 150\n")}
+        initial_review = self.provenance_review([("P2", filename, 5)])
+        decision = [{"id": "F1", "decision": "fixed", "note": "Corrected the reported code."}]
+        work = {"mode": "complete", "write_files": {filename: source},
+                "reply": self.work_result(commit_message="Implement provenance fixture" if workspace else "")}
+        fix = {"mode": "complete", "write_files": changes,
+               "reply": self.work_result(findings=decision,
+                                         commit_message="Fix provenance fixture" if workspace else "")}
+        if not workspace:
+            work["commit_files"] = [filename]
+            fix["commit_files"] = list(changes)
+        return [work, {"mode": "complete", "reply": initial_review}, fix,
+                {"mode": "complete", "reply": repeated_review},
+                {"mode": "complete", "reply": self.work_result(findings=decision)},
+                {"mode": "complete", "reply": self.review_result(False)}]
 
     def assert_output_schema(self, invocation, slug, review=False):
         filename = "review-schema.json" if review else "result-schema.json"
@@ -5103,6 +5137,206 @@ class RotationTests(unittest.TestCase):
         self.assertEqual([event["round"] for event in notifications if event["event"] == "review_done"],
                          [0, 1])
         self.assertEqual(sum(event["event"] == "turn_finished" for event in notifications), 1)
+
+    def test_fix_round_escalates_findings_in_any_commit_from_the_previous_round(self):
+        self.configure(language="en")
+        self.configure_notify()
+        git_trace = self.record_git_calls()
+        review = self.provenance_review([("P2", "src/provenance.py", 15)])
+        runs = self.provenance_runs(review)
+        runs[2]["commit_batches"] = [{"src/helper.py": "HELPER = True\n"}]
+        self.account(self.home, "A", self.reset, runs=runs)
+        self.start("fix-escalate", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-escalate")
+        state = self.state("fix-escalate")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False, True])
+        self.assertEqual(state["auto_fix_stop"], "escalate")
+        self.assertEqual(len(state["rounds"]), 1)
+        branch = state["branch"]
+        commits = self.git("rev-list", branch + "~2.." + branch).splitlines()
+        self.assertEqual(state["rounds"][0]["commits"], commits)
+        self.assertEqual(len(commits), 2)
+        source = self.git("rev-parse", "--short", branch + "~1")
+        self.assertEqual(state["auto_fix_escalations"], [dict(review["findings"][0], round=1, commit=source)])
+        message = ("== auto-fix: stop: escalate — F1 src/provenance.py:15 "
+                   "targets code from fix round 1 (" + source + ")")
+        self.assertIn(message, output)
+        self.assertIn(review["findings"][0]["detail"], output)
+        self.assertIn(review["findings"][0]["verify"], output)
+        self.assertIn("; code +2 −1", output)
+        blame = [json.loads(line)["argv"] for line in git_trace.read_text().splitlines()
+                 if "blame" in json.loads(line)["argv"]]
+        self.assertTrue(blame)
+        for argv in blame:
+            self.assertIn("--porcelain", argv)
+            for setting in ("core.hooksPath=/dev/null", "core.fsmonitor=false"):
+                self.assertIn(setting, argv)
+                self.assertEqual(argv[argv.index(setting) - 1], "-c")
+        self.until(lambda: any(row["phase"] == "turn" for row in self.telemetry_journal()))
+        turn = next(row for row in self.telemetry_journal() if row["phase"] == "turn")
+        self.assertEqual(turn["auto_fix_stop"], "escalate")
+        report = json.loads(self.cli("report", "--slug", "fix-escalate", "--json"))
+        self.assertEqual(report["tasks"][0]["auto_fix_stop"], "escalate")
+        self.assertEqual(report["summary"]["auto_fix_stops"], {"escalate": 1})
+        self.assertEqual(report["summary"]["fix_rounds_to_clean"], {})
+        self.assertIn("escalate", self.cli("report", "--slug", "fix-escalate"))
+        self.notification("fix-escalate", "turn_finished")
+        self.assertEqual(sum(event["event"] == "turn_finished"
+                             for event in self.notifications("fix-escalate")), 1)
+        self.assertNotIn("auto_fix_stop", self.notification("fix-escalate", "turn_finished"))
+
+    def test_fix_round_continues_when_repeated_review_targets_original_work(self):
+        self.configure(language="en")
+        review = self.provenance_review([("P2", "src/provenance.py", 5)])
+        self.account(self.home, "A", self.reset, runs=self.provenance_runs(review))
+        self.start("fix-original-code", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-original-code")
+        state = self.state("fix-original-code")
+        self.assertEqual([event["review"] for event in self.invocations()],
+                         [False, True, False, True, False, True])
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertEqual(len(state["rounds"][0]["commits"]), 1)
+        self.assertEqual(state["rounds"][1]["commits"], [])
+        self.assertFalse(state.get("auto_fix_escalations"))
+        self.assertNotIn("stop: escalate", output)
+
+    def test_fix_round_escalates_p1_p2_within_two_lines_and_at_file_edges(self):
+        self.configure(language="en")
+        filename = "src/provenance.py"
+        review = self.provenance_review([("P1", filename, 3), ("P2", filename, 13),
+                                         ("P2", filename, 17), ("P2", filename, 29)])
+        runs = self.provenance_runs(review)
+        source = runs[0]["write_files"][filename]
+        for line in (1, 15, 30):
+            source = source.replace("VALUE_%s = %s\n" % (line, line), "VALUE_%s = -1\n" % line)
+        runs[2]["write_files"][filename] = source
+        self.account(self.home, "A", self.reset, runs=runs)
+        self.start("fix-nearby-code", "--review", "--fix-rounds", "2")
+        self.wait("fix-nearby-code")
+        state = self.state("fix-nearby-code")
+        self.assertEqual(state["auto_fix_stop"], "escalate")
+        self.assertEqual(len(self.invocations()), 4)
+        commit = self.git("rev-parse", "--short", state["branch"])
+        self.assertEqual(state["auto_fix_escalations"],
+                         [dict(finding, round=1, commit=commit) for finding in review["findings"]])
+
+    def test_fix_round_p3_in_fix_code_keeps_only_p3_stop(self):
+        self.configure(language="en")
+        review = self.provenance_review([("P3", "src/provenance.py", 15),
+                                         ("P3", "src/provenance.py", 5)])
+        self.account(self.home, "A", self.reset, runs=self.provenance_runs(review))
+        self.start("fix-provenance-p3", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-provenance-p3")
+        state = self.state("fix-provenance-p3")
+        self.assertEqual(state["auto_fix_stop"], "only P3")
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual(len(self.invocations()), 4)
+        self.assertFalse(state.get("auto_fix_escalations"))
+        self.assertIn("only P3", output)
+        self.assertNotIn("stop: escalate", output)
+
+    def test_fix_round_missing_finding_line_does_not_crash_or_escalate(self):
+        self.configure(language="en")
+        review = self.provenance_review([("P2", "src/provenance.py", 15)])
+        del review["findings"][0]["line"]
+        self.account(self.home, "A", self.reset, runs=self.provenance_runs(review))
+        self.start("fix-missing-line", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-missing-line")
+        state = self.state("fix-missing-line")
+        self.assertEqual(state["auto_fix_stop"], "review unknown")
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertFalse(state.get("auto_fix_escalations"))
+        self.assertNotIn("stop: escalate", output)
+
+    def test_fix_round_deleted_file_and_finding_beyond_eof_do_not_escalate(self):
+        self.configure(language="en")
+        filename = "src/provenance.py"
+        removed = "src/removed.py"
+        review = self.provenance_review([("P2", removed, 1), ("P2", filename, 31)])
+        runs = self.provenance_runs(review)
+        source = runs[0]["write_files"][filename]
+        runs[0]["write_files"][removed] = "REMOVED = True\n"
+        runs[0]["commit_files"].append(removed)
+        runs[2]["write_files"][filename] = source.replace("VALUE_30 = 30\n", "VALUE_30 = -1\n")
+        runs[2]["remove_files"] = [removed]
+        runs[2]["commit_files"].append(removed)
+        self.account(self.home, "A", self.reset, runs=runs)
+        self.start("fix-invalid-location", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-invalid-location")
+        state = self.state("fix-invalid-location")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertEqual(len(self.invocations()), 6)
+        self.assertFalse(state.get("auto_fix_escalations"))
+        self.assertFalse((Path(state["worktree"]) / removed).exists())
+        self.assertNotIn("stop: escalate", output)
+
+    def test_fix_round_size_excludes_builtin_explicit_and_check_path_guards(self):
+        self.configure(language="en")
+        self.commit_fixture({"tests/test_provenance.py": "assert True\n",
+                             "custom/guarded.data": "original guard\n",
+                             "scripts/check_provenance.py": "print('base check passed')\n"})
+        filename = "src/provenance.py"
+        runs = self.provenance_runs(self.review_result(False))
+        source = runs[0]["write_files"][filename]
+        changes = {filename: source.replace("VALUE_15 = 15\n", "VALUE_15 = 150\nEXTRA = True\n"),
+                   "tests/test_provenance.py": "assert True\nassert 1 == 1\nassert 2 == 2\n",
+                   "custom/guarded.data": "replacement guard\nextra guard\n",
+                   "scripts/check_provenance.py": "print('changed check passed')\nprint('more checks')\n"}
+        runs[2]["write_files"] = changes
+        runs[2]["commit_files"] = list(changes)
+        self.account(self.home, "A", self.reset, runs=runs)
+        self.start("fix-code-size", "--review", "--fix-rounds", "2", "--guard", "custom/*.data",
+                   "--check", "python3 scripts/check_provenance.py")
+        output = self.wait("fix-code-size")
+        state = self.state("fix-code-size")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual(state["rounds"][0]["code"], {"added": 2, "removed": 1})
+        self.assertIn("== round 1: 1 findings (P2 1) → fixed 1, rejected 0; code +2 −1", output)
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+
+    def test_workspace_fix_round_supervisor_commit_is_used_for_escalation(self):
+        self.configure(language="en", sandbox="workspace")
+        review = self.provenance_review([("P2", "src/provenance.py", 15)])
+        self.account(self.home, "A", self.reset, runs=self.provenance_runs(review, workspace=True))
+        self.start("fix-workspace-escalate", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-workspace-escalate")
+        state = self.state("fix-workspace-escalate")
+        self.assertEqual(state["auto_fix_stop"], "escalate")
+        self.assertEqual(len(self.invocations()), 4)
+        commit = self.git("rev-parse", state["branch"])
+        self.assertEqual(state["rounds"][0]["commits"], [commit])
+        self.assertEqual(state["rounds"][0]["code"], {"added": 1, "removed": 1})
+        self.assertEqual(state["publish"]["sha"], commit)
+        self.assertTrue(state["publish"]["pushed"])
+        short = self.git("rev-parse", "--short", commit)
+        self.assertEqual(state["auto_fix_escalations"], [dict(review["findings"][0], round=1, commit=short)])
+        self.assertIn("targets code from fix round 1 (" + short + ")", output)
+        for invocation in self.invocations():
+            self.assert_workspace_sandbox(invocation)
+
+    def test_fix_round_escalates_older_round_code_even_when_round_limit_is_reached(self):
+        self.configure(language="en")
+        filename = "src/provenance.py"
+        original_review = self.provenance_review([("P2", filename, 5)])
+        runs = self.provenance_runs(original_review)
+        source = runs[2]["write_files"][filename]
+        runs[4]["write_files"] = {filename: source.replace("VALUE_25 = 25\n", "VALUE_25 = -1\n")}
+        runs[4]["commit_files"] = [filename]
+        final_review = self.provenance_review([("P2", filename, 15)])
+        runs[5]["reply"] = final_review
+        self.account(self.home, "A", self.reset, runs=runs)
+        self.start("fix-older-round", "--review", "--fix-rounds", "2")
+        output = self.wait("fix-older-round")
+        state = self.state("fix-older-round")
+        self.assertEqual(state["auto_fix_stop"], "escalate")
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertEqual(len(self.invocations()), 6)
+        source_commit = self.git("rev-parse", "--short", state["branch"] + "~1")
+        self.assertEqual(state["auto_fix_escalations"],
+                         [dict(final_review["findings"][0], round=1, commit=source_commit)])
+        self.assertIn("targets code from fix round 1 (" + source_commit + ")", output)
 
     def test_fix_round_limit_runs_exactly_two_corrections_and_prints_final_defects(self):
         self.configure()
