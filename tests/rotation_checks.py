@@ -86,6 +86,106 @@ class CheckGuardTests(RotationTestCase):
             elif layer == "index":
                 self.git("commit", "--quiet", "-m", "Change Latin-1 test fixture")
 
+    def test_guarded_changed_latin1_skip_condition_stays_disabled_in_every_diff_layer(self):
+        original = ("# coding: latin-1\n"
+                    "import unittest\n"
+                    "class Latin1Tests(unittest.TestCase):\n"
+                    "    @unittest.skipIf('é' == 'ñ', 'condition')\n"
+                    "    def test_condition(self):\n"
+                    "        self.assertTrue(True)\n"
+                    "if __name__ == '__main__':\n"
+                    "    result = unittest.main(exit=False).result\n"
+                    "    print(result.testsRun, len(result.skipped))\n")
+        changed = original.replace("'é'", "'ñ'")
+        path = self.repo / "tests/test_latin1.py"
+        path.parent.mkdir()
+        path.write_bytes(original.encode("latin-1"))
+        self.git("add", "--", "tests/test_latin1.py")
+        self.git("commit", "--quiet", "-m", "Add Latin-1 conditional skip fixture")
+        worker = self.worker()
+        state = {"worktree": str(self.repo), "base": self.git("rev-parse", "HEAD")}
+        for contents, skipped in ((original, 0), (changed, 1)):
+            path.write_bytes(contents.encode("latin-1"))
+            result = subprocess.run([PYTHON, "-I", str(path)], cwd=self.repo, env=self.env,
+                                    text=True, capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stdout.strip(), "1 %d" % skipped)
+        for layer in ("working", "index", "committed"):
+            with self.subTest(layer=layer):
+                changes = worker.guarded_changes(state)
+                self.assertEqual(len(changes), 1)
+                self.assertEqual(changes[0]["moved"], 0)
+                self.assertEqual(len(changes[0]["disabled"]), 1)
+                self.assertEqual(changes[0]["disabled"][0]["line"], 4)
+                self.assertTrue(changes[0]["disabled"][0]["text"].startswith("@unittest.skipIf("))
+                output = "\n".join(worker.guarded_lines(changes))
+                self.assertEqual(output.encode("utf-8").decode("utf-8"), output)
+                self.assertFalse(any(line.startswith("== guarded skip markers moved:")
+                                     for line in worker.guarded_lines(changes)))
+            if layer == "working":
+                self.git("add", "--", "tests/test_latin1.py")
+            elif layer == "index":
+                self.git("commit", "--quiet", "-m", "Change Latin-1 skip condition")
+
+    def test_guarded_identical_latin1_markers_move_in_every_diff_layer(self):
+        original = ("# coding: latin-1\n"
+                    "import unittest\n"
+                    "class Latin1Tests(unittest.TestCase):\n"
+                    "    marker = \"@unittest.skip('café')\"\n"
+                    "    @unittest.skipIf('é' == 'ñ', 'condition')\n"
+                    "    def test_condition(self):\n"
+                    "        self.assertTrue(True)\n")
+        source = self.repo / "tests/test_z_latin1.py"
+        source.parent.mkdir()
+        source.write_bytes(original.encode("latin-1"))
+        self.git("add", "--", "tests/test_z_latin1.py")
+        self.git("commit", "--quiet", "-m", "Add Latin-1 move fixture")
+        worker = self.worker()
+        state = {"worktree": str(self.repo), "base": self.git("rev-parse", "HEAD")}
+        source.rename(self.repo / "tests/test_a_latin1.py")
+        for layer in ("working-untracked", "index", "committed"):
+            with self.subTest(layer=layer):
+                changes = worker.guarded_changes(state)
+                self.assertEqual(len(changes), 2)
+                self.assertEqual(sum(len(item["disabled"]) for item in changes), 0)
+                self.assertEqual({item["path"]: item["moved"] for item in changes},
+                                 {"tests/test_z_latin1.py": 0, "tests/test_a_latin1.py": 2})
+                self.assertEqual(worker.guarded_lines(changes)[-1], "== guarded skip markers moved: 2")
+            if layer == "working-untracked":
+                self.git("add", "--all", "--", "tests")
+            elif layer == "index":
+                self.git("commit", "--quiet", "-m", "Move Latin-1 fixture")
+
+    def test_guarded_changed_latin1_untracked_markers_are_not_moved(self):
+        cases = {
+            "condition": ("@unittest.skipIf('é' == 'ñ', 'condition')\ndef test_a():\n    assert True\n", 3),
+            "literal": ("def test_a():\n    marker = \"@unittest.skip('é')\"\n    assert marker\n", 4)}
+        for name, (contents, _) in cases.items():
+            source = self.repo / ("tests/test_z_%s.py" % name)
+            source.parent.mkdir(exist_ok=True)
+            source.write_bytes(("# coding: latin-1\nimport unittest\n" + contents).encode("latin-1"))
+        self.git("add", "--all", "--", "tests")
+        self.git("commit", "--quiet", "-m", "Add Latin-1 untracked move fixtures")
+        worker = self.worker()
+        state = {"worktree": str(self.repo), "base": self.git("rev-parse", "HEAD")}
+        for name, (contents, _) in cases.items():
+            (self.repo / ("tests/test_z_%s.py" % name)).unlink()
+            (self.repo / ("tests/test_a_%s.py" % name)).write_bytes(
+                ("# coding: latin-1\nimport unittest\n" + contents.replace("'é'", "'ñ'")).encode("latin-1"))
+        changes = worker.guarded_changes(state)
+        by_path = {item["path"]: item for item in changes}
+        self.assertEqual(sum(item["moved"] for item in changes), 0)
+        self.assertEqual(sum(len(item["disabled"]) for item in changes), 2)
+        output = "\n".join(worker.guarded_lines(changes))
+        self.assertEqual(output.encode("utf-8").decode("utf-8"), output)
+        self.assertNotIn("== guarded skip markers moved:", output)
+        for name, (_, line_number) in cases.items():
+            with self.subTest(marker=name):
+                disabled = by_path["tests/test_a_%s.py" % name]["disabled"]
+                self.assertEqual(len(disabled), 1)
+                self.assertEqual(disabled[0]["line"], line_number)
+                self.assertIn("@unittest.skip", disabled[0]["text"])
+
     def test_guarded_skip_markers_move_between_files_in_every_diff_layer(self):
         original = ("import unittest\n\n"
                     "def test_literal():\n"

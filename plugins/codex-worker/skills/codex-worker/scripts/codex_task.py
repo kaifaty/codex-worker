@@ -1320,10 +1320,10 @@ def guarded_changes(st):
             item["added"] += int(added) if added != "-" else 0
             item["removed"] += int(removed) if removed != "-" else 0
             item["deleted"] |= path in deleted
-            # Patch contents can use any source-file encoding; ASCII hunk and
-            # skip markers remain readable even when other bytes are replaced.
+            # Preserve non-UTF-8 bytes for matching; replacing them here can
+            # make different skip conditions look like an unchanged move.
             patch = sh(args + ["--unified=0"] + revisions + ["--", path],
-                       cwd=root, check=False, errors="replace")
+                       cwd=root, check=False, errors="surrogateescape")
             line_number = 0
             in_hunk = False
             for line in patch.splitlines():
@@ -1348,7 +1348,7 @@ def guarded_changes(st):
                     continue
                 file = Path(root) / path
                 try:
-                    content = os.readlink(file) if file.is_symlink() else file.read_text(encoding="utf-8", errors="replace")
+                    content = os.readlink(file) if file.is_symlink() else file.read_text(encoding="utf-8", errors="surrogateescape")
                 except OSError:
                     continue
                 lines = content.splitlines()
@@ -1364,8 +1364,12 @@ def guarded_changes(st):
             if removed_lines[marker["text"]]:
                 removed_lines[marker["text"]] -= 1
                 item["moved"] += 1
-            elif marker not in item["disabled"]:
-                item["disabled"].append(marker)
+            else:
+                # Replacement is only for display, after lossless matching.
+                marker["text"] = (marker["text"].encode("utf-8", errors="surrogateescape")
+                                  .decode("utf-8", errors="replace"))
+                if marker not in item["disabled"]:
+                    item["disabled"].append(marker)
     return [changed[path] for path in sorted(changed)]
 
 

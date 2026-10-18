@@ -36,9 +36,9 @@ Skip markers are matched separately in three diff layers: base to HEAD, HEAD to 
 working tree. Untracked files belong to the working-tree layer. Within each layer, an added marker
 is treated as moved when its full line after `strip()` matches a deleted line from any guarded file,
 including a deleted file. Matching uses a multiset: each deleted line cancels at most one identical
-added marker. Lines never cancel across layers, so a skip added to the index and then removed in the
-working tree still appears in `guarded tests disabled`. Detection remains text-based, including
-marker strings in test fixtures.
+added marker. Non-UTF-8 byte differences remain significant when matching. Lines never cancel across
+layers, so a skip added to the index and then removed in the working tree still appears in
+`guarded tests disabled`. Detection remains text-based, including marker strings in test fixtures.
 
 Moved markers are excluded from `guarded tests disabled`. When their total is positive, `wait`
 prints one `== guarded skip markers moved: N` line after the disabled warning (or in its place when
