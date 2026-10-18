@@ -943,11 +943,57 @@ def telemetry_phase(st):
     return next((phase for phase in reversed(TELEMETRY_PHASES) if phase.st is st and not phase.finished), None)
 
 
+def write_telemetry(st, row, stopped):
+    try:
+        payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+        with (CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if stopped() or remaining <= 0:
+                        raise
+                    time.sleep(min(0.05, remaining))
+            if stream.seek(0, os.SEEK_END):
+                stream.seek(-1, os.SEEK_END)
+                if stream.read(1) != b"\n":
+                    payload = b"\n" + payload
+            remaining = memoryview(payload)
+            while remaining:
+                written = stream.write(remaining)
+                if not written:
+                    raise OSError("short telemetry write")
+                remaining = remaining[written:]
+    except Exception as exc:
+        telemetry_error(st, exc)
+
+
+def record_turn_result(st, stopped):
+    """Persist the supervisor's final result separately from measured stages."""
+    try:
+        reviews = st.get("reviews", [])[st.get("review_start", 0):]
+        review = st.get("review_result") or ((reviews[-1].get("result") or {}) if reviews else {})
+        result = st.get("result") or {}
+        row = {"v": 1, "at": time.time(), "slug": st["slug"], "repo": Path(st["repo"]).name,
+               "created": st.get("created"), "kind": st.get("kind", "work"), "phase": "turn",
+               "turn": st.get("turns", 0), "round": len(st.get("rounds", [])),
+               "account": current_turn_account(st), "started": st.get("turn_started"),
+               "finished": st.get("turn_finished"), "outcome": st.get("outcome"),
+               "result_status": result.get("status"), "verdict": review.get("verdict")}
+        write_telemetry(st, row, stopped)
+    except Exception as exc:
+        telemetry_error(st, exc)
+
+
 class PhaseTelemetry:
     """Supervisor-only, best-effort accounting. Never persist prompts or output."""
 
-    def __init__(self, st, phase):
+    def __init__(self, st, phase, stopped=lambda: False):
         self.st, self.phase = st, phase
+        self.stopped = stopped
         self.started, self.clock = time.time(), time.monotonic()
         self.sleep_seconds = 0.0
         self.finished = False
@@ -1024,27 +1070,14 @@ class PhaseTelemetry:
                                     for entry in st.get("rotations", [])[self.rotation_start:]),
                    "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
                    "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage}
-            payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-            with (CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
-                # Telemetry is best effort: an unavailable lock must not stall work or stop.
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if stream.seek(0, os.SEEK_END):
-                    stream.seek(-1, os.SEEK_END)
-                    if stream.read(1) != b"\n":
-                        payload = b"\n" + payload
-                remaining = memoryview(payload)
-                while remaining:
-                    written = stream.write(remaining)
-                    if not written:
-                        raise OSError("short telemetry write")
-                    remaining = remaining[written:]
+            write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)
 
 
 @contextmanager
 def record_phase(st, phase, stopped):
-    entry = PhaseTelemetry(st, phase)
+    entry = PhaseTelemetry(st, phase, stopped)
     TELEMETRY_PHASES.append(entry)
     try:
         yield entry
@@ -2580,6 +2613,7 @@ def cmd__run(a):
         st.pop("sleeping", None)
         st["turn_finished"] = time.time()
         st.pop("pending", None)
+        record_turn_result(st, stopped)
         if cfg is not None:
             account = current_turn_account(st)
             message = f"turn {st['outcome']} on {account}"
