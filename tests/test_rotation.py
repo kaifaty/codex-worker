@@ -20,6 +20,7 @@ import tempfile
 import time
 import unittest
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -82,7 +83,8 @@ def limits(value):
               "credits": value.get("credits", {"hasCredits": False, "balance": "0", "unlimited": False}),
               "spendControlReached": False, "planType": "pro",
               "rateLimitReachedType": value.get("rateLimitReachedType")}
-    if value.get("auto_reset"):
+    reset_gate = value.get("rate_limits_gate")
+    if value.get("auto_reset") and (not reset_gate or Path(reset_gate).exists()):
         for name in ("primary", "secondary"):
             window = result[name]
             if not window or window.get("resetsAt") is None or time.time() < window["resetsAt"]:
@@ -112,11 +114,17 @@ def app_server():
             result = {"account": value.get("account"),
                       "workspaceRouting": {"chatgptAccountId": value["accountId"]}}
         elif method == "account/rateLimits/read":
-            gate = value.get("rate_limits_gate_after_exec")
-            if gate and (home / "exec-count").exists():
+            gate = value.get("rate_limits_gate")
+            trigger = value.get("rate_limits_gate_after_trigger")
+            if trigger and not Path(trigger).exists():
+                gate = None
+            if not gate and (home / "exec-count").exists():
+                gate = value.get("rate_limits_gate_after_exec")
+            if gate and not Path(gate).exists():
                 trace({"command": "quota-waiting", "gate": gate})
                 while not Path(gate).exists():
                     time.sleep(0.02)
+                value = fixture()
             if value.get("clear_quota_when_reset_locked"):
                 journal = Path(os.environ["CODEX_TASK_HOME"]) / "codex-worker-resets.jsonl"
                 if journal.exists():
@@ -589,6 +597,39 @@ class RotationTests(unittest.TestCase):
             value["release_at"] = release_at
         (home / "fixture.json").write_text(json.dumps(value))
         return value
+
+    def reset_after_ready(self, command, reset, delay, after_exec=False):
+        # Start reset deadlines at the quota request that precedes the sleep,
+        # after repository setup and subprocess startup have finished.
+        gate = self.root / ("quota-ready-" + uuid.uuid4().hex)
+        for home in (self.home, self.other):
+            path = home / "fixture.json"
+            value = json.loads(path.read_text())
+            value["rate_limits_gate"] = str(gate)
+            if after_exec:
+                value["rate_limits_gate_after_trigger"] = str(self.home / "exec-count")
+            path.write_text(json.dumps(value))
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(command)
+            try:
+                self.until(lambda: any(event.get("command") == "quota-waiting"
+                                       and event.get("gate") == str(gate) for event in self.trace()))
+                armed = time.time() + delay
+                for home in (self.home, self.other):
+                    path = home / "fixture.json"
+                    value = json.loads(path.read_text())
+                    if not value.get("auto_reset"):
+                        continue
+                    for name in ("primary", "secondary"):
+                        if value.get(name) and value[name].get("resetsAt") is not None:
+                            value[name]["resetsAt"] = armed + (value[name]["resetsAt"] - reset)
+                    if "release_at" in value:
+                        value["release_at"] = armed + (value["release_at"] - reset)
+                    path.write_text(json.dumps(value))
+            finally:
+                gate.touch()
+            future.result()
+        return armed
 
     def configure(self, credits=False, wait_for_reset=None, language="ru",
                   use_reset_credits=None, reset_credit_min_hours=None, **settings):
@@ -1452,7 +1493,8 @@ class RotationTests(unittest.TestCase):
             {"mode": "usage_error", "limit_after": 0.1},
             {"mode": "complete", "delay": 0.6, "reply": "Finished after a long quota sleep"}])
         self.account(self.other, "B", self.reset, used=99)
-        self.start("cap-reset-sleep", "--max-minutes", "2.5")
+        reset = self.reset_after_ready(
+            lambda: self.start("cap-reset-sleep", "--max-minutes", "2.5"), reset, 4, after_exec=True)
         output = self.wait("cap-reset-sleep", timeout=12, through_sleep=True)
         state = self.state("cap-reset-sleep")
         self.assertEqual(state["outcome"], "completed")
@@ -2235,7 +2277,7 @@ class RotationTests(unittest.TestCase):
         self.account(self.home, "A", reset, used=99, auto_reset=True)
         self.account(self.other, "B", reset + 3600, used=99)
         followup = "Read the missing-file handling too"
-        self.cli("say", "scout-sleep", followup)
+        reset = self.reset_after_ready(lambda: self.cli("say", "scout-sleep", followup), reset, 3)
         paused = self.wait("scout-sleep")
         self.assertTrue(any(entry.get("event") == "sleep"
                             for entry in self.state("scout-sleep")["rotations"]))
@@ -3174,7 +3216,7 @@ class RotationTests(unittest.TestCase):
         reset = int(time.time()) + 3
         self.account(self.home, "A", reset, used=99, auto_reset=True)
         self.account(self.other, "B", reset + 3600, used=99)
-        self.start("notify-sleep", "--review")
+        reset = self.reset_after_ready(lambda: self.start("notify-sleep", "--review"), reset, 3)
         self.wait("notify-sleep")
         paused = self.notification("notify-sleep", "paused")
         self.assertAlmostEqual(paused["until"], reset + 0.1, places=3)
@@ -4331,7 +4373,7 @@ class RotationTests(unittest.TestCase):
         reset = time.time() + 4
         self.account(self.home, "A", reset + 20, used=99)
         self.account(self.other, "B", reset, used=99, auto_reset=True)
-        self.cli("review", "review-reset")
+        reset = self.reset_after_ready(lambda: self.cli("review", "review-reset"), reset, 4)
         first = self.wait("review-reset")
         self.assert_sleeping("review-reset", first, reset, account="second")
         self.assertEqual(len(self.invocations()), 1)
@@ -4409,7 +4451,7 @@ class RotationTests(unittest.TestCase):
             {"mode": "usage_error", "messages": ["Работа до лимита"]},
             {"mode": "complete", "reply": "Продолжение после сброса завершено"}])
         self.account(self.other, "B", self.reset, used=99)
-        self.start("reset-resume")
+        reset = self.reset_after_ready(lambda: self.start("reset-resume"), reset, 4, after_exec=True)
         first = self.wait("reset-resume")
         # A loaded CI worker can wake before wait or the assertions run.
         # The recorded sleep proves the pause without requiring it to persist.
@@ -4448,7 +4490,7 @@ class RotationTests(unittest.TestCase):
                      runs=[{"mode": "complete", "reply": "Новое сообщение выполнено"}])
         self.account(self.other, "B", self.reset, used=99)
         message = "Выполни именно это сообщение после сброса"
-        self.cli("say", "reset-say", message)
+        reset = self.reset_after_ready(lambda: self.cli("say", "reset-say", message), reset, 4)
         first = self.wait("reset-say")
         self.assert_sleeping("reset-say", first, reset)
         self.assertEqual(len(self.invocations()), 1, "no exec may run before a subscription resets")
@@ -4469,7 +4511,7 @@ class RotationTests(unittest.TestCase):
         self.account(self.home, "A", reset + 20, auto_reset=True,
                      runs=[{"mode": "usage_error", "messages": ["Незавершённая работа A"]}])
         self.account(self.other, "B", reset, used=99, auto_reset=True)
-        self.start("reset-switch")
+        reset = self.reset_after_ready(lambda: self.start("reset-switch"), reset, 4, after_exec=True)
         first = self.wait("reset-switch")
         self.assert_sleeping("reset-switch", first, reset, account="second")
         self.assertEqual(len(self.invocations()), 1)
@@ -4487,7 +4529,7 @@ class RotationTests(unittest.TestCase):
         reset = time.time() + 4
         self.account(self.home, "A", reset, used=99, auto_reset=True)
         self.account(self.other, "B", self.reset, used=99)
-        self.start("reset-start")
+        reset = self.reset_after_ready(lambda: self.start("reset-start"), reset, 4)
         first = self.wait("reset-start")
         self.assert_sleeping("reset-start", first, reset)
         self.assertFalse(self.invocations())
@@ -4543,7 +4585,8 @@ class RotationTests(unittest.TestCase):
         self.account(self.home, "A", reset, auto_reset=True, release_at=release, runs=[
             {"mode": "usage_error"}, {"mode": "complete", "reply": "Задержанный сброс завершён"}])
         self.account(self.other, "B", self.reset, used=99)
-        self.start("delayed-reset")
+        reset = self.reset_after_ready(lambda: self.start("delayed-reset"), reset, 3, after_exec=True)
+        release = reset + 3
         self.assert_sleeping("delayed-reset", self.wait("delayed-reset"), reset)
         self.until(lambda: len([entry for entry in self.state("delayed-reset")["rotations"]
                                if entry.get("event") == "sleep"]) >= 2, timeout=8)
@@ -5388,7 +5431,7 @@ with open(sys.argv[1], "a+") as journal:
             {"mode": "auth_error", "before_thread": True, "used_after": 99},
             {"mode": "complete", "reply": "Original brief completed after quota recovery"}])
         self.account(self.other, "B", self.reset, used=99)
-        self.start("auth-before-thread-sleep")
+        reset = self.reset_after_ready(lambda: self.start("auth-before-thread-sleep"), reset, 4, after_exec=True)
         self.assert_sleeping("auth-before-thread-sleep", self.wait("auth-before-thread-sleep"), reset)
         self.assertEqual(len(self.invocations()), 1)
         self.assertFalse(self.state("auth-before-thread-sleep")["threads"])
@@ -5554,7 +5597,7 @@ with open(sys.argv[1], "a+") as journal:
         self.account(self.home, "A", self.reset, runs=[{
             "mode": "auth_error", "account_after": None, "messages": ["Работа до явного выхода"]}])
         self.account(self.other, "B", reset, used=99, auto_reset=True)
-        self.start("auth-logout-then-wake")
+        reset = self.reset_after_ready(lambda: self.start("auth-logout-then-wake"), reset, 4, after_exec=True)
         first = self.wait("auth-logout-then-wake")
         self.assert_sleeping("auth-logout-then-wake", first, reset, account="second")
         self.assertEqual(len(self.invocations()), 1)
@@ -5987,7 +6030,7 @@ with open(sys.argv[1], "a+") as journal:
             {"mode": "usage_error", "limit_after": 0.1},
             {"mode": "complete", "delay": 0.2, "reply": self.work_result()}])
         self.account(self.other, "B", self.reset, used=99)
-        self.start("telemetry-sleep")
+        reset = self.reset_after_ready(lambda: self.start("telemetry-sleep"), reset, 5, after_exec=True)
         self.wait("telemetry-sleep", timeout=12, through_sleep=True)
         self.until(lambda: len(self.telemetry_journal()) == 1)
         row = self.telemetry_journal()[0]
@@ -6144,11 +6187,13 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
 
     def test_report_stop_during_budget_wrapup_matches_actual_task_outcome(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.1"
+        worker = self.worker()
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}, {"mode": "hold"}])
         self.start("report-wrapup-stop", "--max-minutes", "10")
         self.until(lambda: len(self.invocations()) == 2, timeout=8)
-        self.cli("stop", "report-wrapup-stop")
+        with mock.patch("sys.stdout", new=io.StringIO()):
+            worker.cmd_stop(SimpleNamespace(slug="report-wrapup-stop"))
         self.wait("report-wrapup-stop", timeout=12)
         self.until(lambda: len(self.telemetry_journal()) == 2)
         self.assertEqual(self.state("report-wrapup-stop")["outcome"], "stopped")
