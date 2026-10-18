@@ -32,6 +32,18 @@ line counts across the base-to-HEAD diff and uncommitted changes. It flags delet
 added `skip`/`xfail`/`only` markers separately. Review prompts name these files and ask the reviewer to
 look for removed assertions, skips, wider tolerances, and mocks replacing the code under test.
 
+Skip markers are matched separately in three diff layers: base to HEAD, HEAD to index, and index to
+working tree. Untracked files belong to the working-tree layer. Within each layer, an added marker
+is treated as moved when its full line after `strip()` matches a deleted line from any guarded file,
+including a deleted file. Matching uses a multiset: each deleted line cancels at most one identical
+added marker. Lines never cancel across layers, so a skip added to the index and then removed in the
+working tree still appears in `guarded tests disabled`. Detection remains text-based, including
+marker strings in test fixtures.
+
+Moved markers are excluded from `guarded tests disabled`. When their total is positive, `wait`
+prints one `== guarded skip markers moved: N` line after the disabled warning (or in its place when
+there are no new disabled markers), without listing the moved lines.
+
 ## Base tests (`--base-check`)
 
 After a passing ordinary check, the supervisor creates a temporary detached worktree at the task's

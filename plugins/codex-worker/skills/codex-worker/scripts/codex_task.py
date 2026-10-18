@@ -47,7 +47,7 @@ import termios
 import threading
 import time
 import uuid
-from collections import deque
+from collections import Counter, deque
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -1296,7 +1296,7 @@ DISABLED_TEST = re.compile(
 
 
 def guarded_changes(st):
-    """Combine committed and dirty diffs, treating renames as deletion/addition."""
+    """Combine diff layers, matching moved skip markers within each layer."""
     if st.get("kind") == "scout" or workspace_filter_driver(st) is not None:
         return []
     root = st["worktree"]
@@ -1304,6 +1304,8 @@ def guarded_changes(st):
     changed = {}
     args = GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
     for revisions in ([st["base"], "HEAD"], ["--cached", "HEAD"], []):
+        removed_lines = Counter()
+        added_markers = []
         stats = sh(args + ["--numstat", "-z"] + revisions + ["--"], cwd=root, check=False)
         deleted = set(sh(args + ["--name-only", "-z", "--diff-filter=D"] + revisions + ["--"],
                          cwd=root, check=False).split("\0"))
@@ -1314,7 +1316,7 @@ def guarded_changes(st):
             if not guarded_path(path, st, paths):
                 continue
             item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
-                                             "deleted": False, "disabled": []})
+                                             "deleted": False, "disabled": [], "moved": 0})
             item["added"] += int(added) if added != "-" else 0
             item["removed"] += int(removed) if removed != "-" else 0
             item["deleted"] |= path in deleted
@@ -1332,26 +1334,38 @@ def guarded_changes(st):
                 elif in_hunk and line.startswith("+"):
                     if DISABLED_TEST.search(line[1:]):
                         marker = {"line": line_number, "text": line[1:].strip()}
-                        if marker not in item["disabled"]:
-                            item["disabled"].append(marker)
+                        added_markers.append((path, marker))
                     line_number += 1
+                elif in_hunk and line.startswith("-"):
+                    removed_lines[line[1:].strip()] += 1
                 elif in_hunk and line.startswith(" "):
                     line_number += 1
-    untracked = sh(GIT + ["ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
-    for path in filter(None, untracked.split("\0")):
-        if not guarded_path(path, st, paths):
-            continue
-        file = Path(root) / path
-        try:
-            content = os.readlink(file) if file.is_symlink() else file.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        lines = content.splitlines()
-        item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
-                                         "deleted": False, "disabled": []})
-        item["added"] += len(lines)
-        item["disabled"].extend({"line": n, "text": line.strip()} for n, line in enumerate(lines, 1)
-                                if DISABLED_TEST.search(line))
+        if not revisions:
+            # Untracked additions belong to the index-to-working-tree layer.
+            untracked = sh(GIT + ["ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
+            for path in filter(None, untracked.split("\0")):
+                if not guarded_path(path, st, paths):
+                    continue
+                file = Path(root) / path
+                try:
+                    content = os.readlink(file) if file.is_symlink() else file.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                lines = content.splitlines()
+                item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
+                                                 "deleted": False, "disabled": [], "moved": 0})
+                item["added"] += len(lines)
+                added_markers.extend((path, {"line": n, "text": line.strip()})
+                                     for n, line in enumerate(lines, 1) if DISABLED_TEST.search(line))
+        # Match across files only after collecting every deletion in this layer.
+        # A deletion cannot hide a marker added in another layer.
+        for path, marker in added_markers:
+            item = changed[path]
+            if removed_lines[marker["text"]]:
+                removed_lines[marker["text"]] -= 1
+                item["moved"] += 1
+            elif marker not in item["disabled"]:
+                item["disabled"].append(marker)
     return [changed[path] for path in sorted(changed)]
 
 
@@ -1367,6 +1381,9 @@ def guarded_lines(changes):
                 for item in changes for marker in item["disabled"]]
     if disabled:
         lines.append("== guarded tests disabled: " + "; ".join(disabled))
+    moved = sum(item["moved"] for item in changes)
+    if moved:
+        lines.append(f"== guarded skip markers moved: {moved}")
     return lines
 
 
