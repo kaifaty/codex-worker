@@ -14,8 +14,10 @@ Reference detail lives in `references/`. Read a file only when its topic comes u
 | File | Read it when |
 |---|---|
 | [results.md](references/results.md) | reading `wait` output: result and review fields, CI, outcomes, wrap-ups |
+| [budgets.md](references/budgets.md) | time and weekly caps, exhaustion, or headroom warnings |
+| [ci.md](references/ci.md) | GitHub check waiting and CI repair rounds |
 | [checks.md](references/checks.md) | `wait` prints `guarded files changed` or `base tests`, or you consider `--guard` or `--base-check` |
-| [review-cycle.md](references/review-cycle.md) | you need to know how angles and fix rounds run inside the cycle |
+| [review-cycle.md](references/review-cycle.md) | angle choices, fix-round mechanics and automatic stops |
 | [settings.md](references/settings.md) | brief language, standing-rules override, default caps, `config.toml` trust |
 | [sandbox.md](references/sandbox.md) | the user wants `--sandbox workspace`, or `wait` prints `== sandbox: workspace` |
 | [accounts.md](references/accounts.md) | subscriptions and rotation, `auto-continue at`, `needs login`, reset credits |
@@ -55,10 +57,8 @@ Checks: <the test, benchmark, or end-to-end test that proves it is done>.
 Do not touch: <what is outside the task>.
 ```
 
-`start` appends the standing rules from [rules.md](references/rules.md) (own worktree, focused checks,
-stop after two failed attempts, push the branch, a typed JSON result); don't repeat them in the brief.
-Codex supplies `pr_title` and the whole PR's `pr_body`; the supervisor creates or updates the PR in
-every mode and records a receipt for `wait`. An empty body leaves an existing PR unchanged. Claude merges.
+`start` appends the [standing rules](references/settings.md#standing-rules); don't repeat them in the
+brief. PR fields and publication receipts are described in [results.md](references/results.md).
 
 One task per brief; split independent parts into several tasks (stacked branches with `--base` when one
 builds on another). Before starting, split any task that promises more than about 60 minutes of work.
@@ -81,8 +81,8 @@ Codex configuration; `--effort` overrides reasoning effort for a task.
 |---|---|
 | Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M [--max-weekly P] --review [--review-angles LIST] --fix-rounds 2 [--ci] [--ci-rounds N] --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; read-only in the existing directory (default `.`), no worktree or branch |
-| Wait for the cycle | `wait <slug> [--through-sleep]` as a **background** Bash command: it re-invokes you when the whole review/fix cycle ends and prints its result, the branch's commits and uncommitted files |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M [--max-weekly P]` and optionally `--review [--review-angles LIST] --fix-rounds 2` and `--ci [--ci-rounds N]` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
+| Wait for the cycle | `wait <slug> [--through-sleep]` as a **background** Bash command: it re-invokes you when the whole review/fix cycle ends; read its [output](references/results.md#what-wait-prints) |
+| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M [--max-weekly P] [--effort E] [--review] [--review-angles LIST] [--fix-rounds 2] [--ci\|--no-ci] [--ci-rounds N]` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
 | First review | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` (only when idle), then `wait` |
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
@@ -103,25 +103,10 @@ apply to scouts. `clean` on a scout removes only its state and logs, never the i
 
 ## Budgets and checks
 
-Pass `--max-minutes M` on every implementation `start` and `say`, sized to the task. M counts active
-exec time across account rotations, not reset sleeps, account waits, or CI waits. Reviews and scouts have their own cap (`max_review_minutes`, 30 by default). The
-supervisor also stops a turn that keeps repeating the same failing command, then asks for a wrap-up in
-the same thread.
-
-Use `--max-weekly P` (greater than 0 and at most 100) to cap the task in percentage points of the weekly
-limit. The task accumulates usage across follow-ups, work, reviews, angles, fix rounds, wrap-ups, and
-accounts. Each exec seeds its account's high-water mark without charge from the greater of the saved
-mark and a fresh baseline in the same window: the account-selection snapshot, or its first weekly
-sample when no snapshot is available. Gaps between execs are excluded. Repeated or lower samples add
-zero; a reset timestamp advancing by more than an hour starts a new mark without charging the reset sample.
-The budget counts growth of the account's weekly percentage during task phases; parallel tasks on one account count against each other, so allow extra budget for parallel work.
-The default is `max_task_weekly_percent`, or no weekly cap when
-unset. An exhausted task rejects `say` and `review` until `--max-weekly P` raises its budget above the
-measured spend. Exhaustion wraps up, runs the saved check, and skips further automatic phases. `status`
-and `wait` warn when the remaining budget exceeds account headroom up to `switch_at`.
-
-The saved check runs in the worktree after each completed implementation turn, before review. A failure
-or timeout skips the review, and `wait` shows the last 40 lines of `check.log`.
+Pass `--max-minutes M` on every implementation `start` and `say`, sized to the task. Use
+`--max-weekly P` to bound weekly usage; allow extra budget for parallel work on one account.
+See [budgets.md](references/budgets.md) for cap mechanics and [telemetry.md](references/telemetry.md)
+for usage accounting. Saved checks and their output are described in [checks.md](references/checks.md).
 
 ## The loop
 
@@ -136,13 +121,8 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
    security), `--base-check` when behavior must stay the same (refactoring, optimization), and `--guard`
    for test files the check reaches only through `sh -c`. Tell the user in a line what went to Codex and
    that you will report back; don't sit and poll.
-2. When `wait` returns, read the turn outcome and `result` first:
-   - `budget_exhausted`: use the check, wrap-up and remaining work to decide whether to split the task
-     before raising an exhausted weekly budget with `say --max-weekly P`. For a time stop, choose a
-     budgeted `say` or split the task.
-   - `stuck`: investigate the repeated failure yourself or take it to the user; do not start another
-     automatic fix cycle.
-   - `refused` (a model refusal for possible cybersecurity risk): it is not retried or rotated.
+2. When `wait` returns, follow the [turn outcome table](references/results.md#turn-outcomes), then read
+   `result`:
    - `needs_decision`: decide yourself if the decision is within the task, otherwise ask the user; send
      the decision with `say`. `blocked`: resolve the blocker or take it to the user. `partial`: `say`
      the next instructions.
@@ -169,54 +149,14 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
    verify all checks pass or skip. Merge per the repo's rules, then `clean`. Report to the user: what Codex did, what you
    checked, what is still open, the PR link, and any account switch `wait` reported.
 
-## Review angles and fix rounds
-
-`--review-angles auto` runs `correctness,concurrency,tests` when the
-diff from base (with uncommitted changes) has at least `review_angles_min_lines` changed lines (400 by
-default), otherwise one ordinary review. For a specific risk, pass a comma-separated list instead:
-
-- `correctness`: behavior and the brief's "Done when" conditions;
-- `concurrency`: races, processes, signals, shared files and state, retries, and recovery;
-- `security`: secrets, shell and path injection, untrusted input, permissions, and sandbox boundaries;
-- `tests`: weakened or ineffective tests, uncovered brief conditions, and mocks replacing tested code.
-
-On `start` and `say`, `--review-angles` implies `--review`. `--fix-rounds N` (0–5, default 0) needs
-`--review`; each round sends the findings back to the implementation thread to be fixed or rejected
-with a reason, then checks and reviews again.
-
-## PR CI
-
-Use `--ci` on GitHub implementation tasks and follow-ups. `"ci": true` in
-`~/.codex/codex-worker.json` enables it by default; without either, the cycle ends as before.
-Pass `--ci` again on each `say` unless the setting enables it. `--ci-rounds N` defaults to 1
-for each cycle; `ci_timeout_minutes` defaults to 30.
-
-CI starts after the work, review, and automatic fixes, only for a `completed` outcome with a passing
-or absent local check and a published GitHub PR whose head SHA equals local HEAD. Otherwise state
-records CI as `skipped` with a reason. The supervisor polls every 30 seconds, allows three minutes
-for checks to appear, and waits for pending checks up to the timeout. Waiting spends no task weekly
-budget and does not count toward `--max-minutes`; `stop` or an external signal interrupts it.
-
-Passing or skipped checks give `passed`; failed or cancelled checks give `failed`. A remaining CI
-round sends failed-check names and log tails (up to 150 lines each, 400 total; external checks get a
-link) to the same implementation thread. Codex must fix and push failures caused by the branch, or
-change nothing and return `blocked` with evidence for flaky or unrelated failures. Each CI turn runs
-the saved local check, publishes again, then waits again; it does not trigger an automatic review.
-A `blocked` result stops without another CI wait. See [results.md](references/results.md) for output.
-
 ## Stop rules
 
-- The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop: "only P3"`), the round
-  limit, a P1/P2 finding targeting code from a previous fix round (`auto_fix_stop: "escalate"`),
-  an exhausted task weekly budget (`auto_fix_stop: "budget"`), a review where every angle refused
-  (`auto_fix_stop: "review refused"`), `partial`, `blocked`, `needs_decision`, `budget_exhausted`, `stuck`,
-  `interrupted`, or `stop`. You decide what happens to remaining P3 findings.
+- Read the [automatic stop reason](references/review-cycle.md#cycle-stops) and decide what happens
+  to remaining P3 findings.
 - On `escalate`, read the finding and the named fix round's diff. Choose one: simplify with a narrow
   `say` instruction to remove the extra mechanism; accept the finding as P3 or record an issue; or
   allow one focused round with `say <slug> "…" --max-minutes M --review --fix-rounds 1`.
 - After two rounds on the same point, take it to the user.
-- After `interrupted`, check the preserved worktree with `git status` and continue through `say`.
-  If interruptions repeat, inspect the signal line in `stderr.log`.
 - A Codex PR you started through this skill is your work for the repo's merge rules; still ask the user
   before merging anything they asked to see first, or anything that breaks what is in use.
 

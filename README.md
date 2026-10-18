@@ -79,14 +79,11 @@ and starts a review in a fresh thread if the check passes and the result is `don
 Claude relaying messages. One `wait` covers the whole cycle; in Claude Code it runs as a background
 Bash command.
 
-For GitHub repositories, include `--ci` on `start` and `say`, or set `"ci": true` in
-`~/.codex/codex-worker.json`. After the work, review, and fix rounds, the supervisor waits for checks
-on the published PR's exact local HEAD. Failed checks send their names and log tails to the same
-worker thread; `--ci-rounds N` allows up to N repair turns (default 1), each followed by the saved
-local check, publication, and another CI wait, without an automatic review. Unrelated or flaky
-failures must return `blocked` with evidence. `ci_timeout_minutes` defaults to 30; absent checks
-stop as `none` after three minutes. Waiting uses no task weekly budget or `--max-minutes` time.
-`wait` shows `== CI <sha>: passed (…)` or the failure and log tail; `report` includes `CI passed: N/M`.
+For GitHub repositories, `start --ci` or `"ci": true` enables CI for the task. Follow-ups inherit
+the setting and repair-round limit (initially 1); `say --ci` enables it, `say --no-ci` disables it,
+and `say --ci-rounds N` changes the limit. The supervisor waits for the published PR's exact HEAD
+and sends failures to Codex for bounded repairs. See
+[CI details](plugins/codex-worker/skills/codex-worker/references/ci.md).
 Claude merges only after `CI … passed` and rechecks `gh pr checks <url>` immediately before merging.
 
 Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
@@ -104,12 +101,12 @@ Check the actual diff, latest review, and rejection reasons: the worker's claims
 Send remaining findings through `say` or record issues after the round limit:
 
 ```sh
-python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2 --ci
+python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
 python3 -I "$T" wait csv-export
 ```
 
-After `interrupted`, check the preserved worktree with `git status` and continue through `say`.
-If interruptions repeat, inspect the signal line in `stderr.log`.
+See [turn outcomes](plugins/codex-worker/skills/codex-worker/references/results.md#turn-outcomes)
+for stop reasons and the next action.
 
 Codex does not merge. After the result has been reviewed and merged under your repository's rules,
 remove the worktree and archive its threads:
@@ -148,7 +145,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--max-weekly P] [--review [--review-angles LIST] [--fix-rounds N]] [--ci] [--ci-rounds N] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N` or `--ci [--ci-rounds N]`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--effort E`, `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N`, change saved CI with `--ci` / `--no-ci` or `--ci-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
 | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
@@ -200,29 +197,13 @@ lines of `check.log` to the worker;
 without a remaining round, it stops without another review. Reviews are told the command and result
 of a passing saved check and may run only focused checks for a specific finding, not repeat the suite.
 
-`--max-minutes M` on `start` and `say` caps active implementation exec time, including continuations after
-account rotation; reset sleeps and account waits do not count. The default is `max_turn_minutes`, or
-no cap if unset. Reviews and scouts use a separate `max_review_minutes` budget (30 by default).
-Repeating a command's same nonzero exit code and last 2 KB of output `repeat_limit` times (default 3)
-also stops a turn; other commands do not reset its count, but success for that command does.
-Either stop kills the exec process group and starts a wrap-up in the same thread, capped at 10 minutes:
-time exhaustion asks for commits, a push, and a `partial` result; repeated failure asks for a `blocked`
-result with evidence. The typed turn outcome is `budget_exhausted` or `stuck`. `wait` prints
-`== turn stopped: time budget 90 min exhausted` or `== turn stopped: repeated failure ×3: <command>`,
-then the wrap-up. The saved check runs; automatic review and fix rounds do not.
-
-`--max-weekly P` on `start`, `say`, or `review` caps total task usage in percentage points of the
-weekly limit (0 < P ≤ 100), across all phases, follow-ups, and accounts. Each exec seeds the high-water
-mark without charge from the greater of the saved mark and a fresh baseline in the same window: the
-account-selection snapshot, or its first weekly sample when no snapshot is available. Usage between
-execs is excluded. Repeated or lower samples add zero; a reset timestamp advancing by more than an
-hour starts a new mark without charging that sample. Concurrent tasks on one account count against
-each other, so allow extra budget for parallel work.
-The default is `max_task_weekly_percent`, or no cap when unset. Exhaustion follows
-the time-stop path, runs the saved check, and skips further automatic phases (`auto_fix_stop: "budget"`).
-`wait` prints `== turn stopped: weekly budget 10% exhausted (spent 10.4%)`. An exhausted task
-rejects `say` and `review` until `--max-weekly` exceeds its spend; consider splitting it before raising
-the cap. `status` and `wait` warn if the remaining budget exceeds account headroom up to `switch_at`.
+`--max-minutes M` on `start` and `say` caps active implementation time across account rotations;
+reviews and scouts use a separate cap. `--max-weekly P` on `start`, `say`, or `review` caps total task
+usage across phases, follow-ups and accounts. Repeated identical command failures also stop a turn.
+See [budgets](plugins/codex-worker/skills/codex-worker/references/budgets.md),
+[weekly accounting](plugins/codex-worker/skills/codex-worker/references/telemetry.md#weekly-usage-accounting),
+and [turn outcomes and wrap-ups](plugins/codex-worker/skills/codex-worker/references/results.md#turn-outcomes)
+for limits, stop behavior and the next action.
 
 ## Checks after each turn
 
@@ -284,7 +265,7 @@ A minimal configuration is:
 | `max_review_minutes` | `30` | Separate active exec budget for each review or scout turn. |
 | `max_task_weekly_percent` | Absent | Default task weekly budget for `start`; `--max-weekly P` overrides it, and `say` and `review` inherit the task budget. |
 | `review_angles_min_lines` | `400` | Changed-line threshold for `--review-angles auto`; counts `base..HEAD` and uncommitted changes. |
-| `ci` | `false` | Wait for GitHub PR checks after the automatic cycle; `start/say --ci` enables it for the task. |
+| `ci` | `false` | Enable PR CI when creating a task; follow-ups inherit it. `say --ci` enables it, `say --no-ci` disables it. |
 | `ci_timeout_minutes` | `30` | Maximum wait for PR checks per CI attempt. |
 | `repeat_limit` | `3` | Matching failures of the same command that trigger `stuck`; success for that command resets its count. |
 | `notify` | Absent | `"macos"` for desktop notifications, or an argv list that receives the event JSON as its final argument. |

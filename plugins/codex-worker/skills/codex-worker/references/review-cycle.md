@@ -1,6 +1,6 @@
 # How reviews, angles and fix rounds run
 
-When to choose angles and fix rounds, and when the cycle stops, is in `SKILL.md`. This file covers what
+Claude's default cycle and response to stops are in [SKILL.md](../SKILL.md). This file covers what
 the supervisor does in between. Before each automatic review, angle, or fix round, it checks the
 remaining task weekly budget. Exhaustion skips that phase and stops fixes with `auto_fix_stop: "budget"`.
 
@@ -13,12 +13,25 @@ checks that confirm a specific finding run again.
 
 ## Angles
 
+`--review-angles auto` runs `correctness,concurrency,tests` when the diff from base, including
+uncommitted changes, reaches `review_angles_min_lines` changed lines; below that it runs one ordinary
+review. For a specific risk, pass a comma-separated list instead:
+
+- `correctness`: behavior and the brief's "Done when" conditions;
+- `concurrency`: races, processes, signals, shared files and state, retries, and recovery;
+- `security`: secrets, shell and path injection, untrusted input, permissions, and sandbox boundaries;
+- `tests`: weakened or ineffective tests, uncovered brief conditions, and mocks replacing tested code.
+
+On `start` and `say`, `--review-angles` implies `--review`.
+
 Angles run one after another in fresh threads, with ordinary account rotation and reset waiting. Each
 angle gets its own review record. The supervisor combines the findings, merges duplicate locations and
 titles, and labels each finding with its angles. A refused angle is marked `refused` without stopping
 the others, and the verdict uses the other results.
 
 ## Fix rounds
+
+`--fix-rounds N` (0–5, default 0) needs `--review`.
 
 Each round sends the review's findings straight to the implementation thread, with the same account
 rotation and reset waiting as `say`. Codex must verify each finding against the code, fix real defects
@@ -40,8 +53,15 @@ Each round records the commits added to the task branch, including supervisor co
 sandbox mode. After a fix review, a P1/P2 finding with a file and line stops the cycle with
 `auto_fix_stop: "escalate"` if `git blame` at `HEAD` attributes any line within two lines of its
 location to a commit from an earlier fix round. Missing files and out-of-range lines do not match;
-P3 findings keep their existing behavior. `wait` names the finding, originating round, and short commit
-SHA. Claude chooses the next action as described in `SKILL.md`.
+P3 findings keep their existing behavior. Claude chooses the next action as described in
+[SKILL.md](../SKILL.md#stop-rules).
 
-`wait` also shows each round's code additions and deletions, excluding guarded files (built-in test
-patterns and `--guard` paths). This size is informational and does not stop the cycle.
+Round size is informational and does not stop the cycle; see
+[results.md](results.md#what-wait-prints) for the output.
+
+## Cycle stops
+
+The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop: "only P3"`), the round
+limit, escalation or the budget gate described above,
+a review where every angle refused (`auto_fix_stop: "review refused"`), an incomplete implementation
+result, or a non-completed [turn outcome](results.md#turn-outcomes).
