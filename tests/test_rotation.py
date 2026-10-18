@@ -4565,41 +4565,28 @@ worker.save = fail_once
         with self.assertRaises(ProcessLookupError):
             os.killpg(observed["pgid"], 0)
 
-    def test_signal_at_final_stop_flag_read_preserves_signal_metadata(self):
+    def test_signal_before_finalization_freeze_preserves_signal_metadata(self):
         self.configure(language="en")
         self.configure_notify()
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": "fixture result"}])
-        slug = "signal-at-final-flag-read"
+        slug = "signal-before-finalization-freeze"
         observed = self.run_supervisor_fixture(slug, r'''
-import inspect
-source, first_line = inspect.getsourcelines(worker.cmd__run)
-flag_read_line = next(first_line + offset for offset, line in enumerate(source)
-                      if "stopped_flag.is_set()" in line)
-def trace(frame, event, arg):
-    if (event == "line" and frame.f_code.co_name == "stopped"
-            and frame.f_lineno == flag_read_line and not observed):
-        caller = frame.f_back
-        if (caller.f_code.co_name == "stop_outcome"
-                and caller.f_back.f_code.co_name == "cmd__run"):
-            # Deliver after the old metadata check but before the flag read.
-            # Correct ordering captures the flag before transferring metadata,
-            # so a true result always publishes the signal that caused it.
-            observed["before"] = time.time()
-            os.kill(os.getpid(), signal.SIGTERM)
-            # Python 3.9 copies trace-frame locals back after this callback.
-            # Refresh them so that copy cannot undo the real handler's update
-            # to its received_signal closure cell.
-            observed["signal"] = frame.f_locals["received_signal"]
-            observed["after"] = time.time()
-    return trace
-sys.settrace(trace)
+real_sigmask = worker.signal.pthread_sigmask
+stop_signals = {signal.SIGINT, signal.SIGTERM}
+def sigmask(how, requested):
+    if how == signal.SIG_BLOCK and stop_signals <= set(requested) and not observed:
+        # The first signal before the finalization boundary still determines
+        # the turn outcome and must be copied to state before publication.
+        observed["before"] = time.time()
+        os.kill(os.getpid(), signal.SIGTERM)
+        observed["after"] = time.time()
+    return real_sigmask(how, requested)
+worker.signal.pthread_sigmask = sigmask
 ''')
-        self.assertTrue(observed, "fixture did not reach the final stop flag read")
+        self.assertTrue(observed, "fixture did not reach the finalization freeze")
         state = self.state(slug)
         self.assertEqual(state["outcome"], "interrupted")
         self.assertIsNone(state["pid"])
-        self.assertIn("signal", state)
-        self.assertEqual(state["signal"], observed["signal"])
         self.assertEqual(state["signal"]["name"], "SIGTERM")
         self.assertEqual(state["signal"]["signum"], signal.SIGTERM)
         self.assertGreaterEqual(state["signal"]["at"], observed["before"])
@@ -4613,9 +4600,14 @@ sys.settrace(trace)
         self.assertIn(message, interrupted["message"])
         self.assertNotIn("unknown", interrupted["message"])
         self.assertIn("== " + message, self.wait(slug))
-        self.assertEqual(self.notification(slug, "turn_finished")["outcome"], "interrupted")
+        events = self.notifications(slug)
+        finished = [event for event in events if event["event"] == "turn_finished"]
+        self.assertEqual(len(finished), 1)
+        self.assertEqual(finished[0]["outcome"], "interrupted")
+        self.assertEqual(len([event for event in events if event["event"] == "interrupted"]), 1)
         rows = [row for row in self.telemetry_journal() if row["slug"] == slug and row["phase"] == "turn"]
-        self.assertEqual(rows[-1]["outcome"], "interrupted")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["outcome"], "interrupted")
         report = json.loads(self.cli("report", "--slug", slug, "--json"))
         self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
         self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
@@ -4623,26 +4615,44 @@ sys.settrace(trace)
         self.assertEqual(len(invocations), 1)
         self.assertFalse(self.process_is_live(invocations[0]["pid"]), "worker escaped its supervisor")
 
-    def test_late_signal_keeps_final_publications_consistent(self):
+    def test_signal_during_finalization_is_logged_without_republishing(self):
         self.configure(language="en")
         self.configure_notify()
+        # Check the actual hook child, whose mask differs from the supervisor's
+        # frozen finalization mask and must still accept cancellation signals.
+        (self.root / "receive-notification.py").write_text(
+            "import json, signal, sys\n"
+            "from pathlib import Path\n"
+            "event = json.loads(sys.argv[-1])\n"
+            "blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set())\n"
+            "event['blocked_signals'] = sorted(int(sig) for sig in blocked & {signal.SIGINT, signal.SIGTERM})\n"
+            "with Path(sys.argv[1]).open('a') as stream:\n"
+            "    stream.write(json.dumps(event) + '\\n')\n")
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": "fixture result"}])
-        for point in ("notify", "hook-launched", "reap", "pending"):
+        for point in ("record", "notify", "hook-launched", "reap"):
             with self.subTest(point=point):
-                slug = "late-signal-" + point
+                slug = "finalization-signal-" + point
                 observed = self.run_supervisor_fixture(slug, "point = " + repr(point) + r'''
-observed.update(events=[], hook_masks=[], fired=False, finished_launched=False)
+observed.update(events=[], fired=False, finished_launched=False)
+real_record = worker.record_turn_result
 real_notify = worker.notify
 real_popen = worker.subprocess.Popen
 real_reap = worker.reap_notifications
-real_sigmask = worker.signal.pthread_sigmask
 stop_signals = {signal.SIGINT, signal.SIGTERM}
-def interrupt():
+def interrupt(current):
     observed["fired"] = True
+    observed["outcome_at_signal"] = current["outcome"]
+    blocked = signal.pthread_sigmask(signal.SIG_BLOCK, set())
+    observed["masked"] = stop_signals <= blocked
     os.kill(os.getpid(), signal.SIGTERM)
+    observed["pending"] = signal.SIGTERM in signal.sigpending()
+def record(current, stopped):
+    if point == "record" and not observed["fired"]:
+        interrupt(current)
+    return real_record(current, stopped)
 def notify(current, cfg, event, message, **fields):
     if point == "notify" and event == "turn_finished" and not observed["fired"]:
-        interrupt()
+        interrupt(current)
     result = real_notify(current, cfg, event, message, **fields)
     if event == "turn_finished":
         observed["finished_launched"] = True
@@ -4653,55 +4663,50 @@ def popen(args, *a, **kw):
     except (TypeError, ValueError):
         payload = None
     is_hook = isinstance(payload, dict) and payload.get("slug") == state["slug"] and "event" in payload
-    if is_hook:
-        blocked = sorted(int(sig) for sig in real_sigmask(signal.SIG_BLOCK, set()) & stop_signals)
-        observed["hook_masks"].append(blocked)
-        assert not blocked, "notification child would inherit blocked cancellation signals"
     proc = real_popen(args, *a, **kw)
     if is_hook:
         observed["events"].append(payload)
         if point == "hook-launched" and payload["event"] == "turn_finished" and not observed["fired"]:
-            interrupt()
+            interrupt(payload)
     return proc
 def reap():
     result = real_reap()
     if point == "reap" and observed["finished_launched"] and not observed["fired"]:
-        interrupt()
+        interrupt(observed["events"][-1])
     return result
-def sigmask(how, requested):
-    previous = real_sigmask(how, requested)
-    if (point == "pending" and how == signal.SIG_BLOCK and stop_signals <= set(requested)
-            and not observed["fired"]):
-        interrupt()
-        observed["pending"] = signal.SIGTERM in signal.sigpending()
-    return previous
+worker.record_turn_result = record
 worker.notify = notify
 worker.subprocess.Popen = popen
 worker.reap_notifications = reap
-worker.signal.pthread_sigmask = sigmask
 ''')
-                self.assertTrue(observed["fired"], "fixture did not reach the finalization boundary")
-                if point == "pending":
-                    self.assertTrue(observed["pending"], "fixture did not queue a blocked SIGTERM")
-                self.assertTrue(observed["hook_masks"])
-                self.assertTrue(all(not blocked for blocked in observed["hook_masks"]))
+                self.assertTrue(observed["fired"], "fixture did not reach the finalization checkpoint")
+                self.assertEqual(observed["outcome_at_signal"], "completed")
+                self.assertTrue(observed["masked"], "finalization did not block cancellation signals")
+                self.assertTrue(observed["pending"], "fixture did not queue a blocked SIGTERM")
                 state = self.state(slug)
-                self.assertEqual(state["outcome"], "interrupted")
+                self.assertEqual(state["outcome"], "completed")
                 self.assertIsNone(state["pid"])
-                self.assertEqual(state["signal"]["name"], "SIGTERM")
+                self.assertNotIn("signal", state)
+                log = (self.home / "claude-tasks" / slug / "stderr.log").read_text()
+                self.assertEqual(log.count("supervisor signal:"), 1)
+                self.assertIn("SIGTERM", log)
                 rows = [row for row in self.telemetry_journal() if row["slug"] == slug and row["phase"] == "turn"]
-                self.assertTrue(rows)
-                self.assertEqual(rows[-1]["outcome"], "interrupted")
-                finished = [event for event in observed["events"] if event["event"] == "turn_finished"]
-                self.assertEqual(finished[-1]["outcome"], "interrupted")
-                interrupted = [event for event in observed["events"] if event["event"] == "interrupted"]
-                self.assertEqual(len(interrupted), 1)
-                self.assertEqual(interrupted[0]["outcome"], "interrupted")
-                self.assertEqual(interrupted[0]["signal"]["name"], "SIGTERM")
-                self.notification(slug, "interrupted")
+                self.assertEqual(len(rows), 1)
+                self.assertEqual(rows[0]["outcome"], "completed")
+                events = self.notifications(slug)
+                finished = [event for event in events if event["event"] == "turn_finished"]
+                self.assertEqual(len(finished), 1)
+                self.assertEqual(finished[0]["outcome"], "completed")
+                self.assertEqual(finished[0]["blocked_signals"], [])
+                self.assertFalse(any(event["event"] == "interrupted" for event in events))
+                self.assertEqual(len([event for event in observed["events"]
+                                      if event["event"] == "turn_finished"]), 1)
                 report = json.loads(self.cli("report", "--slug", slug, "--json"))
-                self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
-                self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
+                self.assertEqual(report["summary"]["outcomes"], {"completed": 1})
+                self.assertEqual(report["tasks"][0]["outcome"], "completed")
+                output = self.wait(slug)
+                self.assertIn("fixture result", output)
+                self.assertNotIn("interrupted externally", output)
 
     def test_external_signal_interrupts_work_keeps_changes_and_skips_review(self):
         self.configure(language="en")
@@ -4725,7 +4730,7 @@ worker.signal.pthread_sigmask = sigmask
         self.assertNotIn("stop_request", state)
         stderr = (self.home / "claude-tasks" / slug / "stderr.log").read_text()
         self.assertIn("SIGTERM", stderr)
-        self.assertIn(str(signal.SIGTERM), stderr)
+        self.assertIn("signum=" + str(int(signal.SIGTERM)), stderr)
         self.assertRegex(stderr, r"ppid=\d+")
         self.assertRegex(stderr, r"pgid=\d+")
         expected_time = datetime.datetime.fromtimestamp(state["signal"]["at"]).strftime("%Y-%m-%d %H:%M")

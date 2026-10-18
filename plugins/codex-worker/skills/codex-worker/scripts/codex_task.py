@@ -302,6 +302,12 @@ def current_turn_account(st):
     return st["account"]
 
 
+def unblock_notification_signals():
+    # The supervisor is single-threaded. Reset only the child's inherited mask
+    # before exec so hooks remain cancellable during the parent's finalization.
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM})
+
+
 def notify(st, cfg, event, message, **fields):
     reap_notifications()
     cfg = accounts_config() if cfg is None else cfg
@@ -322,7 +328,8 @@ def notify(st, cfg, event, message, **fields):
         with (TASKS / st["slug"] / "notify.log").open("ab", buffering=0) as log:
             try:
                 proc = subprocess.Popen(args, cwd="/", stdin=subprocess.DEVNULL,
-                                        stdout=log, stderr=log, start_new_session=True)
+                                        stdout=log, stderr=log, start_new_session=True,
+                                        preexec_fn=unblock_notification_signals)
             except (OSError, ValueError) as exc:
                 log.write(f"{event}: notification launch failed: {exc}\n".encode("utf-8", errors="replace"))
             else:
@@ -2675,60 +2682,41 @@ def cmd__run(a):
         st.update(outcome="failed", error=str(exc))
         print(f"supervisor failed: {exc}", file=sys.stderr)
     finally:
-        guarded_changed = len(guarded_changes(st)) if cfg is not None else 0
-        st.pop("sleeping", None)
-        st.pop("pending", None)
-        input_notified = False
-        while True:
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        finalized = True
+        try:
+            guarded_changed = len(guarded_changes(st)) if cfg is not None else 0
             st["outcome"] = stop_outcome(st, stopped) or st["outcome"]
             if st.get("fix_rounds") and (st["outcome"] != "completed" or not st.get("auto_fix_stop")):
                 st["auto_fix_stop"] = ("review refused" if st["outcome"] == "refused" and st.get("kind") == "review"
                                        else st["outcome"] if st["outcome"] != "completed"
                                        else st.get("review_skipped", "review unknown"))
+            st.pop("sleeping", None)
+            st.pop("pending", None)
             st["turn_finished"] = time.time()
-            published_outcome = st["outcome"]
-            published_signal = received_signal
             record_turn_result(st, stopped)
             if cfg is not None:
                 account = current_turn_account(st)
-                message = f"turn {published_outcome} on {account}"
+                message = f"turn {st['outcome']} on {account}"
                 result = st.get("result")
                 message += ", result " + (result["status"] if result is not None else "unknown")
                 if check is not None:
                     message += ", check " + check["outcome"]
-                notify(st, cfg, "turn_finished", message, outcome=published_outcome, account=account, result=result,
+                notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account, result=result,
                        guarded_changed=guarded_changed)
-                if published_outcome == "interrupted":
-                    notify(st, cfg, "interrupted", interruption_message(st), outcome=published_outcome,
+                if st["outcome"] == "interrupted":
+                    notify(st, cfg, "interrupted", interruption_message(st), outcome=st["outcome"],
                            signal=st.get("signal"))
-                if (not input_notified and result is not None and result["status"] in ("blocked", "needs_decision")
+                if (result is not None and result["status"] in ("blocked", "needs_decision")
                         and st.get("kind") not in ("review", "scout")):
                     question = next(iter(result["questions"]), "")
                     notify(st, cfg, "needs_input", f"result {result['status']}: {question}",
                            result=result, question=question)
-                    input_notified = True
             reap_notifications()
-            # A hook may already have received the old outcome when a signal
-            # arrives. Append a correcting turn result/event before publishing
-            # idle; report uses the latest result for this turn without extra cost.
-            mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
-            try:
-                pending_signals = signal.sigpending() & {signal.SIGINT, signal.SIGTERM}
-                for signum in sorted(pending_signals):
-                    stop(signal.sigwait({signum}), None)
-                outcome = stop_outcome(st, stopped_flag.is_set) or st["outcome"]
-                if outcome != published_outcome or received_signal is not published_signal:
-                    continue
-                # Freeze the outcome at this masked checkpoint for the idle
-                # state write. No children are launched here. Signals arriving
-                # after this boundary are logged when the mask is restored,
-                # without revising the finished turn's published outcome.
-                st["pid"] = None
-                save(st)
-                finalized = True
-                break
-            finally:
-                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+            st["pid"] = None
+            save(st)
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
 def cmd_start(a):
