@@ -176,20 +176,57 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(not status.stdout.strip() or status.stdout.strip().startswith("Z"),
                         "unmarked child is still holding worker stdout: " + status.stdout)
 
-    def _assert_neighbor_deadline_during_cleanup(self, delay, overdue):
+    def _assert_neighbor_deadline_during_cleanup(self, overdue):
         result = self._run("""
+            if __name__ == "__main__":
+                # The controller clock advances only after a synchronized receipt,
+                # so startup load cannot consume the neighboring test's deadline.
+                cleanup_started = rotation_runner.threading.Event()
+                neighbor_received = rotation_runner.threading.Event()
+                controller_time = rotation_runner.types.SimpleNamespace(
+                    now=0.0, monotonic=lambda: controller_time.now)
+                rotation_runner.time = controller_time
+
+                class ReceiptQueue(rotation_runner.queue.Queue):
+                    def put(self, event):
+                        super().put(event)
+                        _, message, received_at = event
+                        if (message is not None and message.get("name") ==
+                                "SyntheticTests.test_b_completes_during_cleanup"):
+                            (FIXTURE / "neighbor-received.json").write_text(json.dumps({
+                                "during_cleanup": cleanup_started.is_set(),
+                                "received_at": received_at}))
+                            neighbor_received.set()
+
+                rotation_runner.queue = rotation_runner.types.SimpleNamespace(
+                    Queue=ReceiptQueue, Empty=rotation_runner.queue.Empty)
+                original_cleanup = rotation_runner._cleanup
+
+                def synchronized_cleanup(root, process_groups=()):
+                    if process_groups and not cleanup_started.is_set():
+                        cleanup_started.set()
+                        if %s:
+                            controller_time.now = 2.0
+                        (FIXTURE / "cleanup-started").touch()
+                        if not neighbor_received.wait(10):
+                            raise RuntimeError("neighbor result not received during cleanup")
+                        # Processing happens after the deadline in both cases;
+                        # only the real reader's receipt time distinguishes them.
+                        controller_time.now = 2.0
+                    original_cleanup(root, process_groups=process_groups)
+
+                rotation_runner._cleanup = synchronized_cleanup
+
             class SyntheticTests(unittest.TestCase):
                 def test_a_crashes_with_child(self):
                     read_fd, write_fd = os.pipe()
                     child = subprocess.Popen(
                         [sys.executable, "-I", "-c",
                          "import os, signal, sys, time; "
-                         "from pathlib import Path; "
-                         "signal.signal(signal.SIGTERM, "
-                         "lambda *_: Path(sys.argv[2]).touch()); "
+                         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                          "os.write(int(sys.argv[1]), b'1'); "
                          "os.close(int(sys.argv[1])); time.sleep(60)",
-                         str(write_fd), str(FIXTURE / "cleanup-started")],
+                         str(write_fd)],
                         env={}, pass_fds=(write_fd,))
                     (FIXTURE / "detached.json").write_text(json.dumps({"pid": child.pid}))
                     os.close(write_fd)
@@ -197,7 +234,7 @@ class RunnerTests(unittest.TestCase):
                         self.assertEqual(os.read(read_fd, 1), b"1")
                     finally:
                         os.close(read_fd)
-                    deadline = time.monotonic() + 4
+                    deadline = time.monotonic() + 10
                     while not (FIXTURE / "neighbor-started").exists():
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(0.01)
@@ -205,19 +242,21 @@ class RunnerTests(unittest.TestCase):
 
                 def test_b_completes_during_cleanup(self):
                     (FIXTURE / "neighbor-started").touch()
-                    deadline = time.monotonic() + 4
+                    deadline = time.monotonic() + 10
                     while not (FIXTURE / "cleanup-started").exists():
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(0.01)
-                    time.sleep(%s)
                     (FIXTURE / "neighbor-finished").touch()
 
                 def test_c_passes(self):
                     self.assertTrue(True)
-        """ % delay)
+        """ % overdue)
         self._assert_summary(result, tests=3, errors=2 if overdue else 1)
         self.assertIn("(exit 17)", result.stderr)
         self.assertTrue((self.root / "neighbor-finished").exists(), result.stderr)
+        receipt = json.loads((self.root / "neighbor-received.json").read_text())
+        self.assertTrue(receipt["during_cleanup"])
+        self.assertEqual(receipt["received_at"], 2.0 if overdue else 0.0)
         self.assertIn("SyntheticTests.test_c_passes ... ok", result.stderr)
         if overdue:
             self.assertNotIn("SyntheticTests.test_b_completes_during_cleanup ... ok",
@@ -230,10 +269,10 @@ class RunnerTests(unittest.TestCase):
                           result.stderr)
 
     def test_runner_rejects_overdue_result_received_during_cleanup(self):
-        self._assert_neighbor_deadline_during_cleanup(delay=1.5, overdue=True)
+        self._assert_neighbor_deadline_during_cleanup(overdue=True)
 
     def test_runner_keeps_on_time_result_received_during_cleanup(self):
-        self._assert_neighbor_deadline_during_cleanup(delay=0.2, overdue=False)
+        self._assert_neighbor_deadline_during_cleanup(overdue=False)
 
     def test_runner_times_out_hanging_test_and_continues(self):
         result = self._run("""

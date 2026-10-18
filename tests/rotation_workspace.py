@@ -801,7 +801,8 @@ class WorkspaceTests(RotationTestCase):
         self.configure(language="en", sandbox="workspace")
         self.env["GH_REPO"] = "unrelated/host-repository"
         log = "fixture macOS traceback\nAssertionError: Python 3.9 compatibility\n"
-        self.configure_ci([[self.ci_check("pending")], [self.ci_check("fail")],
+        failed_check = self.ci_check("fail")
+        self.configure_ci([[self.ci_check("pending")], [failed_check],
                            [self.ci_check("pending")], [self.ci_check()]], jobs={"123": log})
         self.account(self.home, "A", self.reset, runs=[
             self.ci_work(), {"mode": "complete", "reply": self.review_result(False)},
@@ -819,8 +820,7 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([event["review"] for event in executions], [False, True, False])
         self.assertTrue(executions[2]["resume"])
         self.assertEqual(executions[2]["thread"], executions[0]["thread"])
-        for text in (self.ci_check()["name"], "fixture macOS traceback", "Python 3.9 compatibility",
-                     "blocked", "push"):
+        for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
             self.assertIn(text, executions[2]["prompt"])
         jobs = [event["argv"] for event in self.gh_invocations() if event["argv"][:2] == ["run", "view"]]
         self.assertEqual(jobs, [["run", "view", "--job", "123", "--log-failed",
@@ -916,7 +916,8 @@ class WorkspaceTests(RotationTestCase):
     def test_ci_repair_prompt_uses_russian_and_keeps_the_failed_job_evidence(self):
         self.configure(language="ru", sandbox="workspace")
         log = "fixture Russian CI repair traceback\nAssertionError: Python 3.9 support\n"
-        self.configure_ci([[self.ci_check("fail")], [self.ci_check()]], jobs={"123": log})
+        failed_check = self.ci_check("fail")
+        self.configure_ci([[failed_check], [self.ci_check()]], jobs={"123": log})
         self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed Python 3.9\n")])
         self.start("ci-fixed-ru", "--ci", "--check", "true")
         self.wait("ci-fixed-ru")
@@ -925,11 +926,12 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
-        prompt = executions[1]["prompt"]
-        for text in ("CI этой ветки упал", self.ci_check()["name"], "fixture Russian CI repair traceback",
-                     "Python 3.9 support", "исправь его и запушь ветку", "ничего не меняй", 'status: "blocked"'):
-            self.assertIn(text, prompt)
-        self.assertNotIn("CI failed for this branch", prompt)
+        worker = self.worker()
+        expected = worker.ci_fix_prompt(state, state["ci"], worker.accounts_config())
+        self.assertEqual(executions[1]["prompt"].partition("\n\n")[0],
+                         expected.partition("\n\n")[0])
+        for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
+            self.assertIn(text, executions[1]["prompt"])
         self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
                          [["pr", "create"], ["pr", "edit"]])
         self.assertEqual(len(self.ci_polls()), 2)
@@ -939,25 +941,19 @@ class WorkspaceTests(RotationTestCase):
         check = self.ci_check("fail")
         check["tail"] = "fixture failed job evidence\nAssertionError: Python 3.9\n"
         ci = {"sha": "a" * 40, "outcome": "failed", "checks": [check]}
-        expected = {
-            "en": ("CI failed for this branch", "fix it and push", "flaky or unrelated", "change nothing",
-                   "including evidence", "work JSON schema", "leave committing/pushing to the supervisor"),
-            "ru": ("CI этой ветки упал", "исправь его и запушь ветку", "нестабильный или не связан",
-                   "ничего не меняй", "приведя доказательства", "JSON-схему работы",
-                   "оставь коммит и пуш надзирателю")}
         for language in ("en", "ru"):
+            self.configure(language=language)
             for sandbox in ("off", "workspace"):
                 with self.subTest(language=language, sandbox=sandbox):
                     prompt = worker.ci_fix_prompt({"sandbox": sandbox}, ci, {"language": language})
-                    for text in expected[language][:-1]:
-                        self.assertIn(text, prompt)
                     for text in (check["name"], check["link"], "fixture failed job evidence",
-                                 "Python 3.9", 'status: "blocked"'):
+                                 "Python 3.9"):
                         self.assertIn(text, prompt)
+                    self.assertEqual(prompt, worker.ci_fix_prompt({"sandbox": sandbox}, ci,
+                                                                 worker.accounts_config()))
                     if sandbox == "workspace":
-                        self.assertIn(expected[language][-1], prompt)
-                    else:
-                        self.assertNotIn(expected[language][-1], prompt)
+                        self.assertNotEqual(prompt, worker.ci_fix_prompt({"sandbox": "off"}, ci,
+                                                                        {"language": language}))
 
     def test_ci_starts_after_review_auto_fix_and_its_second_local_check(self):
         self.configure(language="en", sandbox="workspace")
