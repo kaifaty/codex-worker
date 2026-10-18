@@ -849,6 +849,7 @@ class ReviewFixTests(RotationTestCase):
                 worker = self.worker()
                 cfg = {"language": language}
                 self.assertEqual(second_review["prompt"], worker.review_prompt(state, cfg))
+                self.assertEqual(correction["prompt"], worker.fix_prompt(state, review, None, cfg))
                 self.assertIn(str(self.home / "claude-tasks" / slug / "brief.md"), initial_review["prompt"])
                 self.assertEqual(state["reviews"][0]["result"], review)
                 self.assertNotIn(decisions[1]["note"], initial_review["prompt"])

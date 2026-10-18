@@ -926,6 +926,10 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
+        worker = self.worker()
+        expected = worker.ci_fix_prompt(state, state["ci"], worker.accounts_config())
+        self.assertEqual(executions[1]["prompt"].partition("\n\n")[0],
+                         expected.partition("\n\n")[0])
         for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
             self.assertIn(text, executions[1]["prompt"])
         self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
