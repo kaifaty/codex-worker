@@ -5203,6 +5203,51 @@ class RotationTests(unittest.TestCase):
         results = [entry["outcome"] for entry in self.reset_journal() if entry["event"] == "result"]
         self.assertEqual(results, ["unknown", "success"])
 
+    def test_reset_credit_rejects_another_explicit_credit_while_an_attempt_is_unknown(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, used=99)
+        pending = self.reset_credit("RateLimitResetCredit_pending", self.reset + 86400)
+        spare = self.reset_credit("RateLimitResetCredit_spare", self.reset + 2 * 86400)
+        self.reset_credits(self.home, pending, spare)
+        intent = {"slug": "interrupted-task", "account": "main", "creditId": pending["id"],
+                  "idempotencyKey": str(uuid.uuid4()), "at": time.time()}
+        journal = [dict(intent, event="attempt"), dict(intent, event="result", outcome="unknown")]
+        (self.home / "codex-worker-resets.jsonl").write_text(
+            "".join(json.dumps(entry) + "\n" for entry in journal))
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "reset-credit", "main", "--credit", spare["id"], "--yes"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn(f"credit {pending['id']} has a pending attempt with an unknown outcome; "
+                      f"resolve it first (reset-credit main --credit {pending['id']} "
+                      "--yes retries it with the same key)", result.stdout + result.stderr)
+        self.assertFalse(self.consume_calls())
+        self.assertEqual(self.reset_journal(), journal)
+        fixture = json.loads((self.home / "fixture.json").read_text())
+        self.assertTrue(all(credit["status"] == "available" for credit in fixture["rateLimitResetCredits"]["credits"]))
+
+    def test_reset_credit_explicit_pending_credit_retries_with_the_original_key(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, used=99)
+        pending = self.reset_credit("RateLimitResetCredit_pending", self.reset + 2 * 86400)
+        spare = self.reset_credit("RateLimitResetCredit_spare", self.reset + 86400)
+        self.reset_credits(self.home, pending, spare)
+        key = str(uuid.uuid4())
+        intent = {"slug": "interrupted-task", "account": "main", "creditId": pending["id"],
+                  "idempotencyKey": key, "at": time.time()}
+        journal = [dict(intent, event="attempt"), dict(intent, event="result", outcome="unknown")]
+        (self.home / "codex-worker-resets.jsonl").write_text(
+            "".join(json.dumps(entry) + "\n" for entry in journal))
+        self.cli("reset-credit", "main", "--credit", pending["id"], "--yes")
+        calls = self.consume_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["params"], {"creditId": pending["id"], "idempotencyKey": key})
+        results = [entry["outcome"] for entry in self.reset_journal() if entry["event"] == "result"]
+        self.assertEqual(results, ["unknown", "success"])
+        fixture = json.loads((self.home / "fixture.json").read_text())
+        credits = {credit["id"]: credit for credit in fixture["rateLimitResetCredits"]["credits"]}
+        self.assertEqual(credits[pending["id"]]["status"], "consumed")
+        self.assertEqual(credits[spare["id"]]["status"], "available")
+
     def test_reset_credit_reconciles_an_applied_timeout_without_spending_the_next_credit(self):
         self.configure()
         self.account(self.home, "A", self.reset, used=99)

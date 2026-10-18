@@ -609,6 +609,11 @@ def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: Fals
     """Resolve a lost reply before selecting another credit, under the same lock."""
     with reset_journal(cancelled) as (entries, record):
         pending = pending_resets(entries, account)
+        if pending and credit_id is not None and credit_id != pending[0]["creditId"]:
+            pending_id = pending[0]["creditId"]
+            raise RuntimeError(f"credit {pending_id} has a pending attempt with an unknown outcome; "
+                               f"resolve it first (reset-credit {account['name']} --credit {pending_id} "
+                               "--yes retries it with the same key)")
         if pending_only and not pending:
             return None
         info = account_read(account, cancelled)
