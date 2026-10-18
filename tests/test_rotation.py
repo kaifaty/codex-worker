@@ -33,6 +33,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "plugins" / "codex-worker" / "skills" / "codex-worker"
 SCRIPT = SKILL / "scripts" / "codex_task.py"
 PYTHON = sys.executable
+IMPOSSIBLE_PID = 2 ** 31 - 1
 
 
 # The fake has the same process boundary as Codex: the supervisor must discover
@@ -1740,7 +1741,7 @@ class RotationTests(unittest.TestCase):
         chunks = [message]
         observed = []
         exited = [False]
-        proc = mock.Mock(pid=12345)
+        proc = mock.Mock(pid=IMPOSSIBLE_PID)
         proc.stdout.fileno.return_value = 99
         proc.poll.side_effect = lambda: 0 if exited[0] else None
         proc.wait.return_value = 0
@@ -3496,7 +3497,7 @@ class RotationTests(unittest.TestCase):
         script = self.repo / "scripts/verify.sh"
         script.parent.mkdir()
         script.write_text("exit 0\n")
-        new_pid = 2 ** 31 - 1
+        new_pid = IMPOSSIBLE_PID
         original_popen = worker.subprocess.Popen
         original_guarded_changes = worker.guarded_changes
         launches = []
@@ -5469,7 +5470,7 @@ worker.reap_notifications = reap
         worker = self.worker()
         slug = "stop-save-race"
         (worker.TASKS / slug).mkdir(parents=True)
-        state = {"slug": slug, "pid": 12345, "outcome": "running"}
+        state = {"slug": slug, "pid": IMPOSSIBLE_PID, "outcome": "running"}
         worker.save(state)
         supervisor_state = dict(state)
 
@@ -5489,7 +5490,7 @@ worker.reap_notifications = reap
         self.assertEqual(worker.load(slug)["checkpoint"], "concurrent supervisor progress")
         self.assertEqual(worker.stop_outcome(dict(state), lambda: True), "stopped")
         self.assertEqual(worker.stop_outcome(dict(state), lambda: False), None)
-        next_turn = dict(state, pid=state["pid"] + 1)
+        next_turn = dict(state, pid=os.getpid())
         self.assertEqual(worker.stop_outcome(next_turn, lambda: True), "interrupted")
 
     def test_interrupted_notification_obeys_notify_events_filter(self):
@@ -6132,7 +6133,7 @@ worker.reap_notifications = reap
         worker = self.worker()
         for live in (True, False):
             with self.subTest(live=live):
-                proc = mock.Mock(pid=12345)
+                proc = mock.Mock(pid=IMPOSSIBLE_PID)
                 proc.poll.return_value = None if live else 0
                 with mock.patch.object(worker.os, "killpg", side_effect=PermissionError), \
                         mock.patch.object(worker.os, "kill") as kill:
@@ -7039,7 +7040,7 @@ with open(sys.argv[1], "a+") as journal:
 
     def test_status_and_wait_report_sleeping_supervisor_gone(self):
         worker = self.worker()
-        st = {"slug": "gone-sleeper", "pid": 12345, "outcome": "sleeping", "rotations": [],
+        st = {"slug": "gone-sleeper", "pid": IMPOSSIBLE_PID, "outcome": "sleeping", "rotations": [],
               "sleeping": {"until": self.reset, "account": "main", "reason": "quota"},
               "turns": 1, "branch": "test-branch", "base": "HEAD", "account": "main",
               "thread": "current-thread", "worktree": str(self.repo)}
@@ -7100,12 +7101,12 @@ with open(sys.argv[1], "a+") as journal:
                 stopped = [False]
                 slug = "quota-cancel-" + case
                 (worker.TASKS / slug).mkdir(parents=True)
-                st = {"slug": slug, "pid": 1234, "thread": "", "worktree": str(self.repo),
+                st = {"slug": slug, "pid": IMPOSSIBLE_PID, "thread": "", "worktree": str(self.repo),
                       "threads": [], "rotations": []}
                 if case == "stop":
                     st["stop_request"] = {"at": time.time(), "pid": st["pid"]}
                 worker.save(st)
-                proc = mock.Mock(pid=12345)
+                proc = mock.Mock(pid=IMPOSSIBLE_PID)
                 proc.poll.return_value = None
                 proc.stdout.fileno.return_value = 99
                 selector = mock.MagicMock()
@@ -7165,7 +7166,7 @@ with open(sys.argv[1], "a+") as journal:
                 (worker.TASKS / slug).mkdir(parents=True)
                 st = {"slug": slug, "thread": "same-thread" if resumed else "",
                       "worktree": str(self.repo), "threads": [], "rotations": []}
-                proc = mock.Mock(pid=12345)
+                proc = mock.Mock(pid=IMPOSSIBLE_PID)
                 proc.stdout.fileno.return_value = 99
                 proc.poll.side_effect = lambda: 0 if clock[0] >= duration else None
                 proc.wait.return_value = 0
@@ -7226,7 +7227,7 @@ with open(sys.argv[1], "a+") as journal:
     def test_wait_polls_each_second_and_clears_dead_legacy_pid(self):
         worker = self.worker()
         self.assertEqual(worker.WAIT_POLL_SECONDS, 1)
-        st = {"slug": "legacy-pid", "pid": 12345, "rotations": [], "turns": 1,
+        st = {"slug": "legacy-pid", "pid": IMPOSSIBLE_PID, "rotations": [], "turns": 1,
               "branch": "test-branch", "base": "HEAD", "worktree": str(self.repo)}
         running = [True]
 
@@ -7467,7 +7468,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                     stopped = [timing == "before"]
                     state = {"slug": "wrapup-" + outcome + "-" + timing, "repo": str(self.repo),
                              "kind": "work", "account": "main", "thread": "existing-thread",
-                             "pid": 1234, "created": time.time()}
+                             "pid": IMPOSSIBLE_PID, "created": time.time()}
                     if outcome == "stopped":
                         state["stop_request"] = {"at": time.time(), "pid": state["pid"]}
                     (worker.TASKS / state["slug"]).mkdir(parents=True)
