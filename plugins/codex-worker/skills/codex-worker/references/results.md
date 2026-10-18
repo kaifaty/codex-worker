@@ -29,18 +29,16 @@ PRs are left unchanged.
 
 ## CI result
 
-With `--ci` or `"ci": true`, the final state includes `ci`: the PR head SHA, outcome (`passed`,
-`failed`, `timeout`, `none`, or `skipped`), checks and states, duration, repair-round count, and stop
-reason (`passed`, `rounds_exhausted`, `blocked`, `timeout`, or `none`; skipped waits record why).
-CI runs only after a completed cycle with a passing or absent local check and a known GitHub PR
-whose head equals local HEAD. A blocked CI repair ends without another wait.
+When the [task CI setting](settings.md#task-ci-options) is enabled, state includes `ci`: the PR head
+SHA, outcome (`pending` while waiting, then `passed`, `failed`, `timeout`, `none`, or `skipped`), checks
+and states, cumulative wait duration, repair-round count, and stop reason. The reason identifies a
+pass, exhausted repair rounds, an incomplete repair result, a budget stop, timeout, absent checks, or
+why waiting was skipped. See [ci.md](ci.md) for waiting and repair mechanics.
 
 `wait` prints, for example, `== CI 3749d91: passed (8/8, 6.2 min)` or
 `== CI 3749d91: FAILED 1/8: test (macos-latest, 3.9)`, followed by failed-check log tails.
-GitHub Actions job logs are capped at 150 lines per failed check and 400 total; external checks show
-their names and links. No checks after three minutes gives `none`; pending checks beyond
-`ci_timeout_minutes` gives `timeout`. Neither permits merging: Claude requires `CI … passed` and
-must still rerun `gh pr checks <url>` immediately before merging.
+External checks show their names and links. Claude's merge decisions remain in
+[SKILL.md](../SKILL.md#the-loop).
 
 ## Review result
 
@@ -57,21 +55,29 @@ original text.
 
 ## Turn outcomes
 
-A turn ends as `completed`, `failed`, `refused`, `stopped`, `budget_exhausted` or `stuck`.
+These are all values written to the task's top-level `outcome`. They describe supervisor execution,
+separately from the implementation `result.status`, saved checks, CI and reset-credit outcomes.
 
-- `budget_exhausted`: the turn used up its time budget, or the task used up its `--max-weekly` budget.
-- `stuck`: the same command failed with the same nonzero exit code and the same last 2 KB of output
-  `repeat_limit` times. Other commands do not reset the count; a successful run of that command does.
-- `refused`: the model refused for possible cybersecurity risk; `wait` shows the first 200 characters
-  of the refusal.
+| Outcome | Meaning | What Claude does |
+|---|---|---|
+| `running` | A work, scout or review phase is active. | Let the active phase finish. |
+| `sleeping` | No account is currently usable; the supervisor is waiting to retry or for a reset. | Follow [accounts.md](accounts.md#waiting-for-a-reset) for `auto-continue at` and `wait --through-sleep`. |
+| `completed` | Exec completed successfully; an implementation result or review may still be incomplete or unknown. | Read `result` or the review and continue the [default loop](../SKILL.md#the-loop). |
+| `failed` | Exec or the supervisor failed, or no usable authenticated account remains. | Read the error and logs; resolve the cause, including any requested login, before a follow-up. |
+| `refused` | The model refused for possible cybersecurity risk; no retry or account rotation follows. `wait` shows the first 200 characters of the refusal. | Read the refusal and reassess the task rather than starting another automatic fix cycle. |
+| `stopped` | A durable `stop` request addressed this supervisor. | Inspect the preserved work and decide whether to continue with `say`. |
+| `interrupted` | A signal interrupted the supervisor without a matching `stop` request. | Check the preserved worktree with `git status`, then continue with `say`; if it repeats, inspect the signal line in `stderr.log`. |
+| `exhausted` | Account capacity is unavailable and reset waiting is disabled or exceeded eight days. | Inspect `accounts` and the recorded reset time; resolve availability before continuing with `say`. |
+| `budget_exhausted` | The turn reached its time cap, or the task reached its weekly budget. | Use the check, wrap-up and remaining work to decide whether to split the task. For a time stop, split or send a budgeted `say`; for a weekly stop, raise the saved budget with `say --max-weekly P` only after that decision. |
+| `stuck` | The same command failed with the same nonzero exit code and last 2 KB of output `repeat_limit` times. Other commands do not reset the count; a successful run of that command does. | Investigate the failure yourself or take it to the user; do not start another automatic fix cycle. |
 
 After `budget_exhausted` or `stuck` the supervisor stops the exec process group and asks for a wrap-up
 in the same thread, in the configured language. Time or weekly exhaustion asks for working changes to be
 committed and pushed, a `partial` result and the remaining work; repeated failure asks for a `blocked`
 result with numbers and attempts. The wrap-up has a 10-minute cap and is stopped when it reaches it.
 `wait` prints the stop reason, then the wrap-up result. For a weekly stop it prints, for example,
-`== turn stopped: weekly budget 10% exhausted (spent 10.4%)`. The saved check runs; automatic review,
-angles, and fix rounds stop. Before increasing the task budget, decide whether to split the work.
+`== turn stopped: weekly budget 10% exhausted (spent 10.4%)`. Saved-check behavior is described in
+[checks.md](checks.md#when-the-saved-check-runs).
 
 ## What `wait` prints
 

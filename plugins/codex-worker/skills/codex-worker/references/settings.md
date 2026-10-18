@@ -11,11 +11,21 @@ that file is absent.
 | `max_task_weekly_percent` | none | task weekly budget in percentage points (0 < P ≤ 100); `start --max-weekly P` overrides it, and `say` and `review` inherit or replace the saved task budget |
 | `repeat_limit` | `3` | identical failures before a `stuck` stop ([results.md](results.md)) |
 | `review_angles_min_lines` | `400` | changed lines from which `--review-angles auto` runs angles |
-| `ci` | `false` | wait for GitHub PR checks after the automatic cycle; `start/say --ci` enables it for the task |
-| `ci_timeout_minutes` | `30` | maximum wait for PR checks per CI attempt; `--ci-rounds N` defaults to one repair turn |
+| `ci` | `false` | initial task CI setting; see [Task CI options](#task-ci-options) |
+| `ci_timeout_minutes` | `30` | maximum wait for PR checks per CI attempt |
 | `sandbox`, `writable_dirs` | `"off"`, `[]` | [sandbox.md](sandbox.md) |
 | `accounts`, `switch_at`, `credits`, `wait_for_reset`, `use_reset_credits`, `reset_credit_min_hours` | | [accounts.md](accounts.md) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
+
+## Task CI options
+
+`start --ci` or `"ci": true` in the settings enables GitHub PR check waiting for the task. The saved
+setting persists across follow-ups: `say` without CI flags preserves it, `say --ci` enables it, and
+`say --no-ci` disables it. `--ci` and `--no-ci` are mutually exclusive on `say`.
+
+`start --ci-rounds N` sets the maximum repair turns per CI cycle (a nonnegative integer, default 1).
+`say --ci-rounds N` replaces the saved limit; omitting it preserves the limit. Changing the round limit
+does not enable CI. Waiting and repair mechanics are in [ci.md](ci.md).
 
 ## Standing rules
 

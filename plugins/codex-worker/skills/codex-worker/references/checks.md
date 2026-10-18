@@ -3,6 +3,8 @@
 ## When the saved check runs
 
 `--check-timeout SEC` defaults to 1800; check output goes to the task's `check.log`.
+The saved check runs in the worktree after a completed implementation turn, before review. A failure
+or timeout skips the review, and `wait` shows the last 40 lines of `check.log`.
 
 - A `partial`, `blocked` or `needs_decision` result skips automatic review with
   `review_skipped: "result <status>"`; the saved check still runs.

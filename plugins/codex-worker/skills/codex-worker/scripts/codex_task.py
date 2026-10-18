@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E] [--max-weekly P] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
@@ -15,10 +15,12 @@
   codex_task.py reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
 
+All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
 credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
 review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
-start/say --ci (or ci: true) waits for PR CI; --ci-rounds N defaults to 1, ci_timeout_minutes to 30.
+start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
+say --ci/--no-ci enables/disables CI; --ci-rounds N replaces the saved round limit. ci_timeout_minutes defaults to 30.
 Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without rotation; weekly budgets still monitor rollout usage.
 State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
@@ -624,12 +626,6 @@ def consume_recorded_reset(account, credit, slug, cancelled, entries, record):
         raise
     record(intent, event="result", outcome="success", response=response)
     return response
-
-
-def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
-    """Pin the intent to a durable key before sending, including after a lost reply."""
-    with reset_journal(cancelled) as (entries, record):
-        return consume_recorded_reset(account, credit, slug, cancelled, entries, record)
 
 
 def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: False,
@@ -3383,8 +3379,8 @@ def cmd_say(a):
     scouting = st.get("kind") == "scout"
     angles = getattr(a, "review_angles", None)
     if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
-                     or a.no_base_check or angles is not None or a.ci or a.ci_rounds is not None):
-        die("scout is read-only; say --check, --check-timeout, --review, --review-angles, --fix-rounds, --ci, --ci-rounds and --no-base-check are not supported")
+                     or a.no_base_check or angles is not None or a.ci or a.no_ci or a.ci_rounds is not None):
+        die("scout is read-only; say --check, --check-timeout, --review, --review-angles, --fix-rounds, --ci, --no-ci, --ci-rounds and --no-base-check are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -3393,8 +3389,12 @@ def cmd_say(a):
     set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     minutes = getattr(a, "max_minutes", None)
     st["max_turn_minutes"] = minutes if minutes is not None else cfg.get("max_turn_minutes")
-    st["ci_enabled"] = getattr(a, "ci", False) or cfg.get("ci", False)
-    st["ci_rounds"] = a.ci_rounds if getattr(a, "ci_rounds", None) is not None else 1
+    if getattr(a, "no_ci", False):
+        st["ci_enabled"] = False
+    elif getattr(a, "ci", False):
+        st["ci_enabled"] = True
+    if getattr(a, "ci_rounds", None) is not None:
+        st["ci_rounds"] = a.ci_rounds
     st["ci_timeout_minutes"] = cfg.get("ci_timeout_minutes", 30)
     st["review_angles"] = angles
     if a.no_check:
@@ -3903,8 +3903,10 @@ def main():
                    help="review with comma-separated presets or auto (implies --review)")
     s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
                    help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
-    s.add_argument("--ci", action="store_true", help="wait for PR CI and repair failures")
-    s.add_argument("--ci-rounds", type=ci_rounds, metavar="N", help="maximum CI repair rounds (default: 1)")
+    ci = s.add_mutually_exclusive_group()
+    ci.add_argument("--ci", action="store_true", help="enable PR CI waiting and repair for this task")
+    ci.add_argument("--no-ci", action="store_true", help="disable PR CI waiting and repair for this task")
+    s.add_argument("--ci-rounds", type=ci_rounds, metavar="N", help="replace the saved maximum CI repair rounds")
     checks = s.add_mutually_exclusive_group()
     checks.add_argument("--check", help="replace the saved check command")
     checks.add_argument("--no-check", action="store_true", help="remove the saved check command")

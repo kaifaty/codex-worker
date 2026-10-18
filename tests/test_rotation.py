@@ -2010,7 +2010,7 @@ class RotationTests(unittest.TestCase):
                     self.assertIn("verify: " + finding["verify"], output)
                 self.assertIn("== CI " + state["ci"]["sha"][:7] + ": passed", output)
 
-                self.cli("say", slug, "Continue without another review or CI wait")
+                self.cli("say", slug, "Continue without another review or CI wait", "--no-ci")
                 followup = self.wait(slug)
                 current = self.state(slug)
                 self.assertEqual(current["review_start"], len(current["reviews"]))
@@ -2141,32 +2141,20 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(len(self.ci_polls()), 1)
         self.assertEqual(len(self.invocations()), 2)
 
-    def test_ci_flags_and_config_defaults_apply_to_start_and_say(self):
+    def test_ci_flags_and_config_defaults_apply_to_start(self):
         self.configure(language="en", sandbox="workspace")
         defaults = self.worker().accounts_config()
         self.assertFalse(defaults["ci"])
         self.assertEqual(defaults["ci_timeout_minutes"], 30)
-        self.configure_ci([[self.ci_check("fail")]])
-        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
-        self.start("ci-say")
-        self.wait("ci-say")
-        self.assertFalse(self.state("ci-say").get("ci"))
-        self.assertFalse(self.ci_polls())
-        self.cli("say", "ci-say", "Inspect the existing CI failure", "--ci", "--ci-rounds", "0")
-        self.wait("ci-say")
-        state = self.state("ci-say")
-        self.assertTrue(state["ci_enabled"])
-        self.assertEqual(state["ci_rounds"], 0)
-        self.assertEqual((state["ci"]["outcome"], state["ci"]["reason"]), ("failed", "rounds_exhausted"))
-        self.assertEqual(len(self.invocations()), 2)
-        before = len(self.ci_polls())
-        self.cli("say", "ci-say", "Continue without CI enabled")
-        self.wait("ci-say")
-        self.assertFalse(self.state("ci-say").get("ci"))
-        self.assertEqual(self.state("ci-say")["ci_rounds"], 1)
-        self.assertEqual(len(self.ci_polls()), before)
-        self.configure(language="en", sandbox="workspace", ci=True, ci_timeout_minutes=17)
         self.configure_ci([[self.ci_check()]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-flag", "--ci", "--ci-rounds", "2")
+        self.wait("ci-flag")
+        flagged = self.state("ci-flag")
+        self.assertTrue(flagged["ci_enabled"])
+        self.assertEqual(flagged["ci_rounds"], 2)
+        self.assertEqual(flagged["ci"]["outcome"], "passed")
+        self.configure(language="en", sandbox="workspace", ci=True, ci_timeout_minutes=17)
         self.start("ci-config")
         self.wait("ci-config")
         configured = self.state("ci-config")
@@ -2174,6 +2162,97 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(configured["ci_rounds"], 1)
         self.assertEqual(configured["ci_timeout_minutes"], 17)
         self.assertEqual(configured["ci"]["outcome"], "passed")
+        self.assertEqual(len(self.ci_polls()), 2)
+
+    def test_say_preserves_task_ci_and_rounds_without_flags(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check("fail")]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-inherited", "--ci", "--ci-rounds", "0")
+        self.wait("ci-inherited")
+        self.cli("say", "ci-inherited", "Inspect the existing CI failure")
+        self.wait("ci-inherited")
+        state = self.state("ci-inherited")
+        self.assertTrue(state["ci_enabled"])
+        self.assertEqual(state["ci_rounds"], 0)
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["reason"]), ("failed", "rounds_exhausted"))
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.ci_polls()), 2)
+
+    def test_say_ci_enables_task_ci(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check("fail")]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-say", "--ci-rounds", "0")
+        self.wait("ci-say")
+        self.assertFalse(self.state("ci-say").get("ci"))
+        self.assertFalse(self.ci_polls())
+        self.cli("say", "ci-say", "Inspect the existing CI failure", "--ci")
+        self.wait("ci-say")
+        state = self.state("ci-say")
+        self.assertTrue(state["ci_enabled"])
+        self.assertEqual(state["ci_rounds"], 0)
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["reason"]), ("failed", "rounds_exhausted"))
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.ci_polls()), 1)
+
+    def test_say_no_ci_disables_task_ci_and_preserves_that_setting(self):
+        self.configure(language="en", sandbox="workspace", ci=True)
+        self.configure_ci([[self.ci_check()]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-disabled", "--ci-rounds", "2")
+        self.wait("ci-disabled")
+        self.assertTrue(self.state("ci-disabled")["ci_enabled"])
+        before = len(self.ci_polls())
+        self.cli("say", "ci-disabled", "Continue without CI enabled", "--no-ci")
+        self.wait("ci-disabled")
+        self.assertFalse(self.state("ci-disabled")["ci_enabled"])
+        self.assertFalse(self.state("ci-disabled").get("ci"))
+        self.cli("say", "ci-disabled", "Keep CI disabled")
+        self.wait("ci-disabled")
+        state = self.state("ci-disabled")
+        self.assertFalse(state["ci_enabled"])
+        self.assertFalse(state.get("ci"))
+        self.assertEqual(state["ci_rounds"], 2)
+        self.assertEqual(len(self.ci_polls()), before)
+        self.assertEqual(len(self.invocations()), 3)
+
+    def test_say_ci_rounds_replaces_the_saved_limit_without_changing_ci(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check("fail")]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-rounds", "--ci", "--ci-rounds", "0")
+        self.wait("ci-rounds")
+        self.cli("say", "ci-rounds", "Allow one repair attempt", "--ci-rounds", "1")
+        self.wait("ci-rounds")
+        state = self.state("ci-rounds")
+        self.assertTrue(state["ci_enabled"])
+        self.assertEqual(state["ci_rounds"], 1)
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"], state["ci"]["reason"]),
+                         ("failed", 1, "rounds_exhausted"))
+        self.assertEqual(len(self.invocations()), 3)
+        self.assertEqual(len(self.ci_polls()), 3)
+        self.cli("say", "ci-rounds", "Disable CI but save its next repair limit", "--no-ci", "--ci-rounds", "2")
+        self.wait("ci-rounds")
+        self.cli("say", "ci-rounds", "Change only the repair limit", "--ci-rounds", "3")
+        self.wait("ci-rounds")
+        state = self.state("ci-rounds")
+        self.assertFalse(state["ci_enabled"])
+        self.assertEqual(state["ci_rounds"], 3)
+        self.assertEqual(len(self.ci_polls()), 3)
+
+    def test_say_rejects_conflicting_ci_flags_before_starting_a_turn(self):
+        self.configure(language="en")
+        self.start("ci-conflicting")
+        self.wait("ci-conflicting")
+        before, state = len(self.invocations()), self.state("ci-conflicting")
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "say", "ci-conflicting", "Do not run",
+                                 "--ci", "--no-ci"], cwd=self.repo, env=self.env,
+                                text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 2)
+        self.assertIn("not allowed with argument", result.stderr)
+        self.assertEqual(len(self.invocations()), before)
+        self.assertEqual(self.state("ci-conflicting"), state)
 
     def test_ci_rounds_reject_negative_and_fractional_values_before_any_turn(self):
         self.configure(language="en")
@@ -4246,6 +4325,9 @@ class RotationTests(unittest.TestCase):
                      ("say", "scout-no-writes", "Disable fixes", "--fix-rounds", "0"),
                      ("say", "scout-no-writes", "Fix review", "--review", "--fix-rounds", "1"),
                      ("say", "scout-no-writes", "Review angles", "--review-angles", "auto"),
+                     ("say", "scout-no-writes", "Enable CI", "--ci"),
+                     ("say", "scout-no-writes", "Disable CI", "--no-ci"),
+                     ("say", "scout-no-writes", "Set CI repairs", "--ci-rounds", "0"),
                      ("review", "scout-no-writes", "--review-angles", "correctness,concurrency"),
                      ("review", "scout-no-writes")):
             with self.subTest(args=args):
@@ -8143,9 +8225,10 @@ with open(sys.argv[1], "a+") as journal:
                     mock.patch.object(worker.time, "sleep", side_effect=cancel_while_waiting), \
                     mock.patch.object(worker, "account_rpc") as account_rpc:
                 with self.assertRaisesRegex(RuntimeError, "stopped"):
-                    worker.consume_reset_credit({"name": "main", "home": str(self.home)},
-                                                self.reset_credit("RateLimitResetCredit_cancelled", self.reset),
-                                                slug="cancelled-reset", cancelled=lambda: cancelled[0])
+                    worker.reset_credit_action({"name": "main", "home": str(self.home)},
+                                               credit_id="RateLimitResetCredit_cancelled",
+                                               slug="cancelled-reset", cancelled=lambda: cancelled[0],
+                                               confirmed=True)
             self.assertTrue(cancelled[0], "the operation must wait for the contended lock")
             account_rpc.assert_not_called()
             self.assertEqual(journal.read_text(), "", "cancel before recording an intent or sending an RPC")
