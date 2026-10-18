@@ -171,9 +171,11 @@ with a reason, then checks and reviews again.
 
 - The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop: "only P3"`), the round
   limit, a review where every angle refused (`auto_fix_stop: "review refused"`), `partial`, `blocked`,
-  `needs_decision`, `budget_exhausted`, `stuck`, or `stop`. You decide what happens to remaining P3
+  `needs_decision`, `budget_exhausted`, `stuck`, `interrupted`, or `stop`. You decide what happens to remaining P3
   findings.
 - After two rounds on the same point, take it to the user.
+- After `interrupted`, check the preserved worktree with `git status` and continue through `say`.
+  If interruptions repeat, inspect the signal line in `stderr.log`.
 - A Codex PR you started through this skill is your work for the repo's merge rules; still ask the user
   before merging anything they asked to see first, or anything that breaks what is in use.
 
