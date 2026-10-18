@@ -33,23 +33,25 @@ _suite_repetitions = 0
 def reset_tests(selection="reset"):
     """Find reset synchronization tests, optionally including minute budgets."""
     names = []
-    source = ast.parse(TEST_SCRIPT.read_text())
-    for cls in source.body:
-        if not isinstance(cls, ast.ClassDef):
-            continue
-        for method in cls.body:
-            if not isinstance(method, ast.FunctionDef) or not method.name.startswith("test_"):
+    modules = runpy.run_path(str(TEST_SCRIPT), run_name="rotation_tests")["TEST_MODULES"]
+    for module in modules:
+        source = ast.parse(Path(module.__file__).read_text())
+        for cls in source.body:
+            if not isinstance(cls, ast.ClassDef):
                 continue
-            nodes = list(ast.walk(method))
-            uses_reset = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                             and node.func.attr == "reset_after_ready" for node in nodes)
-            uses_minutes = any((isinstance(node, ast.Constant)
-                                and node.value == "CODEX_TASK_MINUTE_SECONDS")
-                               or (isinstance(node, ast.keyword)
-                                   and node.arg == "CODEX_TASK_MINUTE_SECONDS")
-                               for node in nodes)
-            if uses_reset or (selection == "timing" and uses_minutes):
-                names.append(cls.name + "." + method.name)
+            for method in cls.body:
+                if not isinstance(method, ast.FunctionDef) or not method.name.startswith("test_"):
+                    continue
+                nodes = list(ast.walk(method))
+                uses_reset = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                                 and node.func.attr == "reset_after_ready" for node in nodes)
+                uses_minutes = any((isinstance(node, ast.Constant)
+                                    and node.value == "CODEX_TASK_MINUTE_SECONDS")
+                                   or (isinstance(node, ast.keyword)
+                                       and node.arg == "CODEX_TASK_MINUTE_SECONDS")
+                                   for node in nodes)
+                if uses_reset or (selection == "timing" and uses_minutes):
+                    names.append("RotationTests." + method.name)
     return names
 
 
