@@ -26,8 +26,10 @@ import rotation_accounts
 import rotation_telemetry
 import test_runner
 import test_stress_selection
+import test_process_cleanup
 from test_runner import RunnerTests
 from test_stress_selection import StressSelectionTests
+from test_process_cleanup import ProcessCleanupTests
 
 
 # Keep historical unittest selectors and IDs while tests live in topic modules.
@@ -48,7 +50,7 @@ class RotationTests(
 
 # Source order is also the order used by the AST-based stress selection.
 TEST_MODULES = (tuple(sys.modules[cls.__module__] for cls in RotationTests.__bases__)
-                + (test_runner, test_stress_selection))
+                + (test_runner, test_stress_selection, test_process_cleanup))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,23 @@ import subprocess
 import time
 
 
+def _mentions_root(command, root_paths):
+    # ps flattens argv and the environment into one string. Match complete
+    # directory components so worker /1 cannot claim worker /10 or /1-other.
+    # Keep literal spaces inside a root: neither argv nor ps escapes them.
+    before_path = " \t\r\n=:'\""
+    after_path = "/ \t\r\n:'\""
+    for path in root_paths:
+        start = command.find(path)
+        while start != -1:
+            end = start + len(path)
+            if ((start == 0 or command[start - 1] in before_path)
+                    and (end == len(command) or command[end] in after_path)):
+                return True
+            start = command.find(path, start + 1)
+    return False
+
+
 def _fixture_processes(root, owned, groups):
     # Published pids still identify children after a supervisor exits or clears
     # its final state. Traces also retain process groups of orphaned tools.
@@ -53,7 +70,7 @@ def _owned_processes(root, owned, groups):
         except ValueError:
             continue
         table[pid] = (parent, group, fields[3])
-        if pid not in protected and any(path in fields[4] for path in root_paths):
+        if pid not in protected and _mentions_root(fields[4], root_paths):
             owned.add(pid)
     owned.difference_update(protected)
     groups.difference_update((0, 1, os.getpgrp()))
@@ -77,16 +94,18 @@ def _owned_processes(root, owned, groups):
     return live
 
 
-def cleanup_processes(root, extra_pids=()):
+def cleanup_processes(root, extra_pids=(), process_groups=()):
     """Escalate SIGTERM to SIGKILL and return any surviving live process ids.
 
     The caller decides whether survivors are a test assertion or runner error.
     Ownership is retained between snapshots so reparenting cannot hide a child.
+    Known process groups also identify children after their group leader exits,
+    even when the children remove the test directory from their environment.
     """
     # Keep macOS's /var spelling as well as /private/var: either can occur in
     # subprocess argv or inherited environment variables.
     root = Path(root).absolute()
-    owned, groups = set(extra_pids), set()
+    owned, groups = set(extra_pids), set(process_groups)
     live = set()
     for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, 3)):
         signalled, signalled_groups = set(), set()

@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from process_cleanup import cleanup_processes
 
 
-def _cleanup(root):
-    live = cleanup_processes(root)
+def _cleanup(root, process_groups=()):
+    live = cleanup_processes(root, process_groups=process_groups)
     if live:
         raise RuntimeError("test processes survived cleanup: %s" % sorted(live))
 
@@ -148,9 +148,9 @@ def run(module):
         counts["errors"] += 1
         print("%s ... ERROR (%s after %.3fs)" %
               (name, reason, time.monotonic() - began), file=sys.stderr, flush=True)
-        # Use this worker's directory so concurrent tests keep running. Its
-        # process group and detached descendants share the same ownership scan.
-        _cleanup(directories[worker])
+        # Retain the known group after its leader exits: a child can inherit
+        # stdout while clearing every directory hint from its environment.
+        _cleanup(directories[worker], process_groups=(worker.pid,))
         _wait_for_exit(worker)
         with contextlib.suppress(BrokenPipeError, OSError):
             worker.stdin.close()
@@ -220,10 +220,15 @@ def run(module):
         try:
             if watcher is not None:
                 watcher.stdin.close()
-                if _wait_for_exit(watcher) != 0:
-                    _cleanup(directory)
-            else:
-                _cleanup(directory)
+                _wait_for_exit(watcher)
+        except Exception:
+            runner_errors.append(traceback.format_exc())
+        try:
+            # The watchdog only has directory hints. Known worker groups also
+            # cover orphaned children with sanitized environments after a
+            # successful test or an exception outside retire(). Stop them
+            # before closing stdout, which otherwise waits on the reader.
+            _cleanup(directory, process_groups=tuple(worker.pid for worker in workers))
         except Exception:
             runner_errors.append(traceback.format_exc())
         for worker in workers:

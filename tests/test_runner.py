@@ -29,7 +29,7 @@ class RunnerTests(unittest.TestCase):
             except ProcessLookupError:
                 pass
 
-    def _run(self, source, timeout=1):
+    def _run(self, source, timeout=1, jobs=2):
         script = self.root / "synthetic_tests.py"
         script.write_text(textwrap.dedent("""\
             import json
@@ -53,7 +53,7 @@ class RunnerTests(unittest.TestCase):
         """))
         temporary = self.root / "tmp"
         temporary.mkdir()
-        env = dict(os.environ, CODEX_TEST_JOBS="2", CODEX_TEST_TIMEOUT=str(timeout),
+        env = dict(os.environ, CODEX_TEST_JOBS=str(jobs), CODEX_TEST_TIMEOUT=str(timeout),
                    RUNNER_META_FIXTURE=str(self.root), TMPDIR=str(temporary))
         process = subprocess.Popen(
             [sys.executable, "-I", str(script)], env=env,
@@ -62,6 +62,9 @@ class RunnerTests(unittest.TestCase):
         try:
             stdout, stderr = process.communicate(timeout=20)
         except subprocess.TimeoutExpired:
+            # A regression may leave an unmarked child holding both pipes.
+            # Release it before collecting diagnostics from the controller.
+            self._stop_leftover()
             try:
                 os.killpg(process.pid, signal.SIGKILL)
             except ProcessLookupError:
@@ -111,6 +114,67 @@ class RunnerTests(unittest.TestCase):
 
     def test_runner_recovers_from_worker_sigkill(self):
         self._assert_crash_continues("os.kill(os.getpid(), signal.SIGKILL)")
+
+    def test_runner_crash_does_not_kill_worker_with_shared_directory_prefix(self):
+        result = self._run("""
+            class SyntheticTests(unittest.TestCase):
+                pass
+
+            def healthy(self):
+                if self._testMethodName == "test_10":
+                    (FIXTURE / "worker-10-ready").touch()
+                time.sleep(0.8)
+
+            def crashes(self):
+                deadline = time.monotonic() + 4
+                while not (FIXTURE / "worker-10-ready").exists():
+                    self.assertLess(time.monotonic(), deadline)
+                    time.sleep(0.01)
+                os._exit(17)
+
+            for index in range(11):
+                setattr(SyntheticTests, "test_%02d" % index, healthy)
+            SyntheticTests.test_01 = crashes
+        """, timeout=5, jobs=11)
+        self._assert_summary(result, tests=11, errors=1)
+        self.assertIn("SyntheticTests.test_10 ... ok", result.stderr)
+
+    def test_runner_crash_cleans_child_without_directory_hints(self):
+        result = self._run("""
+            class SyntheticTests(unittest.TestCase):
+                def test_a_crashes_with_child(self):
+                    read_fd, write_fd = os.pipe()
+                    child = subprocess.Popen(
+                        [sys.executable, "-I", "-c",
+                         "import os, signal, sys, time; "
+                         "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                         "os.write(int(sys.argv[1]), b'1'); "
+                         "os.close(int(sys.argv[1])); time.sleep(60)", str(write_fd)],
+                        env={}, pass_fds=(write_fd,))
+                    (FIXTURE / "detached.json").write_text(json.dumps({"pid": child.pid}))
+                    os.close(write_fd)
+                    try:
+                        self.assertEqual(os.read(read_fd, 1), b"1")
+                    finally:
+                        os.close(read_fd)
+                    os._exit(17)
+
+                def test_b_passes(self):
+                    self.assertTrue(True)
+
+                def test_c_passes(self):
+                    self.assertTrue(True)
+        """, timeout=5)
+        self._assert_summary(result, tests=3, errors=1)
+        self.assertIn("(exit 17)", result.stderr)
+        self.assertIn("SyntheticTests.test_b_passes ... ok", result.stderr)
+        self.assertIn("SyntheticTests.test_c_passes ... ok", result.stderr)
+        metadata = json.loads((self.root / "detached.json").read_text())
+        status = subprocess.run(
+            ["ps", "-p", str(metadata["pid"]), "-o", "stat="],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=False)
+        self.assertTrue(not status.stdout.strip() or status.stdout.strip().startswith("Z"),
+                        "unmarked child is still holding worker stdout: " + status.stdout)
 
     def test_runner_times_out_hanging_test_and_continues(self):
         result = self._run("""
