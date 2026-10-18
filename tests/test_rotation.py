@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Exercise account rotation through the public CLI, without a real Codex login.
 
-Run with python3 -I tests/test_rotation.py. The mid-turn case deliberately
-waits for the supervisor's real 30-second rollout poll.
+Run with python3 -I tests/test_rotation.py. CODEX_TEST_JOBS controls the parallel
+worker count; set it to 1 to use the standard sequential unittest runner.
 """
 import datetime
 import fcntl
@@ -444,6 +444,8 @@ class RotationTests(unittest.TestCase):
                         CODEX_FAKE_GH_STATE=str(self.root / "fake-gh-state.json"),
                         PATH=str(self.root) + os.pathsep + os.environ.get("PATH", ""),
                         CODEX_TASK_SLEEP_STEP="0.05", CODEX_TASK_RESET_MARGIN="0.1",
+                        CODEX_TASK_WAIT_POLL_SECONDS="0.02", CODEX_TASK_RATE_POLL_SECONDS="0.05",
+                        CODEX_TASK_ROLLOUT_SEARCH_SECONDS="0.05",
                         GIT_AUTHOR_NAME="Rotation Test", GIT_AUTHOR_EMAIL="rotation@example.test",
                         GIT_COMMITTER_NAME="Rotation Test", GIT_COMMITTER_EMAIL="rotation@example.test")
         # The external process gets no opportunity to ask for a credential or pager.
@@ -486,8 +488,9 @@ class RotationTests(unittest.TestCase):
                         groups.add(int(event["pgid"]))
             owned.difference_update((0, 1, os.getpid()))
             groups.difference_update((0, 1, os.getpgrp()))
+            # macOS can truncate a command in the middle of a UTF-8 character.
             result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
-                                    text=True, capture_output=True, check=True)
+                                    text=True, errors="replace", capture_output=True, check=True)
             table = {}
             for line in result.stdout.splitlines():
                 fields = line.split(None, 4)
@@ -641,7 +644,13 @@ class RotationTests(unittest.TestCase):
                 "total_tokens": input_tokens + output_tokens}
 
     def worker(self):
-        with mock.patch.dict(os.environ, self.env), mock.patch.object(sys, "dont_write_bytecode", True):
+        # Unit tests exercise the public polling defaults; only CLI subprocesses
+        # use the short intervals from the integration fixture.
+        env = dict(self.env)
+        for key in ("CODEX_TASK_WAIT_POLL_SECONDS", "CODEX_TASK_RATE_POLL_SECONDS",
+                    "CODEX_TASK_ROLLOUT_SEARCH_SECONDS"):
+            env.pop(key, None)
+        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "dont_write_bytecode", True):
             spec = importlib.util.spec_from_file_location("rotation_worker", str(SCRIPT))
             worker = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(worker)
@@ -1384,6 +1393,7 @@ class RotationTests(unittest.TestCase):
                 self.assertEqual(starter.returncode, 0, stdout + stderr)
                 self.until(lambda: sum(event.get("command") == "quota-snapshot"
                                        for event in self.trace()[before:]) >= 2)
+                self.until(lambda: any(event.get("command") == "exec-child" for event in self.trace()))
                 child = next(event["child_pid"] for event in self.trace()
                              if event.get("command") == "exec-child")
                 self.extra_pids.add(child)
@@ -5809,6 +5819,8 @@ with open(sys.argv[1], "a+") as journal:
 
     def test_monitor_bounds_rollout_searches_and_reads_during_long_step(self):
         worker = self.worker()
+        self.assertEqual(worker.RATE_POLL_SECONDS, 30)
+        self.assertEqual(worker.ROLLOUT_SEARCH_SECONDS, 5)
         duration = 600.0
         rollout = self.root / "unchanged-rollout.jsonl"
         rollout.write_text("The rollout stays unchanged throughout this step.\n")
@@ -5883,6 +5895,7 @@ with open(sys.argv[1], "a+") as journal:
 
     def test_wait_polls_each_second_and_clears_dead_legacy_pid(self):
         worker = self.worker()
+        self.assertEqual(worker.WAIT_POLL_SECONDS, 1)
         st = {"slug": "legacy-pid", "pid": 12345, "rotations": [], "turns": 1,
               "branch": "test-branch", "base": "HEAD", "worktree": str(self.repo)}
         running = [True]
@@ -6493,4 +6506,5 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
 
 
 if __name__ == "__main__":
-    unittest.main(verbosity=2)
+    runner = runpy.run_path(str(Path(__file__).with_name("rotation_runner.py")))
+    runner["run"](sys.modules[__name__])

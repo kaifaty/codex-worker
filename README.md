@@ -411,6 +411,23 @@ On macOS, that command may be available from the ChatGPT.app bundle listed above
 - Cleanup removes the worktree and task logs. Review and merge before running `clean`.
 - Windows is not supported; process supervision uses Unix process groups and signals.
 
+## Tests
+
+Run the CLI integration tests with Python 3.9 or newer, using only the standard library:
+
+```sh
+python3 -I tests/test_rotation.py
+```
+
+The full suite runs in parallel processes by default, distributing tests dynamically according to
+the available CPU count. Set `CODEX_TEST_JOBS` to choose the number of processes;
+`CODEX_TEST_JOBS=1 python3 -I tests/test_rotation.py` runs sequentially in the current process.
+Passing test names keeps the usual unittest behavior, for example:
+
+```sh
+python3 -I tests/test_rotation.py RotationTests.test_mid_turn_rotation_preserves_work_and_followups
+```
+
 ## License
 
 [MIT](LICENSE), copyright 2026 kaifaty.
