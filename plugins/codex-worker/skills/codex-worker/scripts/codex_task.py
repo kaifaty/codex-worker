@@ -2816,6 +2816,16 @@ def publish_pr(st, stopped):
         save(st)
 
 
+def work_turn(st, cfg, prompt, effort, current_message, stopped, sleep, work_paths=None, **turn_options):
+    if work_paths is None and st.get("kind") != "scout":
+        work_paths = check_paths(st)
+    run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, **turn_options)
+    publish_work(st, stopped)
+    publish_pr(st, stopped)
+    if work_paths is not None:
+        st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+
+
 def fix_round_changes(st, before, after):
     """Record commits and informational code size, excluding guarded paths."""
     commits = sh(GIT + ["rev-list", f"{before}..{after}"], cwd=st["worktree"]).splitlines()
@@ -2896,10 +2906,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         save(st)
         work_paths = check_paths(st)
         before = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
-        run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
-        publish_work(st, stopped)
-        publish_pr(st, stopped)
-        st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+        work_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False, work_paths=work_paths)
         after = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         entry.update(fix_round_changes(st, before, after))
         result = st.get("result")
@@ -3147,11 +3154,7 @@ def ci_cycle(st, cfg, effort, stopped, sleep):
         st.pop("review_skipped", None)
         prompt = followup_prompt(st, message, cfg, source="ci")
         save(st)
-        work_paths = check_paths(st)
-        run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
-        publish_work(st, stopped)
-        publish_pr(st, stopped)
-        st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+        work_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
         if not stopped() and st.get("outcome") in ("completed", "budget_exhausted", "stuck"):
             saved_check(st, cfg, stopped, review_after=False)
         result = st.get("result") or {}
@@ -3214,13 +3217,9 @@ def cmd__run(a):
         if st.get("kind") == "review":
             review_turn(st, cfg, pending["prompt"], effort, stopped, stopped_flag.wait, new_turn=True)
         else:
-            work_paths = check_paths(st) if st.get("kind") != "scout" else None
-            run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
-                     stopped, stopped_flag.wait)
-            publish_work(st, stopped)
-            publish_pr(st, stopped)
-            if work_paths is not None:
-                st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+            work_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
+                      stopped, stopped_flag.wait)
+            if working:
                 save(st)
         work_result = st.get("result") if st.get("kind") not in ("review", "scout") else None
         if (work_result is not None and work_result["status"] != "done"
@@ -3425,6 +3424,184 @@ def cmd_review(a):
     print(f"reviewing {a.slug}, pid {st['pid']}")
 
 
+def wait_rotation_lines(st):
+    if st.get("weekly_budget_warning"):
+        yield st["weekly_budget_warning"]
+    for r in st["rotations"][st.get("rotation_start", 0):]:
+        if r.get("event") == "sleep":
+            yield f"== sleeping until {local_time(r['until'])} ({r['account'] or 'unknown'}): {r['reason']}"
+        elif r.get("event") == "wake":
+            yield f"== woke at {local_time(r['at'])} to recheck account limits"
+        elif r.get("event") == "reset_credit":
+            if r.get("outcome") in ("success", "consumed (inferred)"):
+                yield f"== used a free limit reset on {r['account']} ({r['credit_id']}), expires {local_time(r.get('expires_at'))}"
+        elif r.get("event") == "needs_login":
+            yield f"== account {r['account']} needs login: run login {r['account']}"
+        else:
+            yield f"== rotated {r['from']} → {r['to']}: {r['reason']}, new thread {r['thread'] or '?'}"
+    if st.get("outcome") == "sleeping":
+        if alive(st.get("pid")):
+            s = st["sleeping"]
+            label = "account status unknown; retry at" if s.get("probe") else "all accounts at limit; auto-continue at"
+            yield f"== {label} {local_time(s['until'])} ({s['account'] or 'unknown'}); run wait again to follow"
+        else:
+            yield "== paused, supervisor gone; continue with say"
+    if st.get("exhausted"):
+        e = st["exhausted"]
+        reset = f"{local_time(e['reset'])} ({e['account']})" if e["reset"] is not None else "unknown"
+        yield f"== all accounts at limit; earliest reset {reset}; continue with say after that"
+
+
+def wait_publication_lines(st):
+    if st.get("sandbox") == "workspace":
+        yield "== sandbox: workspace"
+    publication = st.get("publish")
+    if publication and (st.get("kind") != "review" or st.get("work_completed")):
+        if publication["sha"]:
+            subject = sh(GIT + ["log", "-1", "--format=%s", publication["sha"]], cwd=st["worktree"], check=False)
+            yield (f"== committed {publication['sha']} " + json.dumps(subject, ensure_ascii=False)
+                   + ("; pushed" if publication["pushed"] else "")
+                   + ("; PR " + publication["pr"] if publication["pr"] else ""))
+        error = publication["error"]
+        if error.startswith(("commit: ", "push: ")):
+            yield "== publish error: " + error
+        action = publication.get("action")
+        if action in ("created", "updated", "skipped"):
+            yield "== PR " + ("skipped: " + error if action == "skipped" else action + " " + publication["pr"])
+    if st.get("ci"):
+        yield "\n".join(ci_lines(st["ci"]))
+
+
+def wait_turn_lines(st, slug):
+    sleeping = st.get("outcome") == "sleeping"
+    publication = st.get("publish")
+    yield (f"== {slug}: turn {st.get('turns')} {'paused' if sleeping else 'finished'} after "
+          f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
+    if st.get("turn_stop"):
+        yield "== turn stopped: " + turn_stop_message(st["turn_stop"])
+    if st.get("outcome") == "interrupted":
+        yield "== " + interruption_message(st)
+    if st.get("outcome") == "refused" and st.get("kind") != "review":
+        yield "== refused by the model: " + st.get("refusal", "")[:200]
+    if (st.get("kind") != "review" or st.get("work_completed")) and not (
+            st.get("outcome") == "refused" and st.get("kind") != "review"):
+        last = TASKS / slug / "last.md"
+        if (st.get("exhausted") or sleeping) and len(events(st)) == st.get("event_start", 0):
+            # Paused before any exec: the thread's last message belongs to an earlier turn.
+            yield "(Codex did not run this turn)"
+        else:
+            raw = ("(no wrap-up result)" if st.get("wrapup", {}).get("outcome") not in (None, "completed")
+                   else last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
+            yield raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw))
+            if publication and publication["pr"]:
+                yield "PR: " + publication["pr"]
+    yield from guarded_lines(guarded_changes(st))
+
+
+def wait_round_lines(st):
+    for number, entry in enumerate(st.get("rounds", []), 1):
+        findings = (entry.get("review") or {}).get("findings", [])
+        counts = ", ".join(f"{severity} {sum(f['severity'] == severity for f in findings)}"
+                           for severity in ("P1", "P2", "P3") if any(f["severity"] == severity for f in findings))
+        source = (f"{len(findings)} findings" + (f" ({counts})" if counts else "")
+                  if entry.get("review") is not None else "check failure")
+        decisions = entry.get("decisions", [])
+        fixed, rejected = (sum(d["decision"] == action for d in decisions) for action in ("fixed", "rejected"))
+        code = entry.get("code")
+        size = f"; code +{code['added']} −{code['removed']}" if code is not None else ""
+        yield f"== round {number}: {source} → fixed {fixed}, rejected {rejected}{size}"
+        yield from (f"- rejected {d['id']}: {d['note']}" for d in decisions if d["decision"] == "rejected")
+
+
+def wait_check_lines(st):
+    checks = [] if st.get("kind") == "scout" else st.get("checks", [])[st.get("check_start", 0):]
+    for check in checks:
+        for name, item in ((f"check `{check['cmd']}`", check), ("base tests", check.get("base_check"))):
+            if not item:
+                continue
+            if name == "base tests" and item["outcome"] == "skipped":
+                yield f"== base tests: skipped ({item['reason']})"
+            else:
+                label = item["outcome"] if item["outcome"] in ("passed", "stopped", "interrupted") else "FAILED"
+                reason = "timeout, " if item["outcome"] == "timeout" else ""
+                yield f"== {name}: {label} ({reason}exit {item['exit']}, {item['seconds']:.0f} s)"
+            if name != "base tests" and item["outcome"] in ("failed", "timeout"):
+                yield item.get("tail", check_tail(st))
+            elif name == "base tests" and item.get("tail"):
+                yield item["tail"]
+
+
+def wait_review_lines(st, slug):
+    if st.get("review_skipped"):
+        yield "== review skipped: " + st["review_skipped"]
+    if st.get("auto_fix_stop") == "escalate":
+        for finding in st.get("auto_fix_escalations", []):
+            yield (f"== auto-fix: stop: escalate — {finding['id']} {finding['file']}:{finding['line']} "
+                   f"targets code from fix round {finding['round']} ({finding['commit']})")
+    reviews = st.get("reviews", [])[st.get("review_start", 0):]
+    if not (st.get("kind") == "review" or st.get("rounds") or reviews):
+        return
+    aggregate = st.get("review_result")
+    angles = aggregate and aggregate.get("angles")
+    if not angles and st.get("kind") == "review" and st.get("outcome") == "refused":
+        yield "== refused by the model: " + st.get("refusal", "")[:200]
+        return
+    entries = angles or reviews[-1:]
+    for entry in entries:
+        minutes = ((entry["finished"] if angles else entry.get("finished") or time.time()) - entry["started"]) / 60
+        heading = "== review " + (f"angle {entry['angle']} " if angles else "") + f"by {entry['account']} ({minutes:.1f} min):"
+        result = entry.get("result")
+        if angles and entry["outcome"] == "refused":
+            yield heading + " refused"
+            yield "== refused by the model: " + entry.get("refusal", "")[:200]
+        elif result is None:
+            yield heading + (" " + entry["outcome"] + " (result unknown)" if angles else "")
+            if not angles:
+                if st.get("kind") == "review" and st.get("wrapup"):
+                    yield "(review interrupted; no wrap-up result)"
+                else:
+                    yield "== result: unknown (unstructured final message)"
+                    review = TASKS / slug / "review.md"
+                    yield review.read_text().strip() if review.exists() else "(no final review)"
+        else:
+            count = len(result["findings"])
+            yield heading + (f" {count} defect{'s' if count != 1 else ''}" if count else " no defects")
+    result = aggregate if angles else entries[-1].get("result") if entries else None
+    if result is not None:
+        yield result["summary"]
+        for finding in result["findings"]:
+            angle = f"[{finding['angle']}] " if angles else ""
+            yield f"[{finding['severity']}] {angle}{finding['id']} {finding['file']}:{finding['line']} — {finding['title']}"
+            yield from (finding["detail"], "verify: " + finding["verify"])
+    elif not entries:
+        yield "(Codex did not run review)"
+
+
+def wait_stop_lines(st):
+    if st.get("fix_rounds"):
+        if (st.get("review_result") or {}).get("angles"):
+            results = [entry.get("review") for entry in st.get("rounds", [])] + [st["review_result"]]
+        else:
+            results = [entry.get("result") for entry in st.get("reviews", [])[st.get("review_start", 0):]]
+        trajectory = " → ".join(str(len(result["findings"])) for result in results if result is not None) or "unknown"
+        reason = st.get("auto_fix_stop", st.get("outcome", "unknown"))
+        yield f"== auto-fix: {len(st.get('rounds', []))} rounds, findings {trajectory}; stop: {reason}"
+    failed = [e for e in events(st)[st.get("exec_event_start", st.get("event_start", 0)):]
+              if e.get("type") in ("turn.failed", "error") and refusal_message(e) is None]
+    if failed:
+        yield "== errors: " + json.dumps(failed[-1], ensure_ascii=False)[:500]
+    if st.get("error"):
+        yield "== supervisor error: " + str(st["error"])
+    if st.get("kind") == "scout":
+        return
+    yield f"== commits on {st['branch']}:"
+    yield sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)"
+    dirty = (sh(GIT + ["status", "--short"], cwd=st["worktree"], check=False)
+             if workspace_filter_driver(st) is None else "")
+    if dirty:
+        yield "== uncommitted:\n" + dirty
+
+
 def cmd_wait(a):
     st = load(a.slug)
     start = time.monotonic()
@@ -3442,188 +3619,11 @@ def cmd_wait(a):
         if st.get("pid") and not alive(st["pid"]):
             st["pid"] = None
             save(st)
-    if st.get("weekly_budget_warning"):
-        print(st["weekly_budget_warning"])
-    for r in st["rotations"][st.get("rotation_start", 0):]:
-        if r.get("event") == "sleep":
-            print(f"== sleeping until {local_time(r['until'])} ({r['account'] or 'unknown'}): {r['reason']}")
-        elif r.get("event") == "wake":
-            print(f"== woke at {local_time(r['at'])} to recheck account limits")
-        elif r.get("event") == "reset_credit":
-            if r.get("outcome") in ("success", "consumed (inferred)"):
-                print(f"== used a free limit reset on {r['account']} ({r['credit_id']}), "
-                      f"expires {local_time(r.get('expires_at'))}")
-        elif r.get("event") == "needs_login":
-            print(f"== account {r['account']} needs login: run login {r['account']}")
-        else:
-            print(f"== rotated {r['from']} → {r['to']}: {r['reason']}, new thread {r['thread'] or '?'}")
-    sleeping = st.get("outcome") == "sleeping"
-    if sleeping:
-        if alive(st.get("pid")):
-            s = st["sleeping"]
-            label = "account status unknown; retry at" if s.get("probe") else "all accounts at limit; auto-continue at"
-            print(f"== {label} {local_time(s['until'])} "
-                  f"({s['account'] or 'unknown'}); run wait again to follow")
-        else:
-            print("== paused, supervisor gone; continue with say")
-    if st.get("exhausted"):
-        e = st["exhausted"]
-        reset = f"{local_time(e['reset'])} ({e['account']})" if e["reset"] is not None else "unknown"
-        print(f"== all accounts at limit; earliest reset {reset}; continue with say after that")
-    state = "paused" if sleeping else "finished"
-    if st.get("sandbox") == "workspace":
-        print("== sandbox: workspace")
-    publication = st.get("publish")
-    if publication and (st.get("kind") != "review" or st.get("work_completed")):
-        if publication["sha"]:
-            subject = sh(GIT + ["log", "-1", "--format=%s", publication["sha"]], cwd=st["worktree"], check=False)
-            line = f"== committed {publication['sha']} " + json.dumps(subject, ensure_ascii=False)
-            if publication["pushed"]:
-                line += "; pushed"
-            if publication["pr"]:
-                line += "; PR " + publication["pr"]
+    for section in (wait_rotation_lines(st), wait_publication_lines(st), wait_turn_lines(st, a.slug),
+                    wait_round_lines(st), wait_check_lines(st), wait_review_lines(st, a.slug),
+                    wait_stop_lines(st)):
+        for line in section:
             print(line)
-        error = publication["error"]
-        if error.startswith(("commit: ", "push: ")):
-            print("== publish error: " + error)
-        action = publication.get("action")
-        if action in ("created", "updated"):
-            print("== PR " + action + " " + publication["pr"])
-        elif action == "skipped":
-            print("== PR skipped: " + publication["error"])
-    if st.get("ci"):
-        print("\n".join(ci_lines(st["ci"])))
-    print(f"== {a.slug}: turn {st.get('turns')} {state} after "
-          f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
-    if st.get("turn_stop"):
-        print("== turn stopped: " + turn_stop_message(st["turn_stop"]))
-    if st.get("outcome") == "interrupted":
-        print("== " + interruption_message(st))
-    if st.get("outcome") == "refused" and st.get("kind") != "review":
-        print("== refused by the model: " + st.get("refusal", "")[:200])
-    d = TASKS / a.slug
-    if (st.get("kind") != "review" or st.get("work_completed")) and not (
-            st.get("outcome") == "refused" and st.get("kind") != "review"):
-        last = d / "last.md"
-        if (st.get("exhausted") or sleeping) and len(events(st)) == st.get("event_start", 0):
-            # Paused before any exec: the thread's last message belongs to an earlier turn.
-            print("(Codex did not run this turn)")
-        else:
-            raw = ("(no wrap-up result)" if st.get("wrapup", {}).get("outcome") not in (None, "completed")
-                   else last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
-            print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
-            if publication and publication["pr"]:
-                print("PR: " + publication["pr"])
-    for line in guarded_lines(guarded_changes(st)):
-        print(line)
-    for number, entry in enumerate(st.get("rounds", []), 1):
-        findings = (entry.get("review") or {}).get("findings", [])
-        counts = ", ".join(f"{severity} {sum(f['severity'] == severity for f in findings)}"
-                           for severity in ("P1", "P2", "P3") if any(f["severity"] == severity for f in findings))
-        source = f"{len(findings)} findings" + (f" ({counts})" if counts else "")
-        if entry.get("review") is None:
-            source = "check failure"
-        decisions = entry.get("decisions", [])
-        fixed = sum(d["decision"] == "fixed" for d in decisions)
-        rejected = sum(d["decision"] == "rejected" for d in decisions)
-        code = entry.get("code")
-        size = f"; code +{code['added']} −{code['removed']}" if code is not None else ""
-        print(f"== round {number}: {source} → fixed {fixed}, rejected {rejected}{size}")
-        for decision in decisions:
-            if decision["decision"] == "rejected":
-                print(f"- rejected {decision['id']}: {decision['note']}")
-    checks = [] if st.get("kind") == "scout" else st.get("checks", [])[st.get("check_start", 0):]
-    for check in checks:
-        label = {"passed": "passed", "stopped": "stopped", "interrupted": "interrupted"}.get(check["outcome"], "FAILED")
-        reason = "timeout, " if check["outcome"] == "timeout" else ""
-        print(f"== check `{check['cmd']}`: {label} ({reason}exit {check['exit']}, {check['seconds']:.0f} s)")
-        if check["outcome"] in ("failed", "timeout"):
-            print(check.get("tail", check_tail(st)))
-        if check.get("base_check"):
-            base = check["base_check"]
-            if base["outcome"] == "skipped":
-                print(f"== base tests: skipped ({base['reason']})")
-            else:
-                label = {"passed": "passed", "stopped": "stopped", "interrupted": "interrupted"}.get(base["outcome"], "FAILED")
-                reason = "timeout, " if base["outcome"] == "timeout" else ""
-                print(f"== base tests: {label} ({reason}exit {base['exit']}, {base['seconds']:.0f} s)")
-            if base.get("tail"):
-                print(base["tail"])
-    if st.get("review_skipped"):
-        print("== review skipped: " + st["review_skipped"])
-    if st.get("auto_fix_stop") == "escalate":
-        for finding in st.get("auto_fix_escalations", []):
-            print(f"== auto-fix: stop: escalate — {finding['id']} {finding['file']}:{finding['line']} "
-                  f"targets code from fix round {finding['round']} ({finding['commit']})")
-    reviews = st.get("reviews", [])[st.get("review_start", 0):]
-    if st.get("kind") == "review" or st.get("rounds") or reviews:
-        aggregate = st.get("review_result")
-        if aggregate and aggregate.get("angles"):
-            for entry in aggregate["angles"]:
-                minutes = (entry["finished"] - entry["started"]) / 60
-                heading = f"== review angle {entry['angle']} by {entry['account']} ({minutes:.1f} min):"
-                result = entry.get("result")
-                if entry["outcome"] == "refused":
-                    print(heading + " refused")
-                    print("== refused by the model: " + entry.get("refusal", "")[:200])
-                elif result is None:
-                    print(heading + " " + entry["outcome"] + " (result unknown)")
-                else:
-                    count = len(result["findings"])
-                    print(heading + (f" {count} defect{'s' if count != 1 else ''}" if count else " no defects"))
-            print(aggregate["summary"])
-            for finding in aggregate["findings"]:
-                print(f"[{finding['severity']}] [{finding['angle']}] {finding['id']} {finding['file']}:{finding['line']} — {finding['title']}")
-                print(finding["detail"])
-                print("verify: " + finding["verify"])
-        elif st.get("kind") == "review" and st.get("outcome") == "refused":
-            print("== refused by the model: " + st.get("refusal", "")[:200])
-        elif reviews:
-            entry = reviews[-1]
-            minutes = ((entry.get("finished") or time.time()) - entry["started"]) / 60
-            heading = f"== review by {entry['account']} ({minutes:.1f} min):"
-            result = entry.get("result")
-            if result is None:
-                print(heading)
-                if st.get("kind") == "review" and st.get("wrapup"):
-                    print("(review interrupted; no wrap-up result)")
-                else:
-                    print("== result: unknown (unstructured final message)")
-                    review = d / "review.md"
-                    print(review.read_text().strip() if review.exists() else "(no final review)")
-            else:
-                count = len(result["findings"])
-                print(heading + (f" {count} defect{'s' if count != 1 else ''}" if count else " no defects"))
-                print(result["summary"])
-                for finding in result["findings"]:
-                    print(f"[{finding['severity']}] {finding['id']} {finding['file']}:{finding['line']} — {finding['title']}")
-                    print(finding["detail"])
-                    print("verify: " + finding["verify"])
-        else:
-            print("(Codex did not run review)")
-    if st.get("fix_rounds"):
-        reviews = st.get("reviews", [])[st.get("review_start", 0):]
-        if (st.get("review_result") or {}).get("angles"):
-            results = [entry.get("review") for entry in st.get("rounds", [])] + [st["review_result"]]
-        else:
-            results = [entry.get("result") for entry in reviews]
-        trajectory = " → ".join(str(len(result["findings"])) for result in results if result is not None) or "unknown"
-        reason = st.get("auto_fix_stop", st.get("outcome", "unknown"))
-        print(f"== auto-fix: {len(st.get('rounds', []))} rounds, findings {trajectory}; stop: {reason}")
-    failed = [e for e in events(st)[st.get("exec_event_start", st.get("event_start", 0)):]
-              if e.get("type") in ("turn.failed", "error") and refusal_message(e) is None]
-    if failed:
-        print("== errors:", json.dumps(failed[-1], ensure_ascii=False)[:500])
-    if st.get("error"):
-        print("== supervisor error:", st["error"])
-    if st.get("kind") == "scout":
-        return
-    print(f"== commits on {st['branch']}:")
-    print(sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or "(none)")
-    dirty = (sh(GIT + ["status", "--short"], cwd=st["worktree"], check=False)
-             if workspace_filter_driver(st) is None else "")
-    if dirty:
-        print("== uncommitted:\n" + dirty)
 
 
 def describe(st, detail):
