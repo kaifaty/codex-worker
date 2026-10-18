@@ -1428,7 +1428,8 @@ class RotationTests(unittest.TestCase):
                               if event["argv"][:2] == ["pr", "create"]]), 1)
 
     def test_time_budget_kills_exec_group_wraps_same_thread_checks_and_skips_review(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        # The 90-minute phase still fits its wait; wrap-up includes process startup.
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.125"
         self.configure(language="en")
         self.configure_notify()
         result = self.work_result("partial", summary="Saved the working checkpoint.",
@@ -1476,57 +1477,64 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(report["summary"]["result_status"], {"partial": 1})
 
     def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en", use_reset_credits=True)
         gate = self.root / "publish-rollout"
         result = self.work_result("partial", summary="Wrapped up while the reset journal remained locked.")
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "hold", "spawn_child": True, "rollout_used": 99, "rollout_gate": str(gate)},
             {"mode": "complete", "reply": result}])
-        starter = subprocess.Popen(
-            [PYTHON, "-I", str(SCRIPT), "start", "cap-locked-journal", "--brief", str(self.brief),
-             "--repo", str(self.repo), "--max-minutes", "2"],
-            cwd=self.repo, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-        self.extra_pids.add(starter.pid)
-        try:
-            self.until(lambda: any(event.get("command") == "rollout-waiting" for event in self.trace()))
-            # Preflight is complete. Contend only the journal opened by on_limit
-            # while the first exec remains alive, then keep it locked through wrap-up.
-            with (self.home / "codex-worker-resets.jsonl").open("a+") as journal:
-                fcntl.flock(journal, fcntl.LOCK_EX)
-                before = len(self.trace())
-                gate.touch()
-                stdout, stderr = starter.communicate(timeout=5)
-                self.assertEqual(starter.returncode, 0, stdout + stderr)
-                self.until(lambda: sum(event.get("command") == "quota-snapshot"
-                                       for event in self.trace()[before:]) >= 2)
-                self.until(lambda: any(event.get("command") == "exec-child" for event in self.trace()))
-                child = next(event["child_pid"] for event in self.trace()
-                             if event.get("command") == "exec-child")
-                self.extra_pids.add(child)
-                self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
-                output = self.wait("cap-locked-journal", timeout=10)
-                state = self.state("cap-locked-journal")
-                self.assertEqual(state["outcome"], "budget_exhausted")
-                self.assertEqual(state["wrapup"]["outcome"], "completed")
-                self.assertEqual(state["result"], result)
-                executions = self.invocations()
-                self.assertEqual(len(executions), 2)
-                self.assertTrue(executions[1]["resume"])
-                self.assertEqual(executions[1]["thread"], executions[0]["thread"])
-                self.assertIn("time budget has expired", executions[1]["prompt"])
-                self.assertIn("== turn stopped: time budget 2 min exhausted", output)
-                self.assertIn(result["summary"], output)
-                self.assertFalse(self.process_is_live(executions[0]["pid"]))
-                self.until(lambda: not self.process_is_live(child))
-                self.assertFalse(self.consume_calls())
-        finally:
-            if starter.poll() is None:
-                starter.terminate()
-            starter.communicate(timeout=5)
+        with (self.home / "codex-worker-resets.jsonl").open("a+") as journal:
+            with ThreadPoolExecutor(max_workers=1) as executor:
+                def publish_when_ready():
+                    self.until(lambda: any(event.get("command") == "rollout-waiting"
+                                           for event in self.trace()))
+                    # Preflight has finished. Acquire contention and publish in
+                    # the same readiness callback, before waiting for the CLI.
+                    fcntl.flock(journal, fcntl.LOCK_EX)
+                    before = len(self.trace())
+                    gate.touch()
+                    return before
+
+                ready = executor.submit(publish_when_ready)
+                starter = subprocess.Popen(
+                    [PYTHON, "-I", str(SCRIPT), "start", "cap-locked-journal", "--brief", str(self.brief),
+                     "--repo", str(self.repo), "--max-minutes", "2"],
+                    cwd=self.repo, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                self.extra_pids.add(starter.pid)
+                try:
+                    before = ready.result()
+                    stdout, stderr = starter.communicate(timeout=5)
+                    self.assertEqual(starter.returncode, 0, stdout + stderr)
+                    self.until(lambda: sum(event.get("command") == "quota-snapshot"
+                                           for event in self.trace()[before:]) >= 2)
+                    self.until(lambda: any(event.get("command") == "exec-child" for event in self.trace()))
+                    child = next(event["child_pid"] for event in self.trace()
+                                 if event.get("command") == "exec-child")
+                    self.extra_pids.add(child)
+                    self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
+                    output = self.wait("cap-locked-journal", timeout=10)
+                    state = self.state("cap-locked-journal")
+                    self.assertEqual(state["outcome"], "budget_exhausted")
+                    self.assertEqual(state["wrapup"]["outcome"], "completed")
+                    self.assertEqual(state["result"], result)
+                    executions = self.invocations()
+                    self.assertEqual(len(executions), 2)
+                    self.assertTrue(executions[1]["resume"])
+                    self.assertEqual(executions[1]["thread"], executions[0]["thread"])
+                    self.assertIn("time budget has expired", executions[1]["prompt"])
+                    self.assertIn("== turn stopped: time budget 2 min exhausted", output)
+                    self.assertIn(result["summary"], output)
+                    self.assertFalse(self.process_is_live(executions[0]["pid"]))
+                    self.until(lambda: not self.process_is_live(child))
+                    self.assertFalse(self.consume_calls())
+                finally:
+                    if starter.poll() is None:
+                        starter.terminate()
+                    starter.communicate(timeout=5)
 
     def test_time_budget_interrupts_a_slow_account_rpc_after_a_usage_error(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en")
         gate = self.root / "release-quota-rpc"
         result = self.work_result("partial", summary="Wrapped up without waiting for the quota RPC.")
@@ -1594,11 +1602,12 @@ class RotationTests(unittest.TestCase):
                             for index, primary in published), published)
 
     def test_time_budget_accumulates_exec_time_across_account_rotation(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en")
-        self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error", "limit_after": 0.9}])
+        # Each exec fits a fresh budget; together they must exceed the shared cap.
+        self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error", "limit_after": 1.8}])
         self.account(self.other, "B", self.reset, runs=[
-            {"mode": "complete", "delay": 1.1, "reply": "This would finish if the budget restarted"},
+            {"mode": "complete", "delay": 2.2, "reply": "This would finish if the budget restarted"},
             {"mode": "complete", "reply": self.work_result("partial")}])
         self.start("cap-rotation", "--max-minutes", "1.7")
         self.wait("cap-rotation", timeout=12)
@@ -1611,7 +1620,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(executions[2]["thread"], executions[1]["thread"])
 
     def test_wrap_up_has_its_own_ten_minute_cap_without_recursing(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "hold"}, {"mode": "hold", "spawn_child": True}])
@@ -1629,7 +1638,7 @@ class RotationTests(unittest.TestCase):
         self.assertTrue(all(not self.process_is_live(event["pid"]) for event in self.invocations()))
 
     def test_repeated_failure_during_wrap_up_stops_without_another_wrap_up(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure()
         command = {"command": "check-wrap", "exit_code": 2, "aggregated_output": "same wrap failure"}
         self.account(self.home, "A", self.reset, runs=[
@@ -1718,13 +1727,14 @@ class RotationTests(unittest.TestCase):
         self.assertIn("blocked", prompt)
 
     def test_max_minutes_uses_config_default_and_say_override_for_one_turn(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en", max_turn_minutes=18)
         legacy = self.home / "claude-accounts.json"
         (self.home / "codex-worker.json").write_text(legacy.read_text())
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "hold"}, {"mode": "complete", "reply": self.work_result("partial")},
-            {"mode": "complete", "delay": 1.2, "reply": "Say override completed"},
+            # Longer than the default 18-minute budget, shorter than the override.
+            {"mode": "complete", "delay": 4.8, "reply": "Say override completed"},
             {"mode": "hold"}, {"mode": "complete", "reply": self.work_result("partial")}])
         self.start("cap-config")
         output = self.wait("cap-config", timeout=12)
@@ -1739,11 +1749,12 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(len(self.invocations()), 5)
 
     def test_start_max_minutes_does_not_limit_later_say_without_a_default(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure()
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "hold"}, {"mode": "complete", "reply": self.work_result("partial")},
-            {"mode": "complete", "delay": 1.2, "reply": "The later turn has no budget"}])
+            # The unbounded follow-up must outlast the initial 12-minute cap.
+            {"mode": "complete", "delay": 4.8, "reply": "The later turn has no budget"}])
         self.start("cap-no-default", "--max-minutes", "12")
         self.wait("cap-no-default", timeout=12)
         self.cli("say", "cap-no-default", "Continue without a time limit")
@@ -1776,7 +1787,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(len(self.invocations()), 1)
 
     def test_review_and_scout_default_to_their_own_thirty_minute_budget(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en", max_turn_minutes=1000)
         work = self.work_result()
         checkpoint = self.review_result()
@@ -1811,7 +1822,7 @@ class RotationTests(unittest.TestCase):
         self.assertIn("== turn stopped: time budget 30 min exhausted", scout_output)
 
     def test_review_budget_before_rotated_thread_started_does_not_resume_previous_review(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en", max_review_minutes=2)
         work = self.work_result()
         self.account(self.home, "A", self.reset, runs=[
@@ -1869,12 +1880,13 @@ class RotationTests(unittest.TestCase):
                     self.assertNotIn("status blocked", review)
 
     def test_configured_review_budget_is_independent_of_work_and_applies_to_scout(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en", max_turn_minutes=0.2, max_review_minutes=3)
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "reply": self.work_result()},
-            {"mode": "complete", "delay": 0.8, "reply": self.review_result(False)},
-            {"mode": "complete", "delay": 0.8, "reply": "Longer scouting completed"}])
+            # Both exceed the work cap while remaining inside the review budget.
+            {"mode": "complete", "delay": 1.6, "reply": self.review_result(False)},
+            {"mode": "complete", "delay": 1.6, "reply": "Longer scouting completed"}])
         self.start("cap-review-independent", "--max-minutes", "0.6", "--review")
         self.wait("cap-review-independent", timeout=12)
         self.assertEqual(self.state("cap-review-independent")["outcome"], "completed")
@@ -1916,14 +1928,15 @@ class RotationTests(unittest.TestCase):
                     self.assertIn(key, str(raised.exception))
 
     def test_budget_during_automatic_fix_runs_check_then_stops_the_cycle(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.05"
+        # A real wrap-up can take longer than the old half-second startup budget.
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en")
         result = self.work_result("partial", summary="Saved the bounded correction.")
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "reply": self.work_result()},
             {"mode": "complete", "reply": self.review_result()},
             {"mode": "hold"},
-            {"mode": "complete", "reply": result}])
+            {"mode": "complete", "delay": 0.6, "reply": result}])
         self.start("cap-during-fix", "--max-minutes", "10", "--review", "--fix-rounds", "2",
                    "--check", "printf 'checked\\n' >> check-runs")
         output = self.wait("cap-during-fix", timeout=12)
@@ -6277,7 +6290,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                          {"budget_exhausted": 12, "stuck": 12, "stopped": 6, "refused": 6})
 
     def test_report_stop_during_budget_wrapup_matches_actual_task_outcome(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.1"
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         worker = self.worker()
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}, {"mode": "hold"}])

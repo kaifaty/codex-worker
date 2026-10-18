@@ -4,6 +4,7 @@
 Run with /usr/bin/python3 -I tests/stress_rotation.py --repetitions 20 --jobs 4.
 The selected methods are discovered from calls to reset_after_ready, rather
 than maintained as a separate list. Both runners use the current interpreter.
+Use --selection timing to also select CODEX_TASK_MINUTE_SECONDS test methods.
 Use --cpu-load --load-jobs 10 for ten CPU-bound processes instead of full suites.
 """
 import argparse
@@ -29,8 +30,8 @@ _suite_names = []
 _suite_repetitions = 0
 
 
-def reset_tests():
-    """Find every test method that uses the reset-deadline synchronization."""
+def reset_tests(selection="reset"):
+    """Find reset synchronization tests, optionally including minute budgets."""
     names = []
     source = ast.parse(TEST_SCRIPT.read_text())
     for cls in source.body:
@@ -39,8 +40,15 @@ def reset_tests():
         for method in cls.body:
             if not isinstance(method, ast.FunctionDef) or not method.name.startswith("test_"):
                 continue
-            if any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                   and node.func.attr == "reset_after_ready" for node in ast.walk(method)):
+            nodes = list(ast.walk(method))
+            uses_reset = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+                             and node.func.attr == "reset_after_ready" for node in nodes)
+            uses_minutes = any((isinstance(node, ast.Constant)
+                                and node.value == "CODEX_TASK_MINUTE_SECONDS")
+                               or (isinstance(node, ast.keyword)
+                                   and node.arg == "CODEX_TASK_MINUTE_SECONDS")
+                               for node in nodes)
+            if uses_reset or (selection == "timing" and uses_minutes):
                 names.append(cls.name + "." + method.name)
     return names
 
@@ -72,15 +80,17 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repetitions", type=positive, default=20)
     parser.add_argument("--jobs", type=positive, default=os.cpu_count() or 1)
+    parser.add_argument("--selection", choices=("reset", "timing"), default="reset",
+                        help="reset helper users, or their union with minute-budget tests")
     parser.add_argument("--load-jobs", type=positive, default=20,
                         help="full-suite workers, or CPU processes with --cpu-load")
     parser.add_argument("--cpu-load", action="store_true",
                         help="use CPU-bound processes instead of background full suites")
     parser.add_argument("--run-stress", action="store_true", help=argparse.SUPPRESS)
     args = parser.parse_args()
-    names = reset_tests()
+    names = reset_tests(args.selection)
     if not names:
-        parser.error("no tests call reset_after_ready")
+        parser.error("no tests match --selection %s" % args.selection)
     if args.run_stress:
         run_stress(args, names)
         return
@@ -147,7 +157,7 @@ def main():
         directory.mkdir()
         stress = subprocess.Popen(
             [sys.executable, "-I", str(SCRIPT), "--run-stress", "--repetitions",
-             str(args.repetitions), "--jobs", str(args.jobs)],
+             str(args.repetitions), "--jobs", str(args.jobs), "--selection", args.selection],
             env=dict(os.environ, TMPDIR=str(directory)), start_new_session=True)
         while stress.poll() is None:
             if watcher.poll() is not None:
