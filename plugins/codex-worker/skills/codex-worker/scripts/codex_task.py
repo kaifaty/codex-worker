@@ -2986,7 +2986,7 @@ def ci_failure_logs(st, gh, stopped, deadline):
             return
         if check["bucket"] not in ("fail", "cancel"):
             continue
-        job = re.match(r"https://github\.com/[^/]+/[^/]+/actions/runs/\d+/jobs?/(\d+)(?:[/?#]|$)",
+        job = re.match(r"https://(github\.com/[^/]+/[^/]+)/actions/runs/\d+/jobs?/(\d+)(?:[/?#]|$)",
                        check["link"])
         if not job or not remaining:
             continue
@@ -2995,7 +2995,9 @@ def ci_failure_logs(st, gh, stopped, deadline):
             if available <= 0:
                 text = "Failed job log unavailable: CI timeout"
             else:
-                response = ci_command(st, [gh, "run", "view", "--job", job[1], "--log-failed"],
+                # Pin the check's host/repository instead of inheriting GH_REPO or GH_HOST.
+                response = ci_command(st, [gh, "run", "view", "--job", job[2], "--log-failed",
+                                          "--repo", job[1]],
                                       stopped, timeout=min(60, available))
                 text = response.stdout if response.returncode == 0 else response.stderr
                 if response.returncode and not text:

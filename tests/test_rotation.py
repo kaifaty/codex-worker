@@ -503,6 +503,15 @@ elif args[:2] in (["pr", "view"], ["pr", "checks"], ["run", "view"]):
             sys.exit(1)
     else:
         job = args[args.index("--job") + 1]
+        repository = (args[args.index("--repo") + 1] if "--repo" in args
+                      else os.environ.get("GH_REPO", "fixture/repo"))
+        if repository.startswith("https://"):
+            repository = repository[len("https://"):]
+        if repository.count("/") == 1:
+            repository = "github.com/" + repository
+        if repository != "github.com/fixture/repo":
+            print("HTTP 404: job " + job + " not found in " + repository, file=sys.stderr)
+            sys.exit(1)
         print(scenario.get("jobs", {}).get(job, "fixture failed job " + job))
 else:
     sys.exit("unsupported fake gh invocation")
@@ -1896,6 +1905,7 @@ class RotationTests(unittest.TestCase):
 
     def test_ci_failed_round_uses_same_thread_log_checks_and_no_second_review(self):
         self.configure(language="en", sandbox="workspace")
+        self.env["GH_REPO"] = "unrelated/host-repository"
         log = "fixture macOS traceback\nAssertionError: Python 3.9 compatibility\n"
         self.configure_ci([[self.ci_check("pending")], [self.ci_check("fail")],
                            [self.ci_check("pending")], [self.ci_check()]], jobs={"123": log})
@@ -1919,7 +1929,8 @@ class RotationTests(unittest.TestCase):
                      "blocked", "push"):
             self.assertIn(text, executions[2]["prompt"])
         jobs = [event["argv"] for event in self.gh_invocations() if event["argv"][:2] == ["run", "view"]]
-        self.assertEqual(jobs, [["run", "view", "--job", "123", "--log-failed"]])
+        self.assertEqual(jobs, [["run", "view", "--job", "123", "--log-failed",
+                                 "--repo", "github.com/fixture/repo"]])
         self.assertEqual(len(self.ci_polls()), 4)
         self.assertEqual(state["ci"]["sha"], self.git("rev-parse", state["branch"]))
 
@@ -1961,6 +1972,7 @@ class RotationTests(unittest.TestCase):
 
     def test_ci_blocked_round_checks_locally_and_stops_without_polling_again(self):
         self.configure(language="en", sandbox="workspace")
+        self.env["GH_REPO"] = "unrelated/host-repository"
         self.configure_ci([[self.ci_check("fail")]], jobs={"123": "fixture unrelated network outage"})
         blocked = self.work_result("blocked", summary="A public runner outage predates this branch.",
                                    remaining=["Runner logs show the same failure on main."])
@@ -1971,6 +1983,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"], state["ci"]["reason"]),
                          ("failed", 1, "blocked"))
         self.assertEqual(state["result"], blocked)
+        self.assertEqual(state["ci"]["checks"][0]["tail"], "fixture unrelated network outage")
         self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
         self.assertEqual(len(self.ci_polls()), 1)
         self.assertEqual(len(self.invocations()), 2)
@@ -2179,7 +2192,23 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(tails[-1], [])
         job_calls = [call for call in calls if call[:2] == ["run", "view"]]
         self.assertGreaterEqual(len(job_calls), 3)
-        self.assertIn(["run", "view", "--job", "1", "--log-failed"], job_calls)
+        self.assertIn(["run", "view", "--job", "1", "--log-failed",
+                       "--repo", "github.com/fixture/repo"], job_calls)
+        self.assertEqual(waits, [])
+
+    def test_ci_failed_job_logs_use_each_check_repository(self):
+        checks = [self.ci_check("fail", name="first job", job="123"),
+                  self.ci_check("fail", name="second job", job="456")]
+        checks[1]["link"] = checks[1]["link"].replace("fixture/repo", "another-owner/another-repo")
+        checks[1]["link"] += "?check_suite_focus=true#step:1:1"
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [checks], jobs={"123": "first repository log", "456": "second repository log"})
+        job_calls = [call for call in calls if call[:2] == ["run", "view"]]
+        self.assertEqual(job_calls, [
+            ["run", "view", "--job", "123", "--log-failed", "--repo", "github.com/fixture/repo"],
+            ["run", "view", "--job", "456", "--log-failed", "--repo", "github.com/another-owner/another-repo"]])
+        self.assertEqual([check["tail"] for check in ci["checks"]],
+                         ["first repository log", "second repository log"])
         self.assertEqual(waits, [])
 
     def test_ci_failed_job_logs_share_the_wait_deadline(self):
