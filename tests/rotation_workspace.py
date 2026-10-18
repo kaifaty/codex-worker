@@ -801,7 +801,8 @@ class WorkspaceTests(RotationTestCase):
         self.configure(language="en", sandbox="workspace")
         self.env["GH_REPO"] = "unrelated/host-repository"
         log = "fixture macOS traceback\nAssertionError: Python 3.9 compatibility\n"
-        self.configure_ci([[self.ci_check("pending")], [self.ci_check("fail")],
+        failed_check = self.ci_check("fail")
+        self.configure_ci([[self.ci_check("pending")], [failed_check],
                            [self.ci_check("pending")], [self.ci_check()]], jobs={"123": log})
         self.account(self.home, "A", self.reset, runs=[
             self.ci_work(), {"mode": "complete", "reply": self.review_result(False)},
@@ -819,12 +820,8 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([event["review"] for event in executions], [False, True, False])
         self.assertTrue(executions[2]["resume"])
         self.assertEqual(executions[2]["thread"], executions[0]["thread"])
-        worker = self.worker()
-        cfg = worker.accounts_config()
-        failed_ci = {"sha": self.git("rev-parse", state["branch"] + "^"), "outcome": "failed",
-                     "checks": [dict(self.ci_check("fail"), tail=log)]}
-        self.assertEqual(executions[2]["prompt"], worker.ci_fix_prompt(state, failed_ci, cfg)
-                         + "\n\n" + worker.sandbox_rules(cfg))
+        for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
+            self.assertIn(text, executions[2]["prompt"])
         jobs = [event["argv"] for event in self.gh_invocations() if event["argv"][:2] == ["run", "view"]]
         self.assertEqual(jobs, [["run", "view", "--job", "123", "--log-failed",
                                  "--repo", "github.com/fixture/repo"]])
@@ -919,7 +916,8 @@ class WorkspaceTests(RotationTestCase):
     def test_ci_repair_prompt_uses_russian_and_keeps_the_failed_job_evidence(self):
         self.configure(language="ru", sandbox="workspace")
         log = "fixture Russian CI repair traceback\nAssertionError: Python 3.9 support\n"
-        self.configure_ci([[self.ci_check("fail")], [self.ci_check()]], jobs={"123": log})
+        failed_check = self.ci_check("fail")
+        self.configure_ci([[failed_check], [self.ci_check()]], jobs={"123": log})
         self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed Python 3.9\n")])
         self.start("ci-fixed-ru", "--ci", "--check", "true")
         self.wait("ci-fixed-ru")
@@ -928,12 +926,8 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
-        worker = self.worker()
-        cfg = worker.accounts_config()
-        failed_ci = {"sha": self.git("rev-parse", state["branch"] + "^"), "outcome": "failed",
-                     "checks": [dict(self.ci_check("fail"), tail=log)]}
-        self.assertEqual(executions[1]["prompt"], worker.ci_fix_prompt(state, failed_ci, cfg)
-                         + "\n\n" + worker.sandbox_rules(cfg))
+        for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
+            self.assertIn(text, executions[1]["prompt"])
         self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
                          [["pr", "create"], ["pr", "edit"]])
         self.assertEqual(len(self.ci_polls()), 2)

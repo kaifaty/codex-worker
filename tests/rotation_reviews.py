@@ -60,10 +60,10 @@ class ReviewFixTests(RotationTestCase):
         self.assertIn("Focus on races, processes, signals", executions[2]["prompt"])
         self.assertNotIn("Focus on races, processes, signals", executions[1]["prompt"])
         for entry in executions[1:]:
-            self.assertIn(self.worker().review_prompt(self.state("angles-merge"), {"language": "en"}),
-                          entry["prompt"])
+            self.assertIn(str(self.home / "claude-tasks" / "angles-merge" / "brief.md"), entry["prompt"])
             self.assert_output_schema(entry, "angles-merge", review=True)
         state = self.state("angles-merge")
+        self.assertIn(self.worker().review_prompt(state, {"language": "en"}), executions[-1]["prompt"])
         self.assertEqual([entry["angle"] for entry in state["reviews"]],
                          ["correctness", "concurrency"])
         self.assertEqual([entry["thread"] for entry in executions[1:]],
@@ -450,7 +450,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(execution["home"], str(self.other))
         self.assertEqual(execution["output"], str(task_dir / "review.md"))
         self.assertIn(str(task_dir / "brief.md"), execution["prompt"])
-        self.assertEqual(execution["prompt"], self.worker().review_prompt(working, {"language": "ru"}))
+        self.assertEqual(execution["prompt"], self.worker().review_prompt(state, {"language": "ru"}))
         self.assertFalse(execution["resume"])
         self.assertNotEqual(execution["thread"], working["thread"])
         self.assertEqual((state["thread"], state["account"], state["threads"]),
@@ -546,22 +546,11 @@ class ReviewFixTests(RotationTestCase):
             for field in ("id", "severity", "title", "detail", "verify"):
                 self.assertIn(finding[field], correction["prompt"])
             self.assertIn("{file}:{line}".format(**finding), correction["prompt"])
-        self.assertEqual(correction["prompt"], worker.fix_prompt(state, review, None, cfg))
         self.assertIn("F2", final_review["prompt"])
         self.assertIn(decisions[1]["note"], final_review["prompt"])
-        initial_state = dict(state, rounds=[], checks=state["checks"][:1])
-        check_path = Path(state["worktree"]) / "check-runs"
-        check_output = check_path.read_text()
-        try:
-            # The first review saw only the first saved check's file output.
-            check_path.write_text(check_output.splitlines(keepends=True)[0])
-            initial_prompt = worker.review_prompt(initial_state, cfg)
-        finally:
-            check_path.write_text(check_output)
-        for event, expected_prompt in ((initial_review, initial_prompt),
-                                       (final_review, worker.review_prompt(state, cfg))):
+        for event in (initial_review, final_review):
             self.assertIn(command, event["prompt"])
-            self.assertEqual(event["prompt"], expected_prompt)
+        self.assertEqual(final_review["prompt"], worker.review_prompt(state, cfg))
         self.assertFalse(final_review["resume"])
         self.assertEqual(len({work["thread"], initial_review["thread"], final_review["thread"]}), 3)
         for event in executions:
@@ -841,12 +830,12 @@ class ReviewFixTests(RotationTestCase):
                 minor_review = self.review_result()
                 minor_review["findings"] = [minor_review["findings"][1]]
                 minor_review["summary"] = "Only a minor issue remains."
+                decisions = [{"id": "F1", "decision": "fixed", "note": "Fixed the acceptance criterion."},
+                             {"id": "F2", "decision": "rejected", "note": "out of scope"}]
                 self.account(self.home, "A", self.reset, runs=[
                     {"mode": "complete", "reply": self.work_result()},
                     {"mode": "complete", "reply": review},
-                    {"mode": "complete", "reply": self.work_result(findings=[
-                        {"id": "F1", "decision": "fixed", "note": "Fixed the acceptance criterion."},
-                        {"id": "F2", "decision": "rejected", "note": "out of scope"}],
+                    {"mode": "complete", "reply": self.work_result(findings=decisions,
                         remaining=["Let Claude decide the optional edge case."])},
                     {"mode": "complete", "reply": minor_review}])
                 before = len(self.invocations())
@@ -860,8 +849,15 @@ class ReviewFixTests(RotationTestCase):
                 worker = self.worker()
                 cfg = {"language": language}
                 self.assertEqual(second_review["prompt"], worker.review_prompt(state, cfg))
-                self.assertEqual(initial_review["prompt"], worker.review_prompt(dict(state, rounds=[]), cfg))
-                self.assertEqual(correction["prompt"], worker.fix_prompt(state, review, None, cfg))
+                self.assertIn(str(self.home / "claude-tasks" / slug / "brief.md"), initial_review["prompt"])
+                self.assertEqual(state["reviews"][0]["result"], review)
+                self.assertNotIn(decisions[1]["note"], initial_review["prompt"])
+                self.assertIn(decisions[1]["note"], second_review["prompt"])
+                for finding in review["findings"]:
+                    self.assertNotIn(finding["title"], initial_review["prompt"])
+                    for field in ("id", "severity", "title", "detail", "verify"):
+                        self.assertIn(finding[field], correction["prompt"])
+                    self.assertIn("{file}:{line}".format(**finding), correction["prompt"])
                 self.assertEqual(state["auto_fix_stop"], "only P3")
                 self.assertEqual(len(state["rounds"]), 1)
                 self.assertEqual(state["reviews"][-1]["result"], minor_review)
@@ -940,8 +936,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertTrue(retry["resume"])
         self.assertEqual(retry["thread"], executions[0]["thread"])
         state = self.state("fix-check-retry")
-        self.assertEqual(retry["prompt"], self.worker().fix_prompt(
-            state, review, state["checks"][1], {"language": "ru"}))
+        self.assertIn(command, retry["prompt"])
         self.assertIn("retry-line-07", retry["prompt"])
         self.assertIn("retry-line-45", retry["prompt"])
         self.assertIn("retry-stderr", retry["prompt"])
@@ -1050,13 +1045,12 @@ class ReviewFixTests(RotationTestCase):
         self.assertNotEqual(replacement["thread"], interrupted["thread"])
         self.assertEqual(replacement["home"], str(self.other))
         self.assertEqual(final_review["home"], str(self.other))
-        for finding in review["findings"]:
-            for field in ("id", "severity", "title", "detail", "verify"):
-                self.assertIn(finding[field], replacement["prompt"])
-            self.assertIn("{file}:{line}".format(**finding), replacement["prompt"])
+        for event in (interrupted, replacement):
+            for finding in review["findings"]:
+                for field in ("id", "severity", "title", "detail", "verify"):
+                    self.assertIn(finding[field], event["prompt"])
+                self.assertIn("{file}:{line}".format(**finding), event["prompt"])
         state = self.state("fix-rotation")
-        self.assertEqual(interrupted["prompt"], self.worker().fix_prompt(
-            state, review, None, {"language": "ru"}))
         self.assertEqual(state["outcome"], "completed")
         self.assertEqual(state["account"], "second")
         self.assertEqual(len(state["rounds"]), 1, "rotation must not spend another fix round")

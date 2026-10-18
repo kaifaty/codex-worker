@@ -240,9 +240,12 @@ class PromptTests(unittest.TestCase):
                     self.assertIn(part, prompt)
                 for part in ("severity", "file, line, title, detail", "verify", "findings", "summary"):
                     self.assertIn(part, prompt)
-                for part in (parts[language][17], parts[language][19], parts[language][23], parts[language][26]):
+                for part in (parts[language][17], parts[language][18], parts[language][19],
+                             parts[language][23], parts[language][24], parts[language][25],
+                             parts[language][26], "Base tests:"):
                     self.assertNotIn(part, prompt)
                 if language == "en":
+                    self.assertNotIn("passed", prompt)
                     self.assertNotRegex(prompt, "[А-Яа-яЁё]")
             for base in (None, {"outcome": "skipped", "reason": "fixture base skipped"},
                          {"outcome": "failed", "exit": 9, "seconds": 2.2, "tail": "fixture base output"}):
