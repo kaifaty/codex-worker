@@ -28,9 +28,11 @@ import rotation_prompts
 import test_runner
 import test_stress_selection
 import test_process_cleanup
+import test_rollout
 from test_runner import RunnerTests
 from test_stress_selection import StressSelectionTests
 from test_process_cleanup import ProcessCleanupTests
+from test_rollout import RolloutTests
 from rotation_prompts import PromptTests
 
 
@@ -52,7 +54,8 @@ class RotationTests(
 
 # Source order is also the order used by the AST-based stress selection.
 TEST_MODULES = (tuple(sys.modules[cls.__module__] for cls in RotationTests.__bases__)
-                + (rotation_prompts, test_runner, test_stress_selection, test_process_cleanup))
+                + (rotation_prompts, test_runner, test_stress_selection, test_process_cleanup,
+                   test_rollout))
 
 
 if __name__ == "__main__":
