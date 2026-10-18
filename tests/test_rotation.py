@@ -3464,6 +3464,57 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(self.state(slug)["thread"], working["thread"])
         self.assertEqual(self.review_invocations()[-1]["home"], str(self.other))
 
+    def assert_review_pause_wake_account(self, slug, angles=None):
+        self.configure()
+        self.configure_notify()
+        self.start(slug)
+        self.wait(slug)
+        working = self.state(slug)
+        reset = int(time.time()) + 3
+        self.account(self.home, "A", reset + 3600, used=99)
+        runs = [{"mode": "usage_error", "limit_after": 0.05},
+                {"mode": "complete", "reply": self.review_result(False)}]
+        if angles:
+            runs.insert(0, {"mode": "complete", "reply": self.review_result(False)})
+        self.account(self.other, "B", reset, runs=runs, auto_reset=True)
+        args = ("--review-angles", angles) if angles else ()
+        self.reset_after_ready(lambda: self.cli("review", slug, *args), reset, 3)
+        self.wait(slug)
+        sleeping = self.state(slug)
+        self.assertTrue(sleeping.get("sleeping"))
+        self.assertEqual(sleeping["reviews"][-1]["angle"], "concurrency" if angles else "correctness")
+        self.wait(slug, timeout=10, through_sleep=True)
+        for name in ("paused", "woke", "review_done"):
+            event = self.notification(slug, name)
+            self.assertEqual(event["account"], "second")
+            self.assertEqual(event["kind"], "review")
+        self.until(lambda: len([event for event in self.notifications(slug)
+                                if event["event"] == "turn_finished"]) == 2)
+        finished = [event for event in self.notifications(slug) if event["event"] == "turn_finished"][-1]
+        self.assertEqual(finished["account"], "second")
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["account"], "main")
+        self.assertEqual(state["thread"], working["thread"])
+
+    def test_review_pause_and_wake_use_its_executor_account(self):
+        self.assert_review_pause_wake_account("notify-review-sleep")
+
+    def test_second_review_angle_pause_and_wake_use_its_executor_account(self):
+        self.assert_review_pause_wake_account("notify-angle-sleep", "correctness,concurrency")
+
+    def test_current_turn_account_uses_only_current_review_records(self):
+        worker = self.worker()
+        state = {"account": "main", "kind": "review", "review_start": 1,
+                 "reviews": [{"account": "previous"}]}
+        self.assertEqual(worker.current_turn_account(state), "main")
+        state["reviews"].append({"account": "second"})
+        self.assertEqual(worker.current_turn_account(state), "second")
+        state["review_account"] = "third"
+        self.assertEqual(worker.current_turn_account(state), "third")
+        state["kind"] = "work"
+        self.assertEqual(worker.current_turn_account(state), "main")
+
     def test_missing_notify_executable_is_logged_without_failing_work(self):
         self.configure()
         missing = str(self.root / "missing-notification-executable")

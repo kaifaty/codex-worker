@@ -295,6 +295,13 @@ def reap_notifications():
     NOTIFY_PROCESSES[:] = [proc for proc in NOTIFY_PROCESSES if proc.poll() is None]
 
 
+def current_turn_account(st):
+    if st.get("kind") == "review":
+        reviews = st.get("reviews", [])[st.get("review_start", 0):]
+        return st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
+    return st["account"]
+
+
 def notify(st, cfg, event, message, **fields):
     reap_notifications()
     cfg = accounts_config() if cfg is None else cfg
@@ -303,7 +310,7 @@ def notify(st, cfg, event, message, **fields):
         return
     message = st["slug"] + ": " + " ".join(message.splitlines())
     payload = dict(event=event, slug=st["slug"], repo=st["repo"], branch=st["branch"],
-                   kind=st.get("kind", "work"), account=st["account"], at=time.time(), message=message)
+                   kind=st.get("kind", "work"), account=current_turn_account(st), at=time.time(), message=message)
     payload.update(fields)
     if setting == "macos":
         escaped = message.replace("\\", "\\\\").replace('"', '\\"')
@@ -2359,7 +2366,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             if reviews:
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
-                      "account": st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"]),
+                      "account": current_turn_account(st),
                       "started": started, "finished": time.time()}
             if outcome == "refused":
                 record["refusal"] = st.get("refusal", "")
@@ -2379,7 +2386,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
         st.pop("review_angle", None)
         if st.get("outcome") != "refused":
             st.pop("refusal", None)
-        account = st.get("review_account") or (records[-1]["account"] if records else st["account"])
+        account = current_turn_account(st)
         outcome = "stopped" if stopped() else st["outcome"]
         notify(st, cfg, "review_done", f"review {outcome} on {account}",
                outcome=outcome, account=account, angles=[entry["angle"] for entry in records],
@@ -2574,10 +2581,7 @@ def cmd__run(a):
         st["turn_finished"] = time.time()
         st.pop("pending", None)
         if cfg is not None:
-            account = st["account"]
-            if st.get("kind") == "review":
-                reviews = st.get("reviews", [])[st.get("review_start", 0):]
-                account = st.get("review_account") or (reviews[-1]["account"] if reviews else account)
+            account = current_turn_account(st)
             message = f"turn {st['outcome']} on {account}"
             result = st.get("result")
             message += ", result " + (result["status"] if result is not None else "unknown")
