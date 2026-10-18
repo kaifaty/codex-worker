@@ -628,12 +628,6 @@ def consume_recorded_reset(account, credit, slug, cancelled, entries, record):
     return response
 
 
-def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
-    """Pin the intent to a durable key before sending, including after a lost reply."""
-    with reset_journal(cancelled) as (entries, record):
-        return consume_recorded_reset(account, credit, slug, cancelled, entries, record)
-
-
 def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: False,
                         confirmed=False, pending_only=False, allow_consume=True, quota_cfg=None,
                         credit_id_is_hint=False):

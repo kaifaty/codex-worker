@@ -8225,9 +8225,10 @@ with open(sys.argv[1], "a+") as journal:
                     mock.patch.object(worker.time, "sleep", side_effect=cancel_while_waiting), \
                     mock.patch.object(worker, "account_rpc") as account_rpc:
                 with self.assertRaisesRegex(RuntimeError, "stopped"):
-                    worker.consume_reset_credit({"name": "main", "home": str(self.home)},
-                                                self.reset_credit("RateLimitResetCredit_cancelled", self.reset),
-                                                slug="cancelled-reset", cancelled=lambda: cancelled[0])
+                    worker.reset_credit_action({"name": "main", "home": str(self.home)},
+                                               credit_id="RateLimitResetCredit_cancelled",
+                                               slug="cancelled-reset", cancelled=lambda: cancelled[0],
+                                               confirmed=True)
             self.assertTrue(cancelled[0], "the operation must wait for the contended lock")
             account_rpc.assert_not_called()
             self.assertEqual(journal.read_text(), "", "cancel before recording an intent or sending an RPC")
