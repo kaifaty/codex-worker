@@ -152,16 +152,9 @@ def _review_outcome(rows):
                  if outcome not in ("completed", "refused")), None)
 
 
-def build_report(log_path, since="7d", repo=None, slug=None, now=None):
-    """Return JSON-safe summary, account totals, and tasks ordered by cost.
-
-    Percentages describe percentage points of a weekly window. Ratios are in
-    the range 0..1 and are null when there are no measured samples.
-    """
-    now = time.time() if now is None else now
-    since_at = _since_timestamp(since, now)
-    rows = _read_rows(log_path, since_at, now, repo, slug)
-    tasks = {}
+def _task_identities(rows):
+    """Return one (repo, slug, birth or legacy generation) key per row."""
+    identities = []
     legacy_lifetimes = {}
     known_births = {}
     for row in rows:
@@ -169,15 +162,6 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         if created is not None:
             known_births.setdefault((row["repo"], row["slug"]), set()).add(created)
     known_births = {pair: sorted(births) for pair, births in known_births.items()}
-    accounts = {}
-    tokens = _empty_tokens()
-    active_seconds = 0
-    turns = 0
-    checks = Counter()
-    ci = Counter()
-    reviews = Counter()
-    findings_samples = 0
-
     for row in rows:
         phase = row["phase"]
         pair = (row["repo"], row["slug"])
@@ -205,7 +189,77 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             identity = pair + (("legacy", lifetime["generation"]),)
         else:
             identity = pair + (created,)
-        task = tasks.setdefault(identity, _task(row["repo"], row["slug"], created))
+        identities.append(identity)
+    return identities
+
+
+def _accumulate_usage(row, task, accounts, is_turn):
+    """Add a stage's weekly cost and attribute usage to accounts."""
+    usage = row.get("usage")
+    segments = [entry for entry in usage if isinstance(entry, dict)] if isinstance(usage, list) else []
+    if not segments:
+        segments = [row]
+    # New phases record the task's increase directly; segment costs only
+    # attribute that increase to accounts. Endpoint deltas remain legacy.
+    weekly_spent = _number(row.get("weekly_spent"))
+    if weekly_spent is not None:
+        task["weekly_used_percent"] += weekly_spent
+    touched = set()
+    for segment in segments:
+        delta = _number(segment.get("weekly_spent")) if weekly_spent is not None else None
+        if delta is None:
+            delta = _weekly_delta(segment)
+        if weekly_spent is None:
+            task["weekly_used_percent"] += delta
+        name = _identifier(segment.get("account")) or _identifier(row.get("account"))
+        if name is None:
+            continue
+        account = accounts.setdefault(name, _account(name))
+        account["weekly_used_percent"] += delta
+        _add_tokens(account["tokens"], segment.get("tokens"))
+        if is_turn:
+            touched.add(name)
+    for name in touched:
+        accounts[name]["turns"] += 1
+
+
+def _accumulate_checks_and_reviews(row, task, totals):
+    """Collect check/review samples and their task outcome overrides."""
+    phase = row["phase"]
+    if phase in CHECK_PHASES:
+        outcome = row.get("check_outcome")
+        if outcome in ("passed", "failed", "timeout") or outcome in CANCELLATION_OUTCOMES:
+            totals["checks"]["total"] += 1
+            totals["checks"]["passed"] += outcome == "passed"
+        # Ordinary check failures leave the model's task outcome intact;
+        # cancellation stops the whole task, including during a base check.
+        if row.get("outcome") in CANCELLATION_OUTCOMES:
+            task["outcome"] = row["outcome"]
+        elif outcome in CANCELLATION_OUTCOMES:
+            task["outcome"] = outcome
+    if phase == "review":
+        group = (_round(row.get("turn")), _round(row.get("round")))
+        review_rows = task["_reviews"].setdefault(group, [])
+        review_rows.append(row)
+        task["outcome"] = _review_outcome(review_rows)
+        if row.get("outcome") == "completed" and row.get("verdict") in ("clean", "defects"):
+            totals["reviews"]["total"] += 1
+            totals["reviews"]["with_defects"] += row["verdict"] == "defects"
+            findings = _number(row.get("findings"))
+            if findings is not None:
+                totals["reviews"]["findings"] += findings
+                totals["findings_samples"] += 1
+
+
+def _accumulate_rows(rows, identities):
+    """Return tasks, account rows, and totals for rows and their task keys."""
+    tasks = {}
+    accounts = {}
+    totals = {"tokens": _empty_tokens(), "active_seconds": 0, "turns": 0,
+              "checks": Counter(), "reviews": Counter(), "findings_samples": 0}
+    for row, identity in zip(rows, identities):
+        phase = row["phase"]
+        task = tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
         task["_latest_turn"] = max(task["_latest_turn"], _round(row.get("turn")))
         if phase == "turn":
             # Final supervisor results carry no additional stage cost or usage.
@@ -214,13 +268,13 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             continue
         is_turn = phase in MODEL_PHASES
         seconds = _number(row.get("active_seconds")) or 0
-        active_seconds += seconds
+        totals["active_seconds"] += seconds
         task["active_minutes"] += seconds / 60
         task["rounds"] = max(task["rounds"], _round(row.get("round")))
-        _add_tokens(tokens, row.get("tokens"))
+        _add_tokens(totals["tokens"], row.get("tokens"))
         _add_tokens(task["tokens"], row.get("tokens"))
         if is_turn:
-            turns += 1
+            totals["turns"] += 1
             task["turns"] += 1
             # Normal wrap-up success/failure retains the parent budget/stuck
             # outcome. Cancellation or a policy refusal stops the whole task.
@@ -235,57 +289,17 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             # replace; review/scout wrap-ups must preserve that distinction.
             task["result_status"] = _identifier(row.get("result_status"))
 
-        usage = row.get("usage")
-        segments = [entry for entry in usage if isinstance(entry, dict)] if isinstance(usage, list) else []
-        if not segments:
-            segments = [row]
-        # New phases record the task's increase directly; segment costs only
-        # attribute that increase to accounts. Endpoint deltas remain legacy.
-        weekly_spent = _number(row.get("weekly_spent"))
-        if weekly_spent is not None:
-            task["weekly_used_percent"] += weekly_spent
-        touched = set()
-        for segment in segments:
-            delta = _number(segment.get("weekly_spent")) if weekly_spent is not None else None
-            if delta is None:
-                delta = _weekly_delta(segment)
-            if weekly_spent is None:
-                task["weekly_used_percent"] += delta
-            name = _identifier(segment.get("account")) or _identifier(row.get("account"))
-            if name is None:
-                continue
-            account = accounts.setdefault(name, _account(name))
-            account["weekly_used_percent"] += delta
-            _add_tokens(account["tokens"], segment.get("tokens"))
-            if is_turn:
-                touched.add(name)
-        for name in touched:
-            accounts[name]["turns"] += 1
+        _accumulate_usage(row, task, accounts, is_turn)
+        _accumulate_checks_and_reviews(row, task, totals)
 
-        if phase in CHECK_PHASES:
-            outcome = row.get("check_outcome")
-            if outcome in ("passed", "failed", "timeout") or outcome in CANCELLATION_OUTCOMES:
-                checks["total"] += 1
-                checks["passed"] += outcome == "passed"
-            # Ordinary check failures leave the model's task outcome intact;
-            # cancellation stops the whole task, including during a base check.
-            if row.get("outcome") in CANCELLATION_OUTCOMES:
-                task["outcome"] = row["outcome"]
-            elif outcome in CANCELLATION_OUTCOMES:
-                task["outcome"] = outcome
-        if phase == "review":
-            group = (_round(row.get("turn")), _round(row.get("round")))
-            review_rows = task["_reviews"].setdefault(group, [])
-            review_rows.append(row)
-            task["outcome"] = _review_outcome(review_rows)
-            if row.get("outcome") == "completed" and row.get("verdict") in ("clean", "defects"):
-                reviews["total"] += 1
-                reviews["with_defects"] += row["verdict"] == "defects"
-                findings = _number(row.get("findings"))
-                if findings is not None:
-                    reviews["findings"] += findings
-                    findings_samples += 1
+    for account in accounts.values():
+        account["tokens"] = _token_summary(account["tokens"])
+    return tasks, sorted(accounts.values(), key=lambda account: account["account"]), totals
 
+
+def _reconcile_tasks(tasks):
+    """Finalize accumulated tasks and return cost-ordered rows and distributions."""
+    ci = Counter()
     fix_rounds = Counter()
     outcomes = Counter()
     result_status = Counter()
@@ -329,18 +343,33 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             auto_fix_stops[task["auto_fix_stop"]] += 1
         task["tokens"] = _token_summary(task["tokens"])
 
-    for account in accounts.values():
-        account["tokens"] = _token_summary(account["tokens"])
     task_rows = sorted(tasks.values(), key=lambda task: (-task["weekly_used_percent"],
                                                         -task["tokens"]["total"],
                                                         task["repo"], task["slug"],
                                                         -(task["created"] or 0)))
-    account_rows = sorted(accounts.values(), key=lambda account: account["account"])
+    return task_rows, {"ci": ci, "fix_rounds": fix_rounds, "outcomes": outcomes,
+                       "result_status": result_status, "auto_fix_stops": auto_fix_stops}
+
+
+def build_report(log_path, since="7d", repo=None, slug=None, now=None):
+    """Return JSON-safe summary, account totals, and tasks ordered by cost.
+
+    Percentages describe percentage points of a weekly window. Ratios are in
+    the range 0..1 and are null when there are no measured samples.
+    """
+    now = time.time() if now is None else now
+    since_at = _since_timestamp(since, now)
+    rows = _read_rows(log_path, since_at, now, repo, slug)
+    tasks, account_rows, totals = _accumulate_rows(rows, _task_identities(rows))
+    task_rows, reconciled = _reconcile_tasks(tasks)
+    checks = totals["checks"]
+    reviews = totals["reviews"]
+    ci = reconciled["ci"]
     return {
         "since": _utc(since_at), "until": _utc(now), "filters": {"repo": repo, "slug": slug},
         "summary": {
-            "tasks": len(tasks), "turns": turns, "active_hours": active_seconds / 3600,
-            "tokens": _token_summary(tokens),
+            "tasks": len(task_rows), "turns": totals["turns"], "active_hours": totals["active_seconds"] / 3600,
+            "tokens": _token_summary(totals["tokens"]),
             "weekly_used_percent": sum(task["weekly_used_percent"] for task in task_rows),
             "checks": {"total": checks["total"], "passed": checks["passed"],
                        "pass_fraction": _fraction(checks["passed"], checks["total"])},
@@ -349,10 +378,11 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             "reviews": {"total": reviews["total"], "with_defects": reviews["with_defects"],
                         "defect_fraction": _fraction(reviews["with_defects"], reviews["total"]),
                         "findings": reviews["findings"],
-                        "average_findings": _fraction(reviews["findings"], findings_samples)},
-            "fix_rounds_to_clean": dict(sorted(fix_rounds.items(), key=lambda item: int(item[0]))),
-            "auto_fix_stops": dict(sorted(auto_fix_stops.items())),
-            "outcomes": dict(sorted(outcomes.items())), "result_status": dict(sorted(result_status.items())),
+                        "average_findings": _fraction(reviews["findings"], totals["findings_samples"])},
+            "fix_rounds_to_clean": dict(sorted(reconciled["fix_rounds"].items(), key=lambda item: int(item[0]))),
+            "auto_fix_stops": dict(sorted(reconciled["auto_fix_stops"].items())),
+            "outcomes": dict(sorted(reconciled["outcomes"].items())),
+            "result_status": dict(sorted(reconciled["result_status"].items())),
         },
         "accounts": account_rows, "tasks": task_rows,
     }
