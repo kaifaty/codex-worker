@@ -166,11 +166,13 @@ The default base is the remote's default branch.
 The supervisor keeps numeric stage telemetry in `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
 (default `~/.codex/`); `clean` preserves it. Use `report` to compare review findings, check success,
 fix rounds to clean review, tokens, and weekly-window usage before changing rounds or angle defaults.
+In `Tasks by cost`, `slug` is followed by `repo` (the repository directory name used by `--repo`)
+and `started` (task creation time in local time, `MM-DD HH:MM`, or `-` when unknown).
 Task rows also show the weekly budget and whether a budget stop was `minutes` or `weekly`.
 Quota sleeps are excluded from active time; weekly usage counts advances of each account's high-water
 mark during execs, excluding gaps between them, and can include concurrent activity on a shared
 account. `report` sums recorded phase spend, with endpoint deltas as a fallback for older journals.
-`--json` exposes the same metrics; dates use UTC.
+`--json` exposes the same metrics and the task's `created` timestamp; date filters use UTC.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
 add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and
