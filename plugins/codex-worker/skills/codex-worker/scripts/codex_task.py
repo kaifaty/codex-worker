@@ -860,6 +860,7 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("error", None)
     st.pop("review_skipped", None)
     st.pop("auto_fix_stop", None)
+    st.pop("auto_fix_escalations", None)
     st.pop("turn_stop", None)
     st.pop("wrapup", None)
     st.pop("publish", None)
@@ -1050,6 +1051,7 @@ def record_turn_result(st, stopped):
                "account": current_turn_account(st), "started": st.get("turn_started"),
                "finished": st.get("turn_finished"), "outcome": st.get("outcome"),
                "result_status": result.get("status"), "verdict": review.get("verdict"),
+               "auto_fix_stop": st.get("auto_fix_stop"),
                "max_task_weekly_percent": st.get("max_task_weekly_percent"),
                "budget_stop": budget_stop(st)}
         write_telemetry(st, row, stopped)
@@ -2726,6 +2728,46 @@ def publish_work(st, stopped):
     save(st)
 
 
+def fix_round_changes(st, before, after):
+    """Record commits and informational code size, excluding guarded paths."""
+    commits = sh(GIT + ["rev-list", f"{before}..{after}"], cwd=st["worktree"]).splitlines()
+    stats = sh(GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+                      "--numstat", "-z", before, after, "--"], cwd=st["worktree"], errors="replace")
+    paths = check_paths(st)
+    code = {"added": 0, "removed": 0}
+    for item in filter(None, stats.split("\0")):
+        added, removed, path = item.split("\t", 2)
+        if not guarded_path(path, st, paths):
+            code["added"] += int(added) if added != "-" else 0
+            code["removed"] += int(removed) if removed != "-" else 0
+    return {"commits": commits, "code": code}
+
+
+def fix_code_findings(st, review):
+    """Find P1/P2 locations whose HEAD neighborhood came from a fix round."""
+    origins = {sha: number for number, entry in enumerate(st.get("rounds", []), 1)
+               for sha in entry.get("commits", [])}
+    if not origins:
+        return []
+    escalations = []
+    for finding in review["findings"]:
+        path, line = finding.get("file"), finding.get("line")
+        if finding.get("severity") not in ("P1", "P2") or not path or type(line) is not int or line < 1:
+            continue
+        blame = sh(GIT + ["--literal-pathspecs", "blame", "--porcelain", "--no-textconv",
+                          "-L", f"{max(1, line - 2)},{line + 2}", "HEAD", "--", path],
+                   cwd=st["worktree"], check=False, errors="replace")
+        headers = re.findall(r"^([0-9a-f]{40,64}) \d+ (\d+)(?: \d+)?$", blame, re.M)
+        # Git clamps the upper range to EOF. The finding itself must still exist.
+        if not any(int(final_line) == line for _, final_line in headers):
+            continue
+        sha = next((sha for sha, _ in headers if sha in origins), None)
+        if sha is not None:
+            short = sh(GIT + ["rev-parse", "--short", sha], cwd=st["worktree"])
+            escalations.append(dict(finding, round=origins[sha], commit=short))
+    return escalations
+
+
 def auto_fix(st, cfg, review, effort, stopped, sleep):
     """Bounded work/check/review loop under the original supervisor and wait."""
     failed_check = None
@@ -2748,6 +2790,11 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
             if review["findings"] and all(finding["severity"] == "P3" for finding in review["findings"]):
                 st["auto_fix_stop"] = "only P3"
                 return
+            escalations = fix_code_findings(st, review)
+            if escalations:
+                st["auto_fix_stop"] = "escalate"
+                st["auto_fix_escalations"] = escalations
+                return
         if len(st["rounds"]) >= st["fix_rounds"]:
             st["auto_fix_stop"] = "check " + failed_check["outcome"] if failed_check else "rounds_exhausted"
             return
@@ -2759,9 +2806,12 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         prompt = followup_prompt(st, message, cfg, source="review")
         save(st)
         work_paths = check_paths(st)
+        before = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
         publish_work(st, stopped)
         st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+        after = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
+        entry.update(fix_round_changes(st, before, after))
         result = st.get("result")
         entry["decisions"] = result["findings"] if result is not None else []
         save(st)
@@ -3141,7 +3191,9 @@ def cmd_wait(a):
         decisions = entry.get("decisions", [])
         fixed = sum(d["decision"] == "fixed" for d in decisions)
         rejected = sum(d["decision"] == "rejected" for d in decisions)
-        print(f"== round {number}: {source} → fixed {fixed}, rejected {rejected}")
+        code = entry.get("code")
+        size = f"; code +{code['added']} −{code['removed']}" if code is not None else ""
+        print(f"== round {number}: {source} → fixed {fixed}, rejected {rejected}{size}")
         for decision in decisions:
             if decision["decision"] == "rejected":
                 print(f"- rejected {decision['id']}: {decision['note']}")
@@ -3164,6 +3216,10 @@ def cmd_wait(a):
                 print(base["tail"])
     if st.get("review_skipped"):
         print("== review skipped: " + st["review_skipped"])
+    if st.get("auto_fix_stop") == "escalate":
+        for finding in st.get("auto_fix_escalations", []):
+            print(f"== auto-fix: stop: escalate — {finding['id']} {finding['file']}:{finding['line']} "
+                  f"targets code from fix round {finding['round']} ({finding['commit']})")
     if st.get("kind") == "review" or st.get("rounds"):
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         aggregate = st.get("review_result")

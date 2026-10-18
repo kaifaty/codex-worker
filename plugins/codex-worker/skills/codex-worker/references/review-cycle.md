@@ -35,3 +35,13 @@ single review.
 
 A check failure after a fix spends the next available round on the last 40 lines of `check.log`
 instead of review findings. If no round remains, the cycle stops without another review.
+
+Each round records the commits added to the task branch, including supervisor commits in workspace
+sandbox mode. After a fix review, a P1/P2 finding with a file and line stops the cycle with
+`auto_fix_stop: "escalate"` if `git blame` at `HEAD` attributes any line within two lines of its
+location to a commit from an earlier fix round. Missing files and out-of-range lines do not match;
+P3 findings keep their existing behavior. `wait` names the finding, originating round, and short commit
+SHA. Claude chooses the next action as described in `SKILL.md`.
+
+`wait` also shows each round's code additions and deletions, excluding guarded files (built-in test
+patterns and `--guard` paths). This size is informational and does not stop the cycle.
