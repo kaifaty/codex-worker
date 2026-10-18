@@ -612,11 +612,12 @@ def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
 
 
 def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: False,
-                        confirmed=False, pending_only=False, allow_consume=True, quota_cfg=None):
+                        confirmed=False, pending_only=False, allow_consume=True, quota_cfg=None,
+                        credit_id_is_hint=False):
     """Resolve a lost reply before selecting another credit, under the same lock."""
     with reset_journal(cancelled) as (entries, record):
         pending = pending_resets(entries, account)
-        if pending and credit_id is not None and credit_id != pending[0]["creditId"]:
+        if pending and not credit_id_is_hint and credit_id is not None and credit_id != pending[0]["creditId"]:
             pending_id = pending[0]["creditId"]
             raise RuntimeError(f"credit {pending_id} has a pending attempt with an unknown outcome; "
                                f"resolve it first (reset-credit {account['name']} --credit {pending_id} "
@@ -1489,7 +1490,9 @@ def try_reset_credit(st, infos, cfg, stopped):
     event = {"event": "reset_credit", "at": time.time(), "account": info["name"],
              "credit_id": credit["id"], "expires_at": credit.get("expiresAt")}
     try:
-        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True, quota_cfg=cfg)
+        # A concurrent unknown attempt takes priority over the candidate selected above.
+        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True,
+                                     quota_cfg=cfg, credit_id_is_hint=True)
         if action["outcome"] == "available":
             return [action["info"] if i["name"] == info["name"] else i for i in infos]
     except (OSError, ValueError, KeyError, RuntimeError) as exc:

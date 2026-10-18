@@ -5207,6 +5207,49 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(self.consume_calls())
         self.assertFalse(self.invocations())
 
+    def test_automatic_reset_retries_an_unknown_attempt_created_after_credit_selection(self):
+        self.configure(use_reset_credits=True)
+        reset = int(time.time()) + 7 * 86400
+        self.account(self.home, "A", reset, used=99)
+        self.account(self.other, "B", reset + 3600, used=99)
+        pending = self.reset_credit("RateLimitResetCredit_concurrent_pending", reset + 2 * 86400)
+        spare = self.reset_credit("RateLimitResetCredit_selected_spare", reset + 86400)
+        self.reset_credits(self.home, pending, spare)
+        key = str(uuid.uuid4())
+        intent = {"slug": "concurrent-task", "account": "main", "creditId": pending["id"],
+                  "idempotencyKey": key, "at": time.time()}
+        journal = [dict(intent, event="attempt"), dict(intent, event="result", outcome="unknown")]
+        worker = self.worker()
+        cfg = worker.accounts_config()
+        st = {"slug": "concurrent-pending-reset", "account": "main", "rotations": []}
+        (worker.TASKS / st["slug"]).mkdir(parents=True)
+        reset_credit_action = worker.reset_credit_action
+        selected = []
+
+        def add_concurrent_attempt(account, credit_id=None, *args, **kwargs):
+            if credit_id is not None:
+                selected.append(credit_id)
+                (self.home / "codex-worker-resets.jsonl").write_text(
+                    "".join(json.dumps(entry) + "\n" for entry in journal))
+            return reset_credit_action(account, credit_id, *args, **kwargs)
+
+        with mock.patch.dict(os.environ, self.env), \
+                mock.patch.object(worker, "reset_credit_action", side_effect=add_concurrent_attempt):
+            infos = worker.snapshots(cfg, prepare=True)
+            refreshed = worker.try_reset_credit(st, infos, cfg, lambda: False)
+        self.assertEqual(selected, [spare["id"]], "inject the pending attempt after automatic selection")
+        self.assertIsNotNone(refreshed)
+        self.assertEqual(worker.available(refreshed, cfg)["name"], "main")
+        calls = self.consume_calls()
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["params"], {"creditId": pending["id"], "idempotencyKey": key})
+        self.assertEqual(st["rotations"][0]["credit_id"], pending["id"])
+        self.assertEqual(st["rotations"][0]["outcome"], "success")
+        fixture = json.loads((self.home / "fixture.json").read_text())
+        credits = {credit["id"]: credit for credit in fixture["rateLimitResetCredits"]["credits"]}
+        self.assertEqual(credits[pending["id"]]["status"], "consumed")
+        self.assertEqual(credits[spare["id"]]["status"], "available")
+
     def test_near_natural_reset_keeps_the_credit_and_sleeps(self):
         self.configure(use_reset_credits=True, reset_credit_min_hours=12)
         self.account(self.home, "A", self.reset, used=99)
