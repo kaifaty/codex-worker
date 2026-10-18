@@ -4,7 +4,6 @@
 Run with python3 -I tests/test_rotation.py. CODEX_TEST_JOBS controls the parallel
 worker count; set it to 1 to use the standard sequential unittest runner.
 """
-import os
 import runpy
 import sys
 from pathlib import Path
@@ -12,10 +11,6 @@ from pathlib import Path
 
 # Isolated Python omits the script directory from its import path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-
-if os.environ.get("CODEX_ROTATION_BENCH_TIMINGS"):
-    from benchmark_rotation import install
-    install()
 
 import rotation_workspace
 import rotation_weekly_budgets

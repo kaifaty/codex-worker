@@ -17,8 +17,6 @@ from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
-from rotation_clock import ClockFixture
-
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "plugins" / "codex-worker" / "skills" / "codex-worker"
@@ -531,7 +529,7 @@ else:
 '''
 
 
-class RotationTestCase(ClockFixture, unittest.TestCase):
+class RotationTestCase(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="codex-rotation-")
         self.root = Path(self.tmp.name).resolve()
@@ -689,7 +687,7 @@ class RotationTestCase(ClockFixture, unittest.TestCase):
     def cli(self, *args, **kwargs):
         prepared = kwargs.get("prepared")
         if prepared is None:
-            result = subprocess.run([PYTHON, "-I", str(self.script)] + list(args), cwd=self.repo,
+            result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
                                     env=self.env, text=True, capture_output=True,
                                     timeout=kwargs.get("timeout", 15))
         else:
@@ -723,11 +721,6 @@ class RotationTestCase(ClockFixture, unittest.TestCase):
         return value
 
     def reset_after_ready(self, command, reset, delay, after_exec=False):
-        if hasattr(self, "clock"):
-            # Startup cannot spend a frozen reset interval. Clocked tests move
-            # time only after observing exec or reset-sleep readiness.
-            command()
-            return reset
         # Arm before the first exec publication, or the initial quota request
         # when no account can run, after expensive subprocess startup.
         gate = self.root / ("quota-ready-" + uuid.uuid4().hex)

@@ -2,7 +2,7 @@
 """Compare rotation test names and assertion ASTs with a local Git revision.
 
 Run with /usr/bin/python3 -I tests/compare_rotation_assertions.py. The default
-baseline is the revision before issue #31. No tests are imported or executed.
+base revision is origin/main. No tests are imported or executed.
 Assertion comparisons cover changed tests and existing helpers, retain every
 argument and ignore only AST locations.
 """
@@ -156,13 +156,13 @@ def compare(revision):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--baseline", default="100cb45",
+    parser.add_argument("--base", metavar="REV", default="origin/main",
                         help="local Git revision to compare (default: %(default)s)")
     parser.add_argument("--json", action="store_true",
                         help="emit the full comparison as JSON")
     args = parser.parse_args()
     try:
-        result = compare(args.baseline)
+        result = compare(args.base)
     except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as error:
         parser.exit(2, "comparison failed: {}\n".format(error))
     if args.json:

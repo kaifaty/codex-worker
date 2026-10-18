@@ -187,7 +187,6 @@ class NotificationTests(RotationTestCase):
         self.assertEqual(self.review_invocations()[-1]["home"], str(self.other))
 
     def assert_review_pause_wake_account(self, slug, angles=None):
-        self.enable_fake_time()
         self.configure()
         self.configure_notify()
         self.start(slug)
@@ -202,12 +201,10 @@ class NotificationTests(RotationTestCase):
         self.account(self.other, "B", reset, runs=runs, auto_reset=True)
         args = ("--review-angles", angles) if angles else ()
         self.reset_after_ready(lambda: self.cli("review", slug, *args), reset, 3)
-        self.finish_clock_delay(slug, 3 if angles else 2, key="limit_after")
         self.wait(slug)
         sleeping = self.state(slug)
         self.assertTrue(sleeping.get("sleeping"))
         self.assertEqual(sleeping["reviews"][-1]["angle"], "concurrency" if angles else "correctness")
-        self.advance_clock_to_reset(slug)
         self.wait(slug, timeout=10, through_sleep=True)
         for name in ("paused", "woke", "review_done"):
             event = self.notification(slug, name)

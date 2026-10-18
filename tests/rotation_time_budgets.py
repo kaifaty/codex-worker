@@ -64,7 +64,6 @@ class TimeBudgetTests(RotationTestCase):
                               if row["phase"] == "turn")["budget_stop"], "minutes")
 
     def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en", use_reset_credits=True)
         gate = self.root / "publish-rollout"
@@ -86,7 +85,7 @@ class TimeBudgetTests(RotationTestCase):
 
                 ready = executor.submit(publish_when_ready)
                 starter = subprocess.Popen(
-                    [PYTHON, "-I", str(self.script), "start", "cap-locked-journal", "--brief", str(self.brief),
+                    [PYTHON, "-I", str(SCRIPT), "start", "cap-locked-journal", "--brief", str(self.brief),
                      "--repo", str(self.repo), "--max-minutes", "2"],
                     cwd=self.repo, env=self.env, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
                 self.extra_pids.add(starter.pid)
@@ -101,7 +100,6 @@ class TimeBudgetTests(RotationTestCase):
                                  if event.get("command") == "exec-child")
                     self.extra_pids.add(child)
                     self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
-                    self.advance_clock(4)
                     output = self.wait("cap-locked-journal", timeout=10)
                     state = self.state("cap-locked-journal")
                     self.assertEqual(state["outcome"], "budget_exhausted")
@@ -149,19 +147,15 @@ class TimeBudgetTests(RotationTestCase):
         self.assertIn(result["summary"], output)
 
     def test_time_budget_does_not_count_sleep_until_subscription_reset(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
         self.configure()
-        reset = self.clock.time() + 4
+        reset = time.time() + 4
         self.account(self.home, "A", reset, auto_reset=True, runs=[
             {"mode": "usage_error", "limit_after": 0.1},
             {"mode": "complete", "delay": 0.6, "reply": "Finished after a long quota sleep"}])
         self.account(self.other, "B", self.reset, used=99)
         reset = self.reset_after_ready(
             lambda: self.start("cap-reset-sleep", "--max-minutes", "2.5"), reset, 4, after_exec=True)
-        self.finish_clock_delay("cap-reset-sleep", 1, key="limit_after")
-        self.advance_clock_to_reset("cap-reset-sleep")
-        self.finish_clock_delay("cap-reset-sleep", 2)
         output = self.wait("cap-reset-sleep", timeout=12, through_sleep=True)
         state = self.state("cap-reset-sleep")
         self.assertEqual(state["outcome"], "completed")
@@ -195,7 +189,6 @@ class TimeBudgetTests(RotationTestCase):
                             for index, primary in published), published)
 
     def test_time_budget_accumulates_exec_time_across_account_rotation(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en")
         # Each exec fits a fresh budget; together they must exceed the shared cap.
@@ -204,9 +197,6 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "complete", "delay": 2.2, "reply": "This would finish if the budget restarted"},
             {"mode": "complete", "reply": self.work_result("partial")}])
         self.start("cap-rotation", "--max-minutes", "1.7")
-        self.finish_clock_delay("cap-rotation", 1, key="limit_after")
-        self.wait_clock_exec("cap-rotation", 2)
-        self.advance_clock(2.2)
         self.wait("cap-rotation", timeout=12)
         executions = self.invocations()
         self.assertEqual(self.state("cap-rotation")["outcome"], "budget_exhausted")
@@ -324,7 +314,6 @@ class TimeBudgetTests(RotationTestCase):
         self.assertIn("blocked", prompt)
 
     def test_max_minutes_uses_config_default_and_say_override_for_one_turn(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en", max_turn_minutes=18)
         legacy = self.home / "claude-accounts.json"
@@ -335,26 +324,18 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "complete", "delay": 4.8, "reply": "Say override completed"},
             {"mode": "hold"}, {"mode": "complete", "reply": self.work_result("partial")}])
         self.start("cap-config")
-        self.wait_clock_exec("cap-config", 1)
-        self.advance_clock(18 * 0.2 + 0.001)
         output = self.wait("cap-config", timeout=12)
         self.assertEqual(self.state("cap-config")["outcome"], "budget_exhausted")
         self.assertIn("== turn stopped: time budget 18 min exhausted", output)
         self.cli("say", "cap-config", "Use a larger budget", "--max-minutes", "48")
-        self.finish_clock_delay("cap-config", 3)
         self.assertIn("Say override completed", self.wait("cap-config", timeout=12))
         self.assertEqual(self.state("cap-config")["outcome"], "completed")
         self.cli("say", "cap-config", "Use the configured default again")
-        self.wait_clock_exec("cap-config", 4)
-        # Cross the deadline: subtracting nonzero float timestamps can round
-        # an exact-duration jump just below the configured cap.
-        self.advance_clock(18 * 0.2 + 0.001)
         self.wait("cap-config", timeout=12)
         self.assertEqual(self.state("cap-config")["outcome"], "budget_exhausted")
         self.assertEqual(len(self.invocations()), 5)
 
     def test_start_max_minutes_does_not_limit_later_say_without_a_default(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure()
         self.account(self.home, "A", self.reset, runs=[
@@ -362,11 +343,8 @@ class TimeBudgetTests(RotationTestCase):
             # The unbounded follow-up must outlast the initial 12-minute cap.
             {"mode": "complete", "delay": 4.8, "reply": "The later turn has no budget"}])
         self.start("cap-no-default", "--max-minutes", "12")
-        self.wait_clock_exec("cap-no-default", 1)
-        self.advance_clock(12 * 0.2)
         self.wait("cap-no-default", timeout=12)
         self.cli("say", "cap-no-default", "Continue without a time limit")
-        self.finish_clock_delay("cap-no-default", 3)
         output = self.wait("cap-no-default", timeout=12)
         self.assertEqual(self.state("cap-no-default")["outcome"], "completed")
         self.assertIn("The later turn has no budget", output)
@@ -396,7 +374,6 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual(len(self.invocations()), 1)
 
     def test_review_and_scout_default_to_their_own_thirty_minute_budget(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en", max_turn_minutes=1000)
         work = self.work_result()
@@ -407,8 +384,6 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "hold"}, {"mode": "complete", "reply": checkpoint},
             {"mode": "hold"}, {"mode": "complete", "reply": "Scouting checkpoint"}])
         self.start("cap-review-default", "--review")
-        self.wait_clock_exec("cap-review-default", 2)
-        self.advance_clock(30 * 0.2 + 0.001)
         review_output = self.wait("cap-review-default", timeout=12)
         state = self.state("cap-review-default")
         self.assertEqual(state["outcome"], "budget_exhausted")
@@ -424,8 +399,6 @@ class TimeBudgetTests(RotationTestCase):
         self.assertIn(checkpoint["summary"], review_output)
         self.assertIn("== turn stopped: time budget 30 min exhausted", review_output)
         self.cli("scout", "cap-scout-default", "Inspect the current configuration")
-        self.wait_clock_exec("cap-scout-default", 4)
-        self.advance_clock(30 * 0.2 + 0.001)
         scout_output = self.wait("cap-scout-default", timeout=12)
         self.assertEqual(self.state("cap-scout-default")["outcome"], "budget_exhausted")
         executions = self.invocations()
@@ -494,7 +467,6 @@ class TimeBudgetTests(RotationTestCase):
                     self.assertNotIn("status blocked", review)
 
     def test_configured_review_budget_is_independent_of_work_and_applies_to_scout(self):
-        self.enable_fake_time()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en", max_turn_minutes=0.2, max_review_minutes=3)
         self.account(self.home, "A", self.reset, runs=[
@@ -503,12 +475,10 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "complete", "delay": 1.6, "reply": self.review_result(False)},
             {"mode": "complete", "delay": 1.6, "reply": "Longer scouting completed"}])
         self.start("cap-review-independent", "--max-minutes", "0.6", "--review")
-        self.finish_clock_delay("cap-review-independent", 2)
         self.wait("cap-review-independent", timeout=12)
         self.assertEqual(self.state("cap-review-independent")["outcome"], "completed")
         self.assertEqual(len(self.invocations()), 2)
         self.cli("scout", "cap-scout-independent", "Inspect configuration independently")
-        self.finish_clock_delay("cap-scout-independent", 3)
         output = self.wait("cap-scout-independent", timeout=12)
         self.assertEqual(self.state("cap-scout-independent")["outcome"], "completed")
         self.assertIn("Longer scouting completed", output)

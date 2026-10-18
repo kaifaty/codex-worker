@@ -683,12 +683,11 @@ worker.reap_notifications = reap
         self.assertEqual([entry["event"] for entry in state["rotations"]], ["sleep", "wake"])
 
     def test_exhausted_say_sleeps_and_sends_its_original_message(self):
-        self.enable_fake_time()
         self.configure()
         self.start("reset-say")
         self.wait("reset-say")
         original_thread = self.state("reset-say")["thread"]
-        reset = self.clock.time() + 4
+        reset = time.time() + 4
         self.account(self.home, "A", reset, used=99, auto_reset=True,
                      runs=[{"mode": "complete", "reply": "Новое сообщение выполнено"}])
         self.account(self.other, "B", self.reset, used=99)
@@ -699,7 +698,6 @@ worker.reap_notifications = reap
         self.assertEqual(len(self.invocations()), 1, "no exec may run before a subscription resets")
         self.assertIn("(Codex did not run this turn)", first)
 
-        self.advance_clock_to_reset("reset-say")
         self.until(lambda: len(self.invocations()) == 2, timeout=10)
         second = self.wait("reset-say")
         execution = self.invocations()[-1]
@@ -783,19 +781,16 @@ worker.reap_notifications = reap
         self.wait("say-sleep")
 
     def test_delayed_reset_sleeps_again_before_continuing(self):
-        self.enable_fake_time()
         self.configure()
         with self.prepared_cli() as waiter:
-            reset = self.clock.time() + 3
+            reset = time.time() + 3
             release = reset + 3
             self.account(self.home, "A", reset, auto_reset=True, release_at=release, runs=[
                 {"mode": "usage_error"}, {"mode": "complete", "reply": "Задержанный сброс завершён"}])
             self.account(self.other, "B", self.reset, used=99)
             reset = self.reset_after_ready(lambda: self.start("delayed-reset"), reset, 3, after_exec=True)
-            self.finish_clock_delay("delayed-reset", 1, key="limit_after")
             release = reset + 3
             self.assert_sleeping("delayed-reset", self.wait("delayed-reset"), reset)
-            self.advance_clock_to_reset("delayed-reset")
             self.until(lambda: len([entry for entry in self.state("delayed-reset")["rotations"]
                                    if entry.get("event") == "sleep"]) >= 2, timeout=8)
             retry = self.wait("delayed-reset", prepared=waiter)
@@ -805,7 +800,6 @@ worker.reap_notifications = reap
                                 event["primary"]["usedPercent"] == 99 and
                                 event["primary"]["resetsAt"] == release for event in self.trace()))
 
-            self.advance_clock_to_reset("delayed-reset")
             self.until(lambda: len(self.invocations()) == 2, timeout=10)
             output = self.wait("delayed-reset")
             self.assertIn("Задержанный сброс завершён", output)
