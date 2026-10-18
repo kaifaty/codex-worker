@@ -990,6 +990,7 @@ class PhaseTelemetry:
             finished = time.time()
             check = self.check or {}
             row = {"v": 1, "at": finished, "slug": st["slug"], "repo": Path(st["repo"]).name,
+                   "created": st.get("created"),
                    "kind": self.kind, "phase": self.phase, "turn": st.get("turns", 0),
                    "round": self.round, "angle": self.angle,
                    "account": last.get("account", st.get("review_account") if reviewing else st.get("account")),
@@ -1008,9 +1009,20 @@ class PhaseTelemetry:
                                     for entry in st.get("rotations", [])[self.rotation_start:]),
                    "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
                    "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage}
-            with (CODEX_HOME / "codex-worker-log.jsonl").open("a", encoding="utf-8") as stream:
-                fcntl.flock(stream, fcntl.LOCK_EX)
-                stream.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
+            payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+            with (CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
+                # Telemetry is best effort: an unavailable lock must not stall work or stop.
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if stream.seek(0, os.SEEK_END):
+                    stream.seek(-1, os.SEEK_END)
+                    if stream.read(1) != b"\n":
+                        payload = b"\n" + payload
+                remaining = memoryview(payload)
+                while remaining:
+                    written = stream.write(remaining)
+                    if not written:
+                        raise OSError("short telemetry write")
+                    remaining = remaining[written:]
         except Exception as exc:
             telemetry_error(self.st, exc)
 
@@ -1922,7 +1934,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
 def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     with record_phase(st, "wrapup", stopped) as phase:
         _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry)
-        phase.finish(outcome=st["wrapup"]["outcome"])
+        phase.finish(outcome="stopped" if stopped() else st["wrapup"]["outcome"])
 
 
 def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):

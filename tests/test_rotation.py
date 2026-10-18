@@ -6006,6 +6006,91 @@ with open(sys.argv[1], "a+") as journal:
         self.assertIn("codex-worker-log.jsonl", stderr.read_text())
         self.assertNotIn("Traceback", stderr.read_text())
 
+    def test_telemetry_partial_write_preserves_next_stage(self):
+        worker = self.worker()
+        partial = {"slug": "telemetry-partial", "repo": str(self.repo), "account": "main",
+                   "created": time.time()}
+        script = """
+import json, resource, runpy, signal, sys
+worker = runpy.run_path(sys.argv[1])
+state = json.loads(sys.argv[2])
+(worker['TASKS'] / state['slug']).mkdir(parents=True)
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (100, 100))
+worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
+"""
+        result = subprocess.run([PYTHON, "-I", "-c", script, str(SCRIPT), json.dumps(partial)],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=5)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        journal = self.home / "codex-worker-log.jsonl"
+        damaged = journal.read_bytes()
+        self.assertEqual(len(damaged), 100)
+        self.assertFalse(damaged.endswith(b"\n"))
+        stderr = self.home / "claude-tasks" / partial["slug"] / "stderr.log"
+        self.assertIn("telemetry unavailable", stderr.read_text())
+
+        recovered = dict(partial, slug="telemetry-recovered", created=time.time())
+        (worker.TASKS / recovered["slug"]).mkdir()
+        worker.PhaseTelemetry(recovered, "work").finish(outcome="completed")
+        contents = journal.read_bytes()
+        self.assertTrue(contents.startswith(damaged + b"\n"), "repair must only append to the damaged tail")
+        lines = contents.splitlines()
+        self.assertEqual(len(lines), 2)
+        self.assertEqual(json.loads(lines[-1])["slug"], recovered["slug"])
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual(report["summary"]["tasks"], 1)
+        self.assertEqual(report["summary"]["turns"], 1)
+        self.assertEqual(report["tasks"][0]["slug"], recovered["slug"])
+
+    def test_telemetry_busy_journal_does_not_block_checks_or_stop(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+        journal = self.home / "codex-worker-log.jsonl"
+        slug = "telemetry-locked"
+        with journal.open("a+b") as held:
+            fcntl.flock(held, fcntl.LOCK_EX)
+            self.start(slug, "--check", "true")
+            self.wait(slug, timeout=5)
+            self.assertEqual(self.state(slug)["outcome"], "completed")
+            self.assertEqual(self.state(slug)["checks"][-1]["outcome"], "passed")
+            stderr = self.home / "claude-tasks" / slug / "stderr.log"
+            self.assertIn("telemetry unavailable", stderr.read_text())
+            self.assertEqual(journal.stat().st_size, 0)
+
+            command = shlex.quote(PYTHON) + " -I -c " + shlex.quote("import time; time.sleep(60)")
+            self.cli("say", slug, "Run the check again", "--check", command)
+            self.until(lambda: bool(self.state(slug).get("check_pid")))
+            supervisor = self.state(slug)["pid"]
+            self.cli("stop", slug, timeout=5)
+            self.wait(slug, timeout=5)
+            self.assertEqual(self.state(slug)["outcome"], "stopped")
+            self.assertEqual(self.state(slug)["checks"][-1]["outcome"], "stopped")
+            self.until(lambda: not self.process_is_live(supervisor))
+            self.assertEqual(journal.stat().st_size, 0, "the lock remains held throughout completion and stop")
+
+    def test_telemetry_wrapup_stop_overrides_not_run_and_completed_attempts(self):
+        worker = self.worker()
+        for timing in ("before", "after"):
+            with self.subTest(timing=timing):
+                stopped = [timing == "before"]
+                state = {"slug": "wrapup-stop-" + timing, "repo": str(self.repo), "kind": "work",
+                         "account": "main", "thread": "existing-thread", "created": time.time()}
+                (worker.TASKS / state["slug"]).mkdir(parents=True)
+
+                def complete_then_stop(*args, **kwargs):
+                    state["wrapup"]["result"] = self.work_result("partial")
+                    stopped[0] = True
+                    return "completed", None
+
+                with mock.patch.object(worker, "monitor", side_effect=complete_then_stop) as monitor:
+                    worker.wrapup_turn(state, {"language": "en"}, {"name": "main"}, None,
+                                       lambda: stopped[0], {"outcome": "budget_exhausted", "minutes": 1})
+                self.assertEqual(monitor.call_count, int(timing == "after"))
+                self.assertEqual(state["wrapup"]["outcome"], "not_run" if timing == "before" else "completed")
+                self.assertEqual(self.telemetry_journal()[-1]["outcome"], "stopped")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"stopped": 2})
+
     def test_clean_preserves_telemetry_and_report_skips_unreadable_lines(self):
         self.configure(language="en")
         self.start("telemetry-clean")
@@ -6023,6 +6108,137 @@ with open(sys.argv[1], "a+") as journal:
         self.assertEqual(report["summary"]["turns"], 1)
         self.assertEqual(report["tasks"][0]["slug"], "telemetry-clean")
         self.assertIn("telemetry-clean", self.cli("report", "--repo", "repo"))
+
+    def test_report_wrapup_preserves_parent_outcome_unless_stopped_or_refused(self):
+        now = time.time()
+        rows = []
+        expected = {}
+        for parent in ("budget_exhausted", "stuck"):
+            for wrapup in ("completed", "failed", "budget_exhausted", "stuck", "stopped", "refused"):
+                for kind in ("work", "review", "scout"):
+                    slug = parent + "-" + wrapup + "-" + kind
+                    expected[slug] = wrapup if wrapup in ("stopped", "refused") else parent
+                    for phase, outcome in ((kind, parent), ("wrapup", wrapup)):
+                        rows.append({"v": 1, "at": now - 100 + len(rows), "repo": "repo",
+                                     "slug": slug, "created": now - 200, "phase": phase,
+                                     "kind": kind, "turn": 1, "round": 0, "outcome": outcome})
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual({row["slug"]: row["outcome"] for row in report["tasks"]}, expected)
+        self.assertEqual(report["summary"]["outcomes"],
+                         {"budget_exhausted": 12, "stuck": 12, "stopped": 6, "refused": 6})
+
+    def test_report_stop_during_budget_wrapup_matches_actual_task_outcome(self):
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.1"
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}, {"mode": "hold"}])
+        self.start("report-wrapup-stop", "--max-minutes", "10")
+        self.until(lambda: len(self.invocations()) == 2, timeout=8)
+        self.cli("stop", "report-wrapup-stop")
+        self.wait("report-wrapup-stop", timeout=12)
+        self.until(lambda: len(self.telemetry_journal()) == 2)
+        self.assertEqual(self.state("report-wrapup-stop")["outcome"], "stopped")
+        self.assertEqual([(row["phase"], row["outcome"]) for row in self.telemetry_journal()],
+                         [("work", "budget_exhausted"), ("wrapup", "stopped")])
+        report = json.loads(self.cli("report", "--slug", "report-wrapup-stop", "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"stopped": 1})
+        self.assertEqual(report["tasks"][0]["outcome"], "stopped")
+
+    def test_report_clean_and_reused_slug_keep_task_lifetimes_and_costs_separate(self):
+        self.configure(language="en")
+        replies = [self.work_result(), self.review_result(),
+                   self.work_result(), self.review_result(False)]
+        runs = []
+        for index, reply in enumerate(replies, 1):
+            runs.append({"mode": "complete", "reply": reply,
+                         "token_usage_before": self.telemetry_usage(0, 0, 0, 0),
+                         "token_usage_after": self.telemetry_usage(index * 10, 0, 2, 1),
+                         "weekly_used_before": 10, "weekly_used_after": 10 + index})
+        self.account(self.home, "A", self.reset, runs=runs)
+        self.start("report-reused-slug", "--review")
+        self.wait("report-reused-slug")
+        self.until(lambda: len(self.telemetry_journal()) == 2)
+        first_created = self.state("report-reused-slug")["created"]
+        self.cli("clean", "report-reused-slug")
+        self.start("report-reused-slug", "--review")
+        self.wait("report-reused-slug")
+        self.until(lambda: len(self.telemetry_journal()) == 4)
+        second_created = self.state("report-reused-slug")["created"]
+        self.assertGreater(second_created, first_created)
+        self.assertEqual([row["created"] for row in self.telemetry_journal()],
+                         [first_created, first_created, second_created, second_created])
+        report = json.loads(self.cli("report", "--slug", "report-reused-slug", "--json"))
+        self.assertEqual((report["summary"]["tasks"], report["summary"]["turns"]), (2, 4))
+        self.assertEqual(report["summary"]["fix_rounds_to_clean"], {"0": 1})
+        tasks = sorted(report["tasks"], key=lambda row: row["created"])
+        self.assertEqual([(row["created"], row["turns"], row["tokens"]["total"],
+                           row["weekly_used_percent"], row["last_verdict"]) for row in tasks],
+                         [(first_created, 2, 34, 3, "defects"), (second_created, 2, 74, 7, "clean")])
+        self.assertEqual([row["created"] for row in report["tasks"]], [second_created, first_created])
+
+    def test_report_legacy_turn_restart_splits_reused_slug_but_say_and_fix_stay_together(self):
+        now = time.time()
+        rows = []
+        stages = [("work", 1, 0, None), ("review", 1, 0, "defects"),
+                  ("fix", 1, 1, None), ("review", 1, 1, "clean"),
+                  ("work", 2, 0, None), ("review", 2, 0, "clean"),
+                  ("work", 1, 0, None), ("review", 1, 0, "defects")]
+        for phase, turn, round_number, verdict in stages:
+            rows.append({"v": 1, "at": now - 100 + len(rows), "repo": "repo", "slug": "legacy-reuse",
+                         "phase": phase, "kind": "review" if phase == "review" else "work",
+                         "turn": turn, "round": round_number, "outcome": "completed", "verdict": verdict,
+                         "tokens": {"input": 10, "cached_input": 0, "output": 1, "reasoning": 0}})
+        # Without a positive turn counter, earlier journals cannot establish a
+        # restart; preserve their existing single-task interpretation.
+        for phase in ("work", "review", "work", "review"):
+            rows.append({"v": 1, "at": now - 100 + len(rows), "repo": "repo", "slug": "legacy-no-turn",
+                         "phase": phase, "outcome": "completed"})
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--slug", "legacy-reuse", "--json"))
+        self.assertEqual(report["summary"]["tasks"], 2)
+        self.assertEqual(report["summary"]["fix_rounds_to_clean"], {"1": 1})
+        self.assertEqual([(row["created"], row["turns"], row["tokens"]["total"], row["last_verdict"])
+                          for row in report["tasks"]],
+                         [(None, 6, 66, "clean"), (None, 2, 22, "defects")])
+        no_turn = json.loads(self.cli("report", "--slug", "legacy-no-turn", "--json"))
+        self.assertEqual((no_turn["summary"]["tasks"], no_turn["summary"]["turns"]), (1, 4))
+
+    def test_report_legacy_stages_join_tagged_continuation_without_merging_prior_or_reused_tasks(self):
+        now = time.time()
+        continuing_birth, reused_birth = now - 800, now - 700
+        rows = []
+        stages = [
+            (now - 900, None, "work", 1, 0, None),
+            (now - 890, None, "review", 1, 0, "defects"),
+            (now - 790, None, "work", 1, 0, None),
+            (now - 780, None, "review", 1, 0, "defects"),
+            (now - 770, continuing_birth, "work", 2, 0, None),
+            (now - 760, continuing_birth, "review", 2, 1, "clean"),
+            (now - 690, reused_birth, "work", 1, 0, None),
+            (now - 680, reused_birth, "review", 1, 0, "clean"),
+        ]
+        for at, created, phase, turn, round_number, verdict in stages:
+            row = {"v": 1, "at": at, "repo": "repo", "slug": "upgraded-reused-slug",
+                   "started": at - 5, "phase": phase, "turn": turn, "round": round_number,
+                   "kind": "review" if phase == "review" else "work", "outcome": "completed",
+                   "verdict": verdict, "findings": 1 if verdict == "defects" else 0,
+                   "tokens": {"input": 10, "cached_input": 0, "output": 2, "reasoning": 1}}
+            if created is not None:
+                row["created"] = created
+            if phase == "review":
+                row.pop("started")  # Legacy records may have only their completion timestamp.
+            rows.append(row)
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual((report["summary"]["tasks"], report["summary"]["turns"]), (3, 8))
+        self.assertEqual(report["summary"]["fix_rounds_to_clean"], {"0": 1, "1": 1})
+        self.assertEqual({row["created"]: (row["turns"], row["tokens"]["total"], row["last_verdict"])
+                          for row in report["tasks"]},
+                         {None: (2, 24, "defects"), continuing_birth: (4, 48, "clean"),
+                          reused_birth: (2, 24, "clean")})
 
     def test_report_aggregates_cost_reviews_rounds_resets_and_filters(self):
         now = time.time()

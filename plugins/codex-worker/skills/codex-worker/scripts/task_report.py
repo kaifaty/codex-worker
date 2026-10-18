@@ -8,6 +8,7 @@ import json
 import math
 import re
 import time
+from bisect import bisect_right
 from collections import Counter
 from pathlib import Path
 
@@ -117,8 +118,8 @@ def _read_rows(log_path, since, until, repo, slug):
     return sorted(rows, key=lambda row: row["at"])
 
 
-def _task(repo, slug):
-    return {"repo": repo, "slug": slug, "turns": 0, "rounds": 0,
+def _task(repo, slug, created):
+    return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
             "_reviews": {}}
@@ -157,6 +158,13 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
     since_at = _since_timestamp(since, now)
     rows = _read_rows(log_path, since_at, now, repo, slug)
     tasks = {}
+    legacy_lifetimes = {}
+    known_births = {}
+    for row in rows:
+        created = _number(row.get("created"))
+        if created is not None:
+            known_births.setdefault((row["repo"], row["slug"]), set()).add(created)
+    known_births = {pair: sorted(births) for pair, births in known_births.items()}
     accounts = {}
     tokens = _empty_tokens()
     active_seconds = 0
@@ -166,8 +174,33 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
     findings_samples = 0
 
     for row in rows:
-        task = tasks.setdefault((row["repo"], row["slug"]), _task(row["repo"], row["slug"]))
         phase = row["phase"]
+        pair = (row["repo"], row["slug"])
+        created = _number(row.get("created"))
+        if created is None:
+            # A running task can gain birth timestamps after an upgrade. Join
+            # its earlier stages to a later tagged stage from the same birth,
+            # but keep stages before that birth in their older task lifetime.
+            started = _number(row.get("started"))
+            births = known_births.get(pair, [])
+            index = bisect_right(births, row["at"] if started is None else started)
+            if index:
+                created = births[index - 1]
+        if created is None:
+            # Earlier journals had no birth timestamp. A fresh initial work or
+            # scout turn can identify slug reuse when its turn counter restarts.
+            # Missing counters and the repeated turns of reviews/fixes cannot.
+            lifetime = legacy_lifetimes.setdefault(pair, {"generation": 0, "turn": None})
+            turn = _round(row.get("turn"))
+            if (phase in ("work", "scout") and turn > 0 and lifetime["turn"] is not None
+                    and turn <= lifetime["turn"]):
+                lifetime["generation"] += 1
+            if turn > 0:
+                lifetime["turn"] = turn
+            identity = pair + (("legacy", lifetime["generation"]),)
+        else:
+            identity = pair + (created,)
+        task = tasks.setdefault(identity, _task(row["repo"], row["slug"], created))
         is_turn = phase in MODEL_PHASES
         seconds = _number(row.get("active_seconds")) or 0
         active_seconds += seconds
@@ -178,9 +211,10 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         if is_turn:
             turns += 1
             task["turns"] += 1
-            # A wrap-up is an extra model turn after a terminal budget/stuck
-            # outcome, and does not replace that outcome with "completed".
-            if phase != "wrapup" and _identifier(row.get("outcome")):
+            # Normal wrap-up success/failure retains the parent budget/stuck
+            # outcome. Cancellation or a policy refusal stops the whole task.
+            if ((phase != "wrapup" or row.get("outcome") in ("stopped", "refused"))
+                    and _identifier(row.get("outcome"))):
                 task["outcome"] = row["outcome"]
         if phase == "scout":
             task["result_status"] = None
@@ -252,7 +286,8 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         account["tokens"] = _token_summary(account["tokens"])
     task_rows = sorted(tasks.values(), key=lambda task: (-task["weekly_used_percent"],
                                                         -task["tokens"]["total"],
-                                                        task["repo"], task["slug"]))
+                                                        task["repo"], task["slug"],
+                                                        -(task["created"] or 0)))
     account_rows = sorted(accounts.values(), key=lambda account: account["account"])
     return {
         "since": _utc(since_at), "until": _utc(now), "filters": {"repo": repo, "slug": slug},
