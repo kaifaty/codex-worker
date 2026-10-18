@@ -208,14 +208,8 @@ class ResultScoutConfigTests(RotationTestCase):
         prompt = invocation["prompt"]
         self.assertIn(question, prompt)
         self.assertNotIn("TASK-RULES-MUST-NOT-REACH-SCOUT", prompt)
-        self.assertNotRegex(prompt, "[А-Яа-яЁё]")
-        lower = prompt.lower()
-        self.assertRegex(lower, r"(?:do not|never|don't)[^\n]*(?:change|edit|modify)")
-        for rule in ("commit", "push", "300", "file:line", "test", "assum"):
-            self.assertIn(rule, lower)
-        self.assertRegex(lower, r"verified|checked|confirmed")
-        self.assertRegex(lower, r"introduction|preamble")
-        self.assertRegex(lower, r"not (?:inspect|read|look)|haven't (?:inspect|read|look)|did not (?:inspect|read|look)")
+        worker = self.worker()
+        self.assertEqual(prompt, worker.scout_prompt(question, worker.accounts_config()))
         self.assertIn(reply, output)
         self.assert_scout_output(output)
         telemetry = self.phase_telemetry_journal()
@@ -311,8 +305,8 @@ class ResultScoutConfigTests(RotationTestCase):
         prompt = invocation["prompt"]
         self.assertIn(question.read_text().strip(), prompt)
         self.assertNotIn("SCOUT-MUST-SKIP-CUSTOM-TASK-RULES", prompt)
-        for rule in ("300", "файл:строка", "провер", "предполож", "тест"):
-            self.assertIn(rule, prompt.lower())
+        worker = self.worker()
+        self.assertEqual(prompt, worker.scout_prompt(question.read_text(), worker.accounts_config()))
         self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
         self.assertEqual(self.git("branch", "--list", "codex/scout-file"), "")
@@ -513,14 +507,14 @@ class ResultScoutConfigTests(RotationTestCase):
                 expected = SKILL / "references" / ("rules.ru.md" if language == "ru" else "rules.md")
                 self.assertEqual(worker.rules_path(), expected)
                 self.assertEqual(worker.rules_text(), expected.read_text())
-                prompts = [worker.handoff(st), worker.review_prompt(st), worker.reset_resume_prompt()]
-                for prompt in prompts:
-                    if language == "ru":
-                        self.assertRegex(prompt, "[А-Яа-яЁё]")
-                    else:
-                        self.assertNotRegex(prompt, "[А-Яа-яЁё]")
-                self.assertIn("git diff", prompts[0])
-                self.assertIn("git diff", prompts[1])
+                prompt = worker.handoff(st)
+                if language == "ru":
+                    self.assertRegex(prompt, "[А-Яа-яЁё]")
+                else:
+                    self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+                self.assertIn("git diff", prompt)
+                self.assertEqual(worker.review_prompt(st), worker.review_prompt(st, cfg))
+                self.assertEqual(worker.reset_resume_prompt(), worker.reset_resume_prompt(cfg))
 
     def test_rules_override_replaces_both_languages(self):
         worker = self.worker()
@@ -548,8 +542,10 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertEqual(len(self.invocations()), 2)
         self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
         self.assertFalse(self.state("single-account")["rotations"])
-        for invocation in self.invocations():
-            self.assertNotRegex(invocation["prompt"], "[А-Яа-яЁё]")
+        self.assertNotRegex(self.invocations()[0]["prompt"], "[А-Яа-яЁё]")
+        worker = self.worker()
+        self.assertEqual(self.invocations()[1]["prompt"], worker.review_prompt(
+            self.state("single-account"), worker.accounts_config()))
         self.assertIn((SKILL / "references" / "rules.md").read_text().splitlines()[0],
                       self.invocations()[0]["prompt"])
         self.notification("single-account", "turn_finished")

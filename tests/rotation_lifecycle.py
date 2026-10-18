@@ -668,13 +668,11 @@ worker.reap_notifications = reap
         self.until(lambda: len(self.invocations()) == 2, timeout=10)
         second = self.wait("reset-resume")
         executions = self.invocations()
-        self.assertTrue(executions[1]["resume"])
-        self.assertEqual(executions[1]["thread"], executions[0]["thread"])
-        self.assertEqual(executions[1]["home"], str(self.home))
+        self.assert_resumed_same_thread(executions[0], executions[1], self.home)
         for execution in executions:
             self.assert_output_schema(execution, "reset-resume")
-        self.assertEqual(executions[1]["prompt"],
-                         "Лимит подписки сбросился. Продолжай с того места, где остановился.")
+        worker = self.worker()
+        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.accounts_config()))
         self.assertIn("Продолжение после сброса завершено", second)
         self.assertNotIn("auto-continue at", second)
         state = self.state("reset-resume")
@@ -764,8 +762,8 @@ worker.reap_notifications = reap
 
     def test_say_during_sleep_requires_stop_first(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
-        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset),
+                              (self.other, "B", self.reset + 3600))
         self.start("say-sleep")
         state = self.assert_sleeping("say-sleep", self.wait("say-sleep"), self.reset)
         result = subprocess.run([PYTHON, "-I", str(SCRIPT), "say", "say-sleep", "Не отправлять"],
@@ -803,8 +801,8 @@ worker.reap_notifications = reap
             self.until(lambda: len(self.invocations()) == 2, timeout=10)
             output = self.wait("delayed-reset")
             self.assertIn("Задержанный сброс завершён", output)
-            self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
-            self.assertTrue(self.invocations()[1]["resume"])
+            executions = self.invocations()
+            self.assert_resumed_same_thread(executions[0], executions[1], self.home)
             state = self.state("delayed-reset")
             self.assertEqual(state["outcome"], "completed")
             sleeps = [entry for entry in state["rotations"] if entry.get("event") == "sleep"]
@@ -873,8 +871,8 @@ worker.reap_notifications = reap
 
     def test_all_accounts_exhausted_before_start_has_no_previous_executor(self):
         self.configure(wait_for_reset=False)
-        self.account(self.home, "A", self.reset + 3600, used=99)
-        self.account(self.other, "B", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset + 3600),
+                              (self.other, "B", self.reset))
         self.start("initially-limited")
         output = self.wait("initially-limited")
         self.assertIn("== all accounts at limit; earliest reset", output)
@@ -916,8 +914,8 @@ worker.reap_notifications = reap
         first = self.wait("pause-later")
         old = first.split("min\n", 1)[1].split("\n==", 1)[0].strip()
         self.assertTrue(old)
-        self.account(self.home, "A", self.reset + 3600, used=99)
-        self.account(self.other, "B", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset + 3600),
+                              (self.other, "B", self.reset))
         self.cli("say", "pause-later", "Ещё одно сообщение")
         output = self.wait("pause-later")
         self.assertIn("== all accounts at limit", output)

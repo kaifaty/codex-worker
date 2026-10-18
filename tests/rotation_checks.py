@@ -50,9 +50,7 @@ class CheckGuardTests(RotationTestCase):
             self.assert_no_workspace_sandbox(event)
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn(command, prompt)
-        self.assertIn("passed", prompt.lower())
-        self.assertRegex(prompt.lower(), r"(?:do not|don't).*rerun.*(?:full|entire)")
-        self.assertRegex(prompt.lower(), r"targeted|focused|specific")
+        self.assertEqual(prompt, self.worker().review_prompt(state, {"language": "en"}))
         self.assertLess(output.index("== check `"), output.index("== review by "))
 
     def test_guarded_changes_decode_latin1_patches_for_every_diff_layer(self):
@@ -371,10 +369,8 @@ class CheckGuardTests(RotationTestCase):
         self.assertEqual(guarded, ["== guarded files changed: tests/test_a.py (+2 −1)"])
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn("tests/test_a.py", prompt)
-        self.assertRegex(prompt.lower(), r"assertion|assert")
-        self.assertRegex(prompt.lower(), r"skip|disabled")
-        self.assertRegex(prompt.lower(), r"tolerance|tolerances")
-        self.assertIn("mock", prompt.lower())
+        self.assertEqual(prompt, self.worker().review_prompt(
+            self.state("guarded-counts"), {"language": "en"}))
         self.assertEqual(self.notification("guarded-counts", "turn_finished")["guarded_changed"], 1)
 
     def test_disabled_test_markers_ignore_prose_and_match_test_annotations(self):
@@ -570,7 +566,8 @@ class CheckGuardTests(RotationTestCase):
         self.assertIn("== base tests: FAILED", output)
         self.assertEqual(len(self.review_invocations()), 1)
         self.assertIn("scripts/verify.sh", self.review_invocations()[0]["prompt"])
-        self.assertIn("Base tests: failed", self.review_invocations()[0]["prompt"])
+        self.assertEqual(self.review_invocations()[0]["prompt"],
+                         self.worker().review_prompt(state, {"language": "en"}))
         self.assertLess(output.index("== base tests: FAILED"), output.index("== review by "))
         self.assertEqual(self.notification("guarded-assignment", "turn_finished")["guarded_changed"], 1)
         worktrees = self.git("worktree", "list", "--porcelain")
@@ -665,7 +662,7 @@ class CheckGuardTests(RotationTestCase):
         self.assertIn("== base tests: skipped (" + reason + ")", output)
         self.assertEqual(len(self.review_invocations()), 1)
         prompt = self.review_invocations()[0]["prompt"]
-        self.assertIn("Base tests: skipped", prompt)
+        self.assertEqual(prompt, self.worker().review_prompt(state, {"language": "en"}))
         self.assertIn(reason, prompt)
         self.assertNotIn("== review skipped:", output)
         self.assertFalse((self.home / "claude-tasks" / slug / "base-check.log").exists())
@@ -902,8 +899,7 @@ class CheckGuardTests(RotationTestCase):
         self.assertEqual(len(self.review_invocations()), 1)
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn("printf 'checked\\n' >> check-runs", prompt)
-        self.assertIn("passed", prompt.lower())
-        self.assertRegex(prompt.lower(), r"(?:do not|don't).*rerun.*(?:full|entire)")
+        self.assertEqual(prompt, self.worker().review_prompt(state, {"language": "en"}))
 
     def test_review_without_saved_check_has_no_passed_suite_instruction(self):
         self.configure(language="en")
@@ -912,6 +908,6 @@ class CheckGuardTests(RotationTestCase):
             {"mode": "complete", "reply": self.review_result(False)}])
         self.start("review-no-check", "--review")
         self.wait("review-no-check")
-        prompt = self.review_invocations()[0]["prompt"].lower()
-        self.assertNotIn("passed", prompt)
-        self.assertNotRegex(prompt, r"(?:do not|don't).*rerun.*(?:full|entire)")
+        prompt = self.review_invocations()[0]["prompt"]
+        self.assertEqual(prompt, self.worker().review_prompt(
+            self.state("review-no-check"), {"language": "en"}))

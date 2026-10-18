@@ -56,8 +56,8 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[1]["thread"], executions[0]["thread"])
         self.assert_output_schema(executions[1], "weekly-cap")
-        self.assertTrue(executions[1]["prompt"].startswith(
-            "Бюджет задачи на недельный лимит исчерпан."))
+        self.assertEqual(executions[1]["prompt"],
+                         self.worker().wrapup_prompt(state, state["turn_stop"], {"language": "ru"}))
         self.assertFalse(self.review_invocations())
         self.assertIn("== turn stopped: weekly budget 10% exhausted (spent 10.4%)", output)
         self.until(lambda: not self.process_is_live(child))
@@ -186,7 +186,8 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(len(executions), 2)
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[0]["thread"], executions[1]["thread"])
-        self.assertTrue(executions[1]["prompt"].startswith("The task's weekly limit budget is exhausted."))
+        self.assertEqual(executions[1]["prompt"],
+                         self.worker().wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
         self.assertFalse(self.review_invocations())
         self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
         self.assertFalse(state["rotations"])
@@ -249,11 +250,11 @@ class WeeklyBudgetTests(RotationTestCase):
             worker.save(st)
             st = worker.load(slug)
         self.assertEqual(st["weekly_used_percent"], 7)
-        self.assertEqual(st["weekly_marks"], {"main": {"reset": self.reset, "used": 17}})
         rows = self.phase_telemetry_journal()
         self.assertEqual([row["weekly_spent"] for row in rows], [7, 0])
         self.assertEqual([row["usage"][0]["weekly_spent"] for row in rows], [7, 0])
         report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["summary"]["weekly_used_percent"], 7)
         self.assertEqual(report["tasks"][0]["weekly_used_percent"], st["weekly_used_percent"])
         self.assertEqual(report["accounts"][0]["weekly_used_percent"], 7)
 
@@ -276,8 +277,10 @@ class WeeklyBudgetTests(RotationTestCase):
                     self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path,
                                                    seed_first=False)
                     phase.finish(outcome="completed")
+                rows = [row for row in self.phase_telemetry_journal() if row["slug"] == slug]
+                self.assertEqual([(row["weekly_spent"], row["usage"][0]["weekly_spent"])
+                                  for row in rows], [(7, 7)])
                 self.assertEqual(st["weekly_used_percent"], 7)
-                self.assertEqual(st["weekly_marks"]["main"], {"reset": self.reset, "used": 17})
                 task = json.loads(self.cli("report", "--slug", slug, "--json"))["tasks"][0]
                 self.assertEqual(task["weekly_used_percent"], 7)
 
@@ -308,9 +311,12 @@ class WeeklyBudgetTests(RotationTestCase):
                 self.assertEqual(self.phase_telemetry_journal()[-1]["weekly_spent"], delta)
                 worker.save(st)
                 st = worker.load(slug)
-        self.assertEqual(st["weekly_marks"], {
+        # This is the sole compatibility contract for the persisted mark format.
+        expected_marks = {
             "main": {"reset": self.reset + 604800, "used": 5},
-            "second": {"reset": self.reset, "used": 22}})
+            "second": {"reset": self.reset, "used": 22}}
+        self.assertEqual(json.loads(worker.state_path(slug).read_text())["weekly_marks"], expected_marks)
+        self.assertEqual(worker.load(slug)["weekly_marks"], expected_marks)
         report = json.loads(self.cli("report", "--slug", slug, "--json"))
         self.assertEqual(report["tasks"][0]["weekly_used_percent"], 13)
         self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
@@ -325,7 +331,6 @@ class WeeklyBudgetTests(RotationTestCase):
         self.start("weekly-snapshot-seed", "--max-weekly", "3", "--review")
         self.wait("weekly-snapshot-seed")
         state = self.state("weekly-snapshot-seed")
-        self.assertEqual(state["weekly_marks"]["main"], {"reset": self.reset, "used": 12})
         self.assertEqual(state["weekly_used_percent"], 4)
         self.assertEqual(state["outcome"], "budget_exhausted")
         self.assertEqual(state["turn_stop"]["spent"], 4)
@@ -333,6 +338,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(len(self.invocations()), 1)
         rows = self.phase_telemetry_journal()
         self.assertEqual([row["weekly_spent"] for row in rows], [4])
+        self.assertEqual(rows[0]["usage"][0]["weekly_spent"], 4)
         report = json.loads(self.cli("report", "--slug", "weekly-snapshot-seed", "--json"))
         self.assertEqual(report["tasks"][0]["weekly_used_percent"], state["weekly_used_percent"])
 
@@ -360,7 +366,6 @@ class WeeklyBudgetTests(RotationTestCase):
         self.wait(slug)
         state = self.state(slug)
         self.assertEqual(state["weekly_used_percent"], 3)
-        self.assertEqual(state["weekly_marks"]["main"], {"reset": self.reset, "used": 21})
         self.assertEqual(state["outcome"], "completed")
         self.assertNotIn("turn_stop", state)
         self.assertEqual(len(self.invocations()), 2)
@@ -368,6 +373,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
         self.until(lambda: len(self.telemetry_journal()) == 4)
         self.assertEqual([row["weekly_spent"] for row in self.phase_telemetry_journal()], [2, 1])
+        self.assertEqual([row["usage"][0]["weekly_spent"] for row in self.phase_telemetry_journal()], [2, 1])
         task = json.loads(self.cli("report", "--slug", slug, "--json"))["tasks"][0]
         self.assertEqual(task["weekly_used_percent"], state["weekly_used_percent"])
         quota_calls = [event for event in self.trace() if event.get("command") == "quota-snapshot"]
@@ -430,8 +436,8 @@ class WeeklyBudgetTests(RotationTestCase):
         with worker.record_phase(st, "work", lambda: False) as phase:
             self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path)
             phase.finish(outcome="completed")
+        self.assertEqual(self.phase_telemetry_journal()[0]["usage"][0]["weekly_spent"], 4)
         self.assertEqual(st["weekly_used_percent"], 4)
-        self.assertEqual(st["weekly_marks"]["main"], {"reset": self.reset + 604800, "used": 3})
         self.assertEqual(self.phase_telemetry_journal()[0]["weekly_spent"], 4)
         task = json.loads(self.cli("report", "--slug", slug, "--json"))["tasks"][0]
         self.assertEqual(task["weekly_used_percent"], 4)
@@ -845,7 +851,8 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertIn("== turn stopped: weekly budget 2% exhausted (spent 2.5%)", output)
         self.assertEqual(len(self.invocations()), 2)
         self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
-        self.assertIn("weekly", self.invocations()[1]["prompt"].split(".")[0].lower())
+        self.assertEqual(self.invocations()[1]["prompt"],
+                         self.worker().wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
         self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
         self.assertFalse(state["rotations"])
 

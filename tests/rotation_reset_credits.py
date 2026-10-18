@@ -92,10 +92,9 @@ class ResetCreditTests(RotationTestCase):
         output = self.wait("free-reset-resume")
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
-        self.assertTrue(executions[1]["resume"])
-        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
-        self.assertEqual(executions[1]["prompt"],
-                         "Лимит подписки сбросился. Продолжай с того места, где остановился.")
+        self.assert_resumed_same_thread(executions[0], executions[1], self.home)
+        worker = self.worker()
+        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.accounts_config()))
         self.assertIn("Бесплатный сброс помог", output)
         self.assertEqual(len(self.consume_calls()), 1)
         self.assertFalse(any(entry.get("event") == "sleep"
@@ -104,8 +103,8 @@ class ResetCreditTests(RotationTestCase):
     def test_automatic_reset_rechecks_quota_under_lock_and_keeps_the_credit_if_available(self):
         self.configure(use_reset_credits=True)
         reset = int(time.time()) + 30 * 3600
-        self.account(self.home, "A", reset, used=99)
-        self.account(self.other, "B", reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", reset),
+                              (self.other, "B", reset + 3600))
         credit = self.reset_credit("RateLimitResetCredit_keep_after_fresh_read", reset + 86400)
         self.reset_credits(self.home, credit, clear_quota_when_reset_locked=True)
         self.start("fresh-quota-before-consume")
@@ -128,8 +127,8 @@ class ResetCreditTests(RotationTestCase):
     def test_disabled_free_resets_keep_the_original_sleep(self):
         self.configure(use_reset_credits=False)
         reset = int(time.time()) + 30 * 3600
-        self.account(self.home, "A", reset, used=99)
-        self.account(self.other, "B", reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", reset),
+                              (self.other, "B", reset + 3600))
         self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_disabled", reset + 86400))
         self.start("free-reset-disabled")
         self.assert_sleeping("free-reset-disabled", self.wait("free-reset-disabled"), reset)
@@ -139,8 +138,8 @@ class ResetCreditTests(RotationTestCase):
     def test_automatic_reset_retries_an_unknown_attempt_created_after_credit_selection(self):
         self.configure(use_reset_credits=True)
         reset = int(time.time()) + 7 * 86400
-        self.account(self.home, "A", reset, used=99)
-        self.account(self.other, "B", reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", reset),
+                              (self.other, "B", reset + 3600))
         pending = self.reset_credit("RateLimitResetCredit_concurrent_pending", reset + 2 * 86400)
         spare = self.reset_credit("RateLimitResetCredit_selected_spare", reset + 86400)
         self.reset_credits(self.home, pending, spare)
@@ -181,8 +180,8 @@ class ResetCreditTests(RotationTestCase):
 
     def test_near_natural_reset_keeps_the_credit_and_sleeps(self):
         self.configure(use_reset_credits=True, reset_credit_min_hours=12)
-        self.account(self.home, "A", self.reset, used=99)
-        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset),
+                              (self.other, "B", self.reset + 3600))
         self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_keep", self.reset + 86400))
         self.start("free-reset-too-soon")
         self.assert_sleeping("free-reset-too-soon", self.wait("free-reset-too-soon"), self.reset)
@@ -195,8 +194,8 @@ class ResetCreditTests(RotationTestCase):
                 before = len(self.consume_calls())
                 self.configure(use_reset_credits=True)
                 reset = int(time.time()) + 30 * 3600
-                self.account(self.home, "A", reset, used=99)
-                self.account(self.other, "B", reset + 3600, used=99)
+                self.exhaust_accounts((self.home, "A", reset),
+                                      (self.other, "B", reset + 3600))
                 self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_" + slug, reset + 86400),
                                    self.reset_credit("RateLimitResetCredit_spare_" + slug, reset + 2 * 86400),
                                    **changes)
@@ -208,7 +207,7 @@ class ResetCreditTests(RotationTestCase):
 
     def test_reset_credit_timeout_retries_with_the_original_idempotency_key(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset))
         credit = self.reset_credit("RateLimitResetCredit_unknown", self.reset + 86400)
         self.reset_credits(self.home, credit, consume_timeout=True)
         result = subprocess.run([PYTHON, "-I", str(SCRIPT), "reset-credit", "main", "--yes"],
@@ -232,7 +231,7 @@ class ResetCreditTests(RotationTestCase):
 
     def test_reset_credit_rejects_another_explicit_credit_while_an_attempt_is_unknown(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset))
         pending = self.reset_credit("RateLimitResetCredit_pending", self.reset + 86400)
         spare = self.reset_credit("RateLimitResetCredit_spare", self.reset + 2 * 86400)
         self.reset_credits(self.home, pending, spare)
@@ -254,7 +253,7 @@ class ResetCreditTests(RotationTestCase):
 
     def test_reset_credit_explicit_pending_credit_retries_with_the_original_key(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset))
         pending = self.reset_credit("RateLimitResetCredit_pending", self.reset + 2 * 86400)
         spare = self.reset_credit("RateLimitResetCredit_spare", self.reset + 86400)
         self.reset_credits(self.home, pending, spare)
@@ -277,7 +276,7 @@ class ResetCreditTests(RotationTestCase):
 
     def test_reset_credit_reconciles_an_applied_timeout_without_spending_the_next_credit(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset))
         first = self.reset_credit("RateLimitResetCredit_applied", self.reset + 86400)
         spare = self.reset_credit("RateLimitResetCredit_spare", self.reset + 2 * 86400)
         self.reset_credits(self.home, first, spare, consume_timeout_applied=True)
@@ -308,8 +307,8 @@ class ResetCreditTests(RotationTestCase):
     def test_automatic_run_reconciles_an_applied_timeout_before_executing_available_quota(self):
         self.configure(use_reset_credits=True)
         reset = int(time.time()) + 30 * 3600
-        self.account(self.home, "A", reset, used=99)
-        self.account(self.other, "B", reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", reset),
+                              (self.other, "B", reset + 3600))
         first = self.reset_credit("RateLimitResetCredit_auto_applied", reset + 86400)
         spare = self.reset_credit("RateLimitResetCredit_auto_spare", reset + 2 * 86400)
         self.reset_credits(self.home, first, spare, consume_timeout_applied=True)
@@ -336,8 +335,8 @@ class ResetCreditTests(RotationTestCase):
     def test_automatic_inferred_reset_with_exhausted_quota_sleeps_without_spending_a_spare(self):
         self.configure(use_reset_credits=True)
         reset = int(time.time()) + 30 * 3600
-        self.account(self.home, "A", reset, used=99)
-        self.account(self.other, "B", reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", reset),
+                              (self.other, "B", reset + 3600))
         first = self.reset_credit("RateLimitResetCredit_inferred_no_quota", reset + 86400)
         spare = self.reset_credit("RateLimitResetCredit_unused_spare", reset + 2 * 86400)
         self.reset_credits(self.home, first, spare, consume_timeout_applied=True, consume_no_reset=True)
@@ -364,8 +363,8 @@ class ResetCreditTests(RotationTestCase):
     def test_automatic_pending_reset_reuses_its_key_before_considering_an_earlier_spare(self):
         self.configure(use_reset_credits=True)
         reset = int(time.time()) + 30 * 3600
-        self.account(self.home, "A", reset, used=99)
-        self.account(self.other, "B", reset + 3600, used=99)
+        self.exhaust_accounts((self.home, "A", reset),
+                              (self.other, "B", reset + 3600))
         pending = self.reset_credit("RateLimitResetCredit_pending", reset + 10 * 86400)
         spare = self.reset_credit("RateLimitResetCredit_earlier_spare", reset + 86400)
         self.reset_credits(self.home, pending, spare, consume_timeout=True)
@@ -400,7 +399,7 @@ class ResetCreditTests(RotationTestCase):
             with self.subTest(tail=name):
                 before = len(self.consume_calls())
                 journal.write_text(tail)
-                self.account(self.home, "A", self.reset, used=99)
+                self.exhaust_accounts((self.home, "A", self.reset))
                 credit = self.reset_credit("RateLimitResetCredit_tail_" + name, self.reset + 86400)
                 self.reset_credits(self.home, credit, consume_timeout=True)
                 result = subprocess.run([PYTHON, "-I", str(SCRIPT), "reset-credit", "main", "--yes"],
@@ -429,7 +428,7 @@ class ResetCreditTests(RotationTestCase):
 
     def test_reset_credit_reuses_a_persisted_attempt_without_a_result_after_a_crash(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset))
         credit = self.reset_credit("RateLimitResetCredit_crashed", self.reset + 86400)
         self.reset_credits(self.home, credit)
         key = str(uuid.uuid4())
@@ -484,7 +483,7 @@ with open(sys.argv[1], "a+") as journal:
 
     def test_reset_credit_cli_previews_then_spends_only_with_yes(self):
         self.configure()
-        self.account(self.home, "A", self.reset, used=99)
+        self.exhaust_accounts((self.home, "A", self.reset))
         earliest = self.reset_credit("RateLimitResetCredit_preview", self.reset + 86400)
         later = self.reset_credit("RateLimitResetCredit_explicit", self.reset + 2 * 86400)
         self.reset_credits(self.home, later, earliest,

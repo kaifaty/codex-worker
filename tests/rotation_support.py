@@ -652,6 +652,17 @@ class RotationTestCase(unittest.TestCase):
         (home / "fixture.json").write_text(json.dumps(value))
         return value
 
+    def exhaust_accounts(self, *accounts, **settings):
+        """Create exhausted fixtures with each account's original reset time."""
+        for home, account_id, reset in accounts:
+            self.account(home, account_id, reset, used=99, **settings)
+
+    def assert_resumed_same_thread(self, previous, resumed, home):
+        self.assertEqual(previous["thread"], resumed["thread"])
+        self.assertTrue(resumed["resume"])
+        self.assertEqual(previous["home"], str(home))
+        self.assertEqual(resumed["home"], str(home))
+
     def reset_after_ready(self, command, reset, delay, after_exec=False):
         # Arm before the first exec publication, or the initial quota request
         # when no account can run, after expensive subprocess startup.

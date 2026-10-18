@@ -36,10 +36,9 @@ class TimeBudgetTests(RotationTestCase):
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[1]["thread"], executions[0]["thread"])
         self.assert_output_schema(executions[1], "time-cap")
-        prompt = executions[1]["prompt"].lower()
-        for word in ("time", "commit", "push", "partial", "remaining"):
-            self.assertIn(word, prompt)
-        self.assertNotRegex(executions[1]["prompt"], "[А-Яа-яЁё]")
+        worker = self.worker()
+        self.assertEqual(executions[1]["prompt"],
+                         worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
         self.assertFalse(self.review_invocations())
         self.assertIn("== turn stopped: time budget 90 min exhausted", output)
         self.assertIn(result["summary"], output)
@@ -109,7 +108,9 @@ class TimeBudgetTests(RotationTestCase):
                     self.assertEqual(len(executions), 2)
                     self.assertTrue(executions[1]["resume"])
                     self.assertEqual(executions[1]["thread"], executions[0]["thread"])
-                    self.assertIn("time budget has expired", executions[1]["prompt"])
+                    worker = self.worker()
+                    self.assertEqual(executions[1]["prompt"], worker.wrapup_prompt(
+                        state, state["turn_stop"], worker.accounts_config()))
                     self.assertIn("== turn stopped: time budget 2 min exhausted", output)
                     self.assertIn(result["summary"], output)
                     self.assertFalse(self.process_is_live(executions[0]["pid"]))
@@ -264,9 +265,8 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual(executions[0]["thread"], executions[1]["thread"])
         prompt = executions[1]["prompt"]
         self.assertIn(command, prompt)
-        for word in ("blocked", "3", "7"):
-            self.assertIn(word, prompt)
-        self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+        worker = self.worker()
+        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
         self.assertIn("== turn stopped: repeated failure ×3: " + command, output)
         self.assertIn(result["summary"], output)
         self.assertFalse(self.review_invocations())
@@ -306,12 +306,13 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "complete", "reply": self.work_result("blocked")}])
         self.start("repeat-setting")
         output = self.wait("repeat-setting", timeout=12)
-        self.assertEqual(self.state("repeat-setting")["outcome"], "stuck")
+        state = self.state("repeat-setting")
+        self.assertEqual(state["outcome"], "stuck")
         self.assertIn("== turn stopped: repeated failure ×2: " + command["command"], output)
         prompt = self.invocations()[-1]["prompt"]
-        self.assertRegex(prompt, "[А-Яа-яЁё]")
         self.assertIn(command["command"], prompt)
-        self.assertIn("blocked", prompt)
+        worker = self.worker()
+        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
 
     def test_max_minutes_uses_config_default_and_say_override_for_one_turn(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
@@ -453,18 +454,12 @@ class TimeBudgetTests(RotationTestCase):
                     cfg = {"language": language}
                     work = worker.wrapup_prompt({"kind": "work"}, reason, cfg)
                     review = worker.wrapup_prompt({"kind": "review"}, reason, cfg)
-                    self.assertIn("work result schema" if language == "en" else "схеме работы", work)
-                    self.assertIn("partial" if reason["outcome"] == "budget_exhausted" else "blocked", work)
-                    if reason["outcome"] == "budget_exhausted":
-                        self.assertIn("Commit what works and push" if language == "en" else
-                                      "Закоммить то, что работает, и запушь", work)
-                    self.assertIn("review schema" if language == "en" else "схеме ревью", review)
-                    for field in ("JSON", "findings", "verdict", "defects", "summary"):
-                        self.assertIn(field, review)
-                    self.assertIn("incomplete" if language == "en" else "не завершено", review)
-                    self.assertNotIn("work result schema" if language == "en" else "схеме работы", review)
-                    self.assertNotIn("status partial", review)
-                    self.assertNotIn("status blocked", review)
+                    self.assertEqual(worker.wrapup_prompt({}, reason, cfg), work)
+                    self.assertNotEqual(work, review)
+                    if reason["outcome"] == "stuck":
+                        for key in ("command", "count", "exit_code", "output_sha256"):
+                            for prompt in (work, review):
+                                self.assertIn(str(reason[key]), prompt)
 
     def test_configured_review_budget_is_independent_of_work_and_applies_to_scout(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"

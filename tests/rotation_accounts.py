@@ -8,8 +8,7 @@ from rotation_support import IMPOSSIBLE_PID, RotationTestCase
 
 class AccountAuthTests(RotationTestCase):
     def test_auth_race_retries_once_on_the_same_thread_in_both_languages(self):
-        prompts = {"ru": "Ход прервался из-за ошибки входа. Продолжай с того места, где остановился.",
-                   "en": "The turn was interrupted by an authentication error. Continue from where you stopped."}
+        worker = self.worker()
         for language in ("ru", "en"):
             with self.subTest(language=language):
                 self.configure(language=language)
@@ -22,12 +21,10 @@ class AccountAuthTests(RotationTestCase):
                 output = self.wait(slug)
                 executions = self.invocations()[before:]
                 self.assertEqual(len(executions), 2)
-                self.assertEqual(executions[0]["thread"], executions[1]["thread"])
-                self.assertTrue(executions[1]["resume"])
-                self.assertEqual(executions[1]["home"], str(self.home))
+                self.assert_resumed_same_thread(executions[0], executions[1], self.home)
                 for execution in executions:
                     self.assert_output_schema(execution, slug)
-                self.assertEqual(executions[1]["prompt"], prompts[language])
+                self.assertEqual(executions[1]["prompt"], worker.auth_resume_prompt(worker.accounts_config()))
                 self.assertIn("Recovered after authentication", output)
                 self.assertFalse(self.state(slug).get("needs_login"))
                 self.assertFalse(self.state(slug)["rotations"])
@@ -53,8 +50,7 @@ class AccountAuthTests(RotationTestCase):
         for execution in executions:
             self.assert_output_schema(execution, "auth-work-review-counter", review=execution["review"])
         self.assertTrue(all(execution["home"] == str(self.home) for execution in executions))
-        self.assertTrue(executions[1]["resume"])
-        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
+        self.assert_resumed_same_thread(executions[0], executions[1], self.home)
         self.assertFalse(any(entry.get("event") == "sleep" for entry in state["rotations"]))
 
     def test_auth_error_before_thread_started_retries_with_the_original_task_prompt(self):
@@ -150,8 +146,7 @@ class AccountAuthTests(RotationTestCase):
         self.assert_rotation("auth-twice", output)
         executions = self.invocations()
         self.assertEqual(len(executions), 3)
-        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
-        self.assertTrue(executions[1]["resume"])
+        self.assert_resumed_same_thread(executions[0], executions[1], self.home)
         self.assertIn("== account main needs login: run login main", output)
         self.assertIn("main", self.state("auth-twice").get("needs_login", []))
         self.account(self.home, "A", self.reset)

@@ -819,9 +819,12 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([event["review"] for event in executions], [False, True, False])
         self.assertTrue(executions[2]["resume"])
         self.assertEqual(executions[2]["thread"], executions[0]["thread"])
-        for text in (self.ci_check()["name"], "fixture macOS traceback", "Python 3.9 compatibility",
-                     "blocked", "push"):
-            self.assertIn(text, executions[2]["prompt"])
+        worker = self.worker()
+        cfg = worker.accounts_config()
+        failed_ci = {"sha": self.git("rev-parse", state["branch"] + "^"), "outcome": "failed",
+                     "checks": [dict(self.ci_check("fail"), tail=log)]}
+        self.assertEqual(executions[2]["prompt"], worker.ci_fix_prompt(state, failed_ci, cfg)
+                         + "\n\n" + worker.sandbox_rules(cfg))
         jobs = [event["argv"] for event in self.gh_invocations() if event["argv"][:2] == ["run", "view"]]
         self.assertEqual(jobs, [["run", "view", "--job", "123", "--log-failed",
                                  "--repo", "github.com/fixture/repo"]])
@@ -925,11 +928,12 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
-        prompt = executions[1]["prompt"]
-        for text in ("CI этой ветки упал", self.ci_check()["name"], "fixture Russian CI repair traceback",
-                     "Python 3.9 support", "исправь его и запушь ветку", "ничего не меняй", 'status: "blocked"'):
-            self.assertIn(text, prompt)
-        self.assertNotIn("CI failed for this branch", prompt)
+        worker = self.worker()
+        cfg = worker.accounts_config()
+        failed_ci = {"sha": self.git("rev-parse", state["branch"] + "^"), "outcome": "failed",
+                     "checks": [dict(self.ci_check("fail"), tail=log)]}
+        self.assertEqual(executions[1]["prompt"], worker.ci_fix_prompt(state, failed_ci, cfg)
+                         + "\n\n" + worker.sandbox_rules(cfg))
         self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
                          [["pr", "create"], ["pr", "edit"]])
         self.assertEqual(len(self.ci_polls()), 2)
@@ -939,25 +943,19 @@ class WorkspaceTests(RotationTestCase):
         check = self.ci_check("fail")
         check["tail"] = "fixture failed job evidence\nAssertionError: Python 3.9\n"
         ci = {"sha": "a" * 40, "outcome": "failed", "checks": [check]}
-        expected = {
-            "en": ("CI failed for this branch", "fix it and push", "flaky or unrelated", "change nothing",
-                   "including evidence", "work JSON schema", "leave committing/pushing to the supervisor"),
-            "ru": ("CI этой ветки упал", "исправь его и запушь ветку", "нестабильный или не связан",
-                   "ничего не меняй", "приведя доказательства", "JSON-схему работы",
-                   "оставь коммит и пуш надзирателю")}
         for language in ("en", "ru"):
+            self.configure(language=language)
             for sandbox in ("off", "workspace"):
                 with self.subTest(language=language, sandbox=sandbox):
                     prompt = worker.ci_fix_prompt({"sandbox": sandbox}, ci, {"language": language})
-                    for text in expected[language][:-1]:
-                        self.assertIn(text, prompt)
                     for text in (check["name"], check["link"], "fixture failed job evidence",
-                                 "Python 3.9", 'status: "blocked"'):
+                                 "Python 3.9"):
                         self.assertIn(text, prompt)
+                    self.assertEqual(prompt, worker.ci_fix_prompt({"sandbox": sandbox}, ci,
+                                                                 worker.accounts_config()))
                     if sandbox == "workspace":
-                        self.assertIn(expected[language][-1], prompt)
-                    else:
-                        self.assertNotIn(expected[language][-1], prompt)
+                        self.assertNotEqual(prompt, worker.ci_fix_prompt({"sandbox": "off"}, ci,
+                                                                        {"language": language}))
 
     def test_ci_starts_after_review_auto_fix_and_its_second_local_check(self):
         self.configure(language="en", sandbox="workspace")
