@@ -1712,7 +1712,7 @@ class RotationTests(unittest.TestCase):
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "created": time.time()}
         cases = [("main", 10, 17, 7), ("second", 20, 22, 2),
                  ("main", 16, 18, 1), ("main", 20, 22, 2),
-                 ("main", 2, 4, 0), ("main", 4, 5, 1)]
+                 ("main", 2, 4, 2), ("main", 4, 5, 1)]
         expected = 0
         for turn, (account, before, after, delta) in enumerate(cases, 1):
             with self.subTest(account=account, before=before, after=after):
@@ -1730,9 +1730,62 @@ class RotationTests(unittest.TestCase):
                 worker.save(st)
                 st = worker.load(slug)
         report = json.loads(self.cli("report", "--slug", slug, "--json"))
-        self.assertEqual(report["tasks"][0]["weekly_used_percent"], 13)
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], 15)
         self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
-                         {"main": 11, "second": 2})
+                         {"main": 13, "second": 2})
+
+    def test_weekly_budget_counts_new_window_before_automatic_review(self):
+        (self.home / "codex-worker.json").write_text(json.dumps({"language": "en"}))
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 12,
+             "final_usage_after_completion": True},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 2, "weekly_used_after": 4,
+             "final_usage_after_completion": True}])
+        self.start("weekly-new-window", "--max-weekly", "3")
+        self.wait("weekly-new-window")
+        self.assertEqual(self.state("weekly-new-window")["weekly_used_percent"], 2)
+        self.cli("say", "weekly-new-window", "Continue after the weekly reset", "--review")
+        output = self.wait("weekly-new-window")
+        state = self.state("weekly-new-window")
+        self.assertEqual(state["weekly_used_percent"], 4)
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual((state["turn_stop"]["outcome"], state["turn_stop"]["weekly"],
+                          state["turn_stop"]["spent"]), ("budget_exhausted", 3, 4))
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertFalse(self.review_invocations())
+        self.assertIn("== turn stopped: weekly budget 3% exhausted (spent 4%)", output)
+        self.until(lambda: len(self.telemetry_journal()) == 4)
+        self.assertEqual([(row["usage"][0]["weekly_used_before"], row["usage"][0]["weekly_used_after"])
+                          for row in self.phase_telemetry_journal()], [(10, 12), (2, 4)])
+        task = json.loads(self.cli("report", "--slug", "weekly-new-window", "--json"))["tasks"][0]
+        self.assertEqual(task["weekly_used_percent"], state["weekly_used_percent"])
+        self.assertEqual((task["outcome"], task["budget_stop"]), ("budget_exhausted", "weekly"))
+
+    def test_weekly_usage_boundaries_detect_reset_recovered_above_previous_percentage(self):
+        worker = self.worker()
+        slug = "weekly-reset-recovered"
+        (worker.TASKS / slug).mkdir(parents=True)
+        st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "created": time.time()}
+        for turn, (before, after, reset) in enumerate(
+                [(10, 12, self.reset), (2, 14, self.reset + 604800)], 1):
+            path = self.root / ("recovered-%d.jsonl" % turn)
+            path.write_text("".join(json.dumps({"payload": {"type": "token_count", "rate_limits": {
+                "primary": {"used_percent": value, "window_minutes": 10080,
+                            "resets_at": reset}}}}) + "\n" for value in (before, after)))
+            st.update(account="main", turns=turn)
+            with worker.record_phase(st, "work", lambda: False) as phase:
+                phase.add_usage("main", "thread-%d" % turn, None, path, 0)
+                phase.finish(outcome="completed")
+            worker.save(st)
+            st = worker.load(slug)
+        self.assertEqual(st["weekly_used_percent"], 14)
+        rows = self.phase_telemetry_journal()
+        self.assertEqual([(row["usage"][0]["weekly_used_before"], row["usage"][0]["weekly_used_after"])
+                          for row in rows], [(10, 12), (2, 14)])
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], st["weekly_used_percent"])
 
     def test_weekly_budget_late_stopped_sample_does_not_overlap_wrapup(self):
         worker = self.worker()

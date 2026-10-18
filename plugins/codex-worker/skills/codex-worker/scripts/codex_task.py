@@ -979,9 +979,14 @@ def rollout_usage(path, offset=0):
                                 sample["tokens"][key] = value
                         if type(weekly) in (int, float) and math.isfinite(weekly) and 0 <= weekly <= 100:
                             sample["weekly"] = weekly
+                            reset = window.get("resets_at", window.get("resetsAt"))
+                            if type(reset) in (int, float) and math.isfinite(reset):
+                                sample["weekly_reset"] = reset
                         if first is None:
                             first = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}
                             last = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}
+                            if "weekly_reset" in sample:
+                                first["weekly_reset"] = sample["weekly_reset"]
                         # Rate-limit-only notifications must not erase cumulative usage.
                         for key, value in sample["tokens"].items():
                             if value is not None:
@@ -991,7 +996,12 @@ def rollout_usage(path, offset=0):
                         if sample["weekly"] is not None:
                             if first["weekly"] is None:
                                 first["weekly"] = sample["weekly"]
+                                if "weekly_reset" in sample:
+                                    first["weekly_reset"] = sample["weekly_reset"]
                             last["weekly"] = sample["weekly"]
+                            last.pop("weekly_reset", None)
+                            if "weekly_reset" in sample:
+                                last["weekly_reset"] = sample["weekly_reset"]
                     except (ValueError, TypeError, AttributeError, OverflowError):
                         continue
         except OSError:
@@ -1067,24 +1077,35 @@ class PhaseTelemetry:
         self.rotation_start = len(st.get("rotations", []))
         self.check = None
 
-    def weekly_start(self, account, first, before=None):
+    def weekly_start(self, account, first, before=None, last=None):
         start = (first or {}).get("weekly")
         if start is None:
             return (before or {}).get("weekly")
         boundary = self.st.get("weekly_usage_boundaries", {}).get(account)
+        boundary_reset = self.st.get("weekly_usage_resets", {}).get(account)
         for entry in reversed(self.usage):
             if entry["account"] == account and entry.get("weekly_used_after") is not None:
                 boundary = entry["weekly_used_after"]
+                boundary_reset = entry.get("weekly_reset_after")
                 break
+        latest = last or first
+        reset = latest.get("weekly_reset")
+        # A reset starts a fresh interval, even if its samples have already
+        # passed the old percentage. A lower final sample also detects resets
+        # when the reset timestamp is missing or has not been updated yet.
+        if (boundary is None
+                or (reset is not None and boundary_reset is not None and reset > boundary_reset)
+                or (latest.get("weekly") is not None and latest["weekly"] < boundary)):
+            return start
         # An opening sample may lag the previous phase's final notification.
-        # Never charge the already accounted portion of this account again.
-        return max(start, boundary) if boundary is not None else start
+        # Only exclude the accounted portion within the same weekly window.
+        return max(start, boundary)
 
     def add_usage(self, account, thread, before, path, offset):
         if not thread:
             return
         first, last = rollout_usage(path, offset)
-        weekly_before = self.weekly_start(account, first, before)
+        weekly_before = self.weekly_start(account, first, before, last)
         last = last or before
         tokens = {}
         for key in TOKEN_FIELDS:
@@ -1099,7 +1120,8 @@ class PhaseTelemetry:
         self.usage.append({"account": account, "thread": thread, "tokens": tokens,
                            "weekly_used_before": weekly_before,
                            "weekly_used_after": ((last or {}).get("weekly")
-                                                 if (last or {}).get("weekly") is not None else weekly_before)})
+                                                 if (last or {}).get("weekly") is not None else weekly_before),
+                           "weekly_reset_after": (last or {}).get("weekly_reset")})
 
     def finish(self, outcome=None, result=None):
         if self.finished:
@@ -1111,6 +1133,7 @@ class PhaseTelemetry:
             after = entry.get("weekly_used_after")
             if type(after) in (int, float) and 0 <= after <= 100:
                 self.st.setdefault("weekly_usage_boundaries", {})[entry["account"]] = after
+                self.st.setdefault("weekly_usage_resets", {})[entry["account"]] = entry.get("weekly_reset_after")
         self.st["weekly_used_percent"] = spent
         try:
             st = self.st
@@ -1984,7 +2007,6 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     telemetry = telemetry_phase(st)
     usage_before = rollout_usage(path)[1] if telemetry is not None else None
     usage_offset = previous_size
-    weekly_before = None
     next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
     next_poll = 0.0
     reason = None
@@ -2126,10 +2148,9 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                 # A completed model turn needs no wrap-up while the CLI exits.
                                 # The supervisor checks its final usage after monitor returns.
                                 if control.weekly is not None and not turn_completed:
-                                    if weekly_before is None:
-                                        first, _ = rollout_usage(path, usage_offset)
-                                        weekly_before = (telemetry.weekly_start(account["name"], first)
-                                                         if telemetry else (first or {}).get("weekly"))
+                                    first, latest = rollout_usage(path, usage_offset)
+                                    weekly_before = (telemetry.weekly_start(account["name"], first, last=latest)
+                                                     if telemetry else (first or {}).get("weekly"))
                                     used = weekly_used(limits)
                                     spent = (st.get("weekly_used_percent", 0)
                                              + (telemetry.weekly_spent() if telemetry else 0)
