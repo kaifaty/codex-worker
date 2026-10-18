@@ -1591,7 +1591,8 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         st["rotations"].append(dict(sleeping, at=started, event="sleep"))
         save(st)
         notify(st, cfg, "paused", f"paused until {local_time(until)}: {sleeping['reason']}", until=until)
-        sleep_started = time.monotonic()
+        phase = telemetry_phase(st)
+        sleep_started = time.monotonic() if phase is not None else None
         try:
             while not stopped():
                 left = until - time.time()
@@ -1599,7 +1600,6 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
                     break
                 sleep(min(SLEEP_STEP, left))
         finally:
-            phase = telemetry_phase(st)
             if phase is not None:
                 phase.sleep_seconds += max(0, time.monotonic() - sleep_started)
             update_waited()
