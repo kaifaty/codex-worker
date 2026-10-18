@@ -1884,11 +1884,6 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         error_start = errors.tell()
         attempt_started = time.time()
         active_started = time.monotonic()
-        proc = subprocess.Popen(args, cwd=st["worktree"], env=account_env(account), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
-        st["codex_pid"] = proc.pid
-        save(st)
-        buf = b""
 
         def quota_decision(local, why, allow_credits):
             # Quota RPCs and reset-journal locks run while exec is still alive.
@@ -1907,7 +1902,12 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                 return "budget_exhausted", None
             return ("limit", decision) if decision is not None or not allow_credits else None
 
+        proc = subprocess.Popen(args, cwd=st["worktree"], env=account_env(account), stdin=subprocess.DEVNULL,
+                                stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
         try:
+            st["codex_pid"] = proc.pid
+            save(st)
+            buf = b""
             with selectors.DefaultSelector() as sel:
                 sel.register(proc.stdout, selectors.EVENT_READ)
                 eof = False
@@ -2599,15 +2599,16 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
 def cmd__run(a):
     stopped_flag = threading.Event()
     received_signal = None
+    finalized = False
     st = None
     def stop(signum, frame):
         nonlocal received_signal
         at = time.time()
         name = signal.Signals(signum).name
-        if received_signal is None:
+        if not finalized and received_signal is None:
             received_signal = {"signum": signum, "name": name, "at": at}
-        if st is not None:
-            st.setdefault("signal", received_signal)
+        # Only ordinary checkpoints may update state: the handler can interrupt
+        # json.dumps while it is iterating this dictionary.
         line = (f"supervisor signal: signum={signum} name={name} "
                 f"at={time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(at))} "
                 f"ppid={os.getppid()} pgid={os.getpgrp()}\n")
@@ -2617,7 +2618,8 @@ def cmd__run(a):
             with (TASKS / a.slug / "stderr.log").open("ab", buffering=0) as log:
                 log.write(line.encode("utf-8"))
         finally:
-            stopped_flag.set()
+            if not finalized:
+                stopped_flag.set()
     def stopped():
         reap_notifications()
         if received_signal is not None and st is not None:
@@ -2671,41 +2673,59 @@ def cmd__run(a):
         print(f"supervisor failed: {exc}", file=sys.stderr)
     finally:
         guarded_changed = len(guarded_changes(st)) if cfg is not None else 0
-        if stopped():
-            st["outcome"] = stop_outcome(st, stopped)
-        if st.get("fix_rounds") and (st.get("outcome") != "completed" or not st.get("auto_fix_stop")):
-            st["auto_fix_stop"] = ("review refused" if st.get("outcome") == "refused" and st.get("kind") == "review"
-                                   else st.get("outcome") if st.get("outcome") != "completed"
-                                   else st.get("review_skipped", "review unknown"))
         st.pop("sleeping", None)
-        st["turn_finished"] = time.time()
         st.pop("pending", None)
-        record_turn_result(st, stopped)
-        if cfg is not None:
-            account = current_turn_account(st)
-            message = f"turn {st['outcome']} on {account}"
-            result = st.get("result")
-            message += ", result " + (result["status"] if result is not None else "unknown")
-            if check is not None:
-                message += ", check " + check["outcome"]
-            notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account, result=result,
-                   guarded_changed=guarded_changed)
-            if st["outcome"] == "interrupted":
-                notify(st, cfg, "interrupted", interruption_message(st), outcome=st["outcome"],
-                       signal=st.get("signal"))
-            if (result is not None and result["status"] in ("blocked", "needs_decision")
-                    and st.get("kind") not in ("review", "scout")):
-                question = next(iter(result["questions"]), "")
-                notify(st, cfg, "needs_input", f"result {result['status']}: {question}",
-                       result=result, question=question)
-        reap_notifications()
-        if stopped():
-            st["outcome"] = stop_outcome(st, stopped)
-            if st.get("fix_rounds"):
-                st["auto_fix_stop"] = st["outcome"]
-        # Publishing idle permits clean to remove both the task and its worktree.
-        st["pid"] = None
-        save(st)
+        input_notified = False
+        while True:
+            st["outcome"] = stop_outcome(st, stopped) or st["outcome"]
+            if st.get("fix_rounds") and (st["outcome"] != "completed" or not st.get("auto_fix_stop")):
+                st["auto_fix_stop"] = ("review refused" if st["outcome"] == "refused" and st.get("kind") == "review"
+                                       else st["outcome"] if st["outcome"] != "completed"
+                                       else st.get("review_skipped", "review unknown"))
+            st["turn_finished"] = time.time()
+            published_outcome = st["outcome"]
+            published_signal = received_signal
+            record_turn_result(st, stopped)
+            if cfg is not None:
+                account = current_turn_account(st)
+                message = f"turn {published_outcome} on {account}"
+                result = st.get("result")
+                message += ", result " + (result["status"] if result is not None else "unknown")
+                if check is not None:
+                    message += ", check " + check["outcome"]
+                notify(st, cfg, "turn_finished", message, outcome=published_outcome, account=account, result=result,
+                       guarded_changed=guarded_changed)
+                if published_outcome == "interrupted":
+                    notify(st, cfg, "interrupted", interruption_message(st), outcome=published_outcome,
+                           signal=st.get("signal"))
+                if (not input_notified and result is not None and result["status"] in ("blocked", "needs_decision")
+                        and st.get("kind") not in ("review", "scout")):
+                    question = next(iter(result["questions"]), "")
+                    notify(st, cfg, "needs_input", f"result {result['status']}: {question}",
+                           result=result, question=question)
+                    input_notified = True
+            reap_notifications()
+            # A hook may already have received the old outcome when a signal
+            # arrives. Append a correcting turn result/event before publishing
+            # idle; report uses the latest result for this turn without extra cost.
+            mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+            try:
+                pending_signals = signal.sigpending() & {signal.SIGINT, signal.SIGTERM}
+                for signum in sorted(pending_signals):
+                    stop(signal.sigwait({signum}), None)
+                outcome = stop_outcome(st, stopped_flag.is_set) or st["outcome"]
+                if outcome != published_outcome or received_signal is not published_signal:
+                    continue
+                # Freeze the outcome at this masked checkpoint for the idle
+                # state write. No children are launched here. Signals arriving
+                # after this boundary are logged when the mask is restored,
+                # without revising the finished turn's published outcome.
+                st["pid"] = None
+                save(st)
+                finalized = True
+                break
+            finally:
+                signal.pthread_sigmask(signal.SIG_SETMASK, mask)
 
 
 def cmd_start(a):

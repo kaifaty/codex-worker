@@ -308,8 +308,11 @@ and `guarded_changed`, the number of changed guarded files),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
 (`verdict`, finding count, `round`, and `angles`), plus `budget_exhausted`, `stuck`, and `interrupted`.
-`turn_finished` is sent once when the entire cycle ends, with `outcome` including `budget_exhausted`,
-`stuck`, or `interrupted`. Separate guard and interruption events also obey `notify_events`.
+`turn_finished` is sent when the entire cycle ends, with `outcome` including `budget_exhausted`,
+`stuck`, or `interrupted`. If a signal arrives while final notifications are being launched, a
+correcting `turn_finished` follows; its outcome supersedes the earlier event. Separate guard and
+interruption events also obey `notify_events`. Once final notifications are stable, the outcome is
+frozen for the idle-state write; later signals are logged without revising the finished turn.
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
 with `curl`; the appended argument supplies the value for `--data-binary`:
 

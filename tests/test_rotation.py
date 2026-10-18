@@ -4472,6 +4472,179 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(self.state("review-stopped").get("checks"))
         self.assertFalse((Path(self.state("review-stopped")["worktree"]) / "unexpected-check").exists())
 
+    def run_supervisor_fixture(self, slug, instrumentation):
+        # Run real signal handlers in a separate process, without changing the
+        # test runner's handlers or replacing the supervisor/monitor loop.
+        state = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo),
+                 "kind": "scout", "branch": "", "base": "main", "account": "main",
+                 "thread": "", "threads": [], "rotations": [], "reviews": [], "checks": [],
+                 "created": time.time(), "turns": 1, "turn_started": time.time(),
+                 "outcome": "running", "pending": {"prompt": "fixture turn", "effort": None}}
+        (self.home / "claude-tasks" / slug).mkdir(parents=True)
+        bootstrap = r'''
+import importlib.util, json, os, signal, sys, time
+from pathlib import Path
+from types import SimpleNamespace
+spec = importlib.util.spec_from_file_location("fixture_worker", sys.argv[1])
+worker = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(worker)
+state = json.loads(sys.argv[2])
+state["pid"] = os.getpid()
+worker.save(state)
+observed = {}
+''' + instrumentation + r'''
+try:
+    worker.cmd__run(SimpleNamespace(slug=state["slug"]))
+finally:
+    sys.settrace(None)
+for proc in list(worker.NOTIFY_PROCESSES):
+    proc.wait(timeout=5)
+print(json.dumps(observed))
+'''
+        result = subprocess.run([PYTHON, "-I", "-c", bootstrap, str(SCRIPT), json.dumps(state)],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return json.loads(result.stdout)
+
+    def test_signal_during_live_worker_state_serialization_keeps_supervision(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}])
+        slug = "signal-in-state-save"
+        observed = self.run_supervisor_fixture(slug, r'''
+# Python 3.14 also uses its C encoder for indented JSON. Exercise the Python
+# encoder used on 3.9/3.12 so the trace can deliver the signal mid-iteration.
+json.encoder.c_make_encoder = None
+def trace(frame, event, arg):
+    if event == "line" and frame.f_code.co_name == "_iterencode_dict":
+        current = frame.f_locals.get("dct", frame.f_locals.get("d"))
+        if (isinstance(current, dict) and current.get("codex_pid")
+                and frame.f_locals.get("key") == "slug" and not observed):
+            # key is bound only after the dict iterator has started. This used
+            # to raise when the handler inserted signal into that same dict.
+            pid = current["codex_pid"]
+            observed.update(pid=pid, pgid=os.getpgid(pid), alive_before=worker.alive(pid))
+            os.kill(os.getpid(), signal.SIGTERM)
+    return trace
+sys.settrace(trace)
+''')
+        self.extra_pids.add(observed["pid"])
+        self.assertTrue(observed["alive_before"])
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "interrupted")
+        self.assertIsNone(state["pid"])
+        self.assertNotIn("codex_pid", state)
+        self.assertNotIn("error", state)
+        self.assertEqual(state["signal"]["name"], "SIGTERM")
+        self.assertIn("SIGTERM", (self.home / "claude-tasks" / slug / "stderr.log").read_text())
+        self.assertFalse(self.process_is_live(observed["pid"]), "interrupted worker escaped its supervisor")
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(observed["pgid"], 0)
+
+    def test_monitor_cleans_up_worker_if_initial_pid_save_fails(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}])
+        slug = "worker-pid-save-failed"
+        observed = self.run_supervisor_fixture(slug, r'''
+real_save = worker.save
+def fail_once(current):
+    if current.get("codex_pid") and not observed:
+        pid = current["codex_pid"]
+        observed.update(pid=pid, pgid=os.getpgid(pid), alive_before=worker.alive(pid))
+        raise OSError("fixture initial worker PID save failure")
+    return real_save(current)
+worker.save = fail_once
+''')
+        self.extra_pids.add(observed["pid"])
+        self.assertTrue(observed["alive_before"])
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "failed")
+        self.assertIsNone(state["pid"])
+        self.assertNotIn("codex_pid", state)
+        self.assertEqual(state["error"], "fixture initial worker PID save failure")
+        self.assertFalse(self.process_is_live(observed["pid"]), "save failure left the worker running")
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(observed["pgid"], 0)
+
+    def test_late_signal_keeps_final_publications_consistent(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": "fixture result"}])
+        for point in ("notify", "hook-launched", "reap", "pending"):
+            with self.subTest(point=point):
+                slug = "late-signal-" + point
+                observed = self.run_supervisor_fixture(slug, "point = " + repr(point) + r'''
+observed.update(events=[], hook_masks=[], fired=False, finished_launched=False)
+real_notify = worker.notify
+real_popen = worker.subprocess.Popen
+real_reap = worker.reap_notifications
+real_sigmask = worker.signal.pthread_sigmask
+stop_signals = {signal.SIGINT, signal.SIGTERM}
+def interrupt():
+    observed["fired"] = True
+    os.kill(os.getpid(), signal.SIGTERM)
+def notify(current, cfg, event, message, **fields):
+    if point == "notify" and event == "turn_finished" and not observed["fired"]:
+        interrupt()
+    result = real_notify(current, cfg, event, message, **fields)
+    if event == "turn_finished":
+        observed["finished_launched"] = True
+    return result
+def popen(args, *a, **kw):
+    try:
+        payload = json.loads(args[-1])
+    except (TypeError, ValueError):
+        payload = None
+    is_hook = isinstance(payload, dict) and payload.get("slug") == state["slug"] and "event" in payload
+    if is_hook:
+        blocked = sorted(int(sig) for sig in real_sigmask(signal.SIG_BLOCK, set()) & stop_signals)
+        observed["hook_masks"].append(blocked)
+        assert not blocked, "notification child would inherit blocked cancellation signals"
+    proc = real_popen(args, *a, **kw)
+    if is_hook:
+        observed["events"].append(payload)
+        if point == "hook-launched" and payload["event"] == "turn_finished" and not observed["fired"]:
+            interrupt()
+    return proc
+def reap():
+    result = real_reap()
+    if point == "reap" and observed["finished_launched"] and not observed["fired"]:
+        interrupt()
+    return result
+def sigmask(how, requested):
+    previous = real_sigmask(how, requested)
+    if (point == "pending" and how == signal.SIG_BLOCK and stop_signals <= set(requested)
+            and not observed["fired"]):
+        interrupt()
+        observed["pending"] = signal.SIGTERM in signal.sigpending()
+    return previous
+worker.notify = notify
+worker.subprocess.Popen = popen
+worker.reap_notifications = reap
+worker.signal.pthread_sigmask = sigmask
+''')
+                self.assertTrue(observed["fired"], "fixture did not reach the finalization boundary")
+                if point == "pending":
+                    self.assertTrue(observed["pending"], "fixture did not queue a blocked SIGTERM")
+                self.assertTrue(observed["hook_masks"])
+                self.assertTrue(all(not blocked for blocked in observed["hook_masks"]))
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "interrupted")
+                self.assertIsNone(state["pid"])
+                self.assertEqual(state["signal"]["name"], "SIGTERM")
+                rows = [row for row in self.telemetry_journal() if row["slug"] == slug and row["phase"] == "turn"]
+                self.assertTrue(rows)
+                self.assertEqual(rows[-1]["outcome"], "interrupted")
+                finished = [event for event in observed["events"] if event["event"] == "turn_finished"]
+                self.assertEqual(finished[-1]["outcome"], "interrupted")
+                interrupted = [event for event in observed["events"] if event["event"] == "interrupted"]
+                self.assertEqual(len(interrupted), 1)
+                self.assertEqual(interrupted[0]["outcome"], "interrupted")
+                self.assertEqual(interrupted[0]["signal"]["name"], "SIGTERM")
+                self.notification(slug, "interrupted")
+                report = json.loads(self.cli("report", "--slug", slug, "--json"))
+                self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
+                self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
+
     def test_external_signal_interrupts_work_keeps_changes_and_skips_review(self):
         self.configure(language="en")
         self.configure_notify()
