@@ -13,6 +13,7 @@ import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
@@ -22,6 +23,13 @@ SKILL = ROOT / "plugins" / "codex-worker" / "skills" / "codex-worker"
 SCRIPT = SKILL / "scripts" / "codex_task.py"
 PYTHON = sys.executable
 IMPOSSIBLE_PID = 2 ** 31 - 1
+
+
+@lru_cache(maxsize=1)
+def worker_code():
+    # Reuse compilation, not module globals: subtests need independent mutable
+    # queues and every fixture needs its own environment-derived paths/defaults.
+    return compile(SCRIPT.read_bytes(), str(SCRIPT), "exec", dont_inherit=True)
 
 
 # The fake has the same process boundary as Codex: the supervisor must discover
@@ -554,17 +562,9 @@ class RotationTestCase(unittest.TestCase):
                         GIT_COMMITTER_NAME="Rotation Test", GIT_COMMITTER_EMAIL="rotation@example.test")
         # The external process gets no opportunity to ask for a credential or pager.
         self.env.update(GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat")
-        self.repo = self.root / "repo"
-        self.repo.mkdir()
-        self.git("init", "--quiet", "--initial-branch=main")
-        (self.repo / "tracked.txt").write_text("initial\n")
-        self.git("add", "tracked.txt")
-        self.git("commit", "--quiet", "-m", "initial")
-        origin = self.root / "origin.git"
-        self.git("init", "--quiet", "--bare", "--initial-branch=main", str(origin))
-        self.git("remote", "add", "origin", str(origin))
-        self.git("push", "--quiet", "-u", "origin", "main")
-        self.git("remote", "set-head", "origin", "main")
+        # Later test-specific Git settings must not affect fixture creation.
+        self._repo_env = self.env.copy()
+        self._repo = None
         self.brief = self.root / "brief.md"
         self.brief.write_text("Реализовать переносимую задачу.\nСохранить весь исходный бриф.\n"
                               "Готово, когда:\n- весь исходный бриф сохранён.\n")
@@ -572,6 +572,24 @@ class RotationTestCase(unittest.TestCase):
         self.reset = int(time.time()) + 7200
         self.account(self.home, "A", self.reset)
         self.account(self.other, "B", self.reset + 3600)
+
+    @property
+    def repo(self):
+        if self._repo is None:
+            # Publish the path before git() uses it as cwd. Configuration-only
+            # tests never pay for either repository or any git subprocesses.
+            self._repo = self.root / "repo"
+            self._repo.mkdir()
+            self.git("init", "--quiet", "--initial-branch=main", _env=self._repo_env)
+            (self._repo / "tracked.txt").write_text("initial\n")
+            self.git("add", "tracked.txt", _env=self._repo_env)
+            self.git("commit", "--quiet", "-m", "initial", _env=self._repo_env)
+            origin = self.root / "origin.git"
+            self.git("init", "--quiet", "--bare", "--initial-branch=main", str(origin), _env=self._repo_env)
+            self.git("remote", "add", "origin", str(origin), _env=self._repo_env)
+            self.git("push", "--quiet", "-u", "origin", "main", _env=self._repo_env)
+            self.git("remote", "set-head", "origin", "main", _env=self._repo_env)
+        return self._repo
 
     def tearDown(self):
         # Supervisors publish final state after SIGTERM. Wait for every owned
@@ -650,8 +668,9 @@ class RotationTestCase(unittest.TestCase):
         self.assertFalse(live, "task processes still running before temporary-directory cleanup: %s" % sorted(live))
         self.tmp.cleanup()
 
-    def git(self, *args):
-        result = subprocess.run(["git"] + list(args), cwd=self.repo, env=self.env,
+    def git(self, *args, _env=None):
+        result = subprocess.run(["git"] + list(args), cwd=self.repo,
+                                env=self.env if _env is None else _env,
                                 text=True, capture_output=True)
         self.assertEqual(result.returncode, 0, result.stderr)
         return result.stdout.strip()
@@ -788,7 +807,7 @@ class RotationTestCase(unittest.TestCase):
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "dont_write_bytecode", True):
             spec = importlib.util.spec_from_file_location("rotation_worker", str(SCRIPT))
             worker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(worker)
+            exec(worker_code(), worker.__dict__)
         return worker
 
     def start(self, slug, *args):
@@ -823,6 +842,8 @@ class RotationTestCase(unittest.TestCase):
         return [json.loads(line) for line in self.gh_trace_path.read_text().splitlines()]
 
     def record_git_calls(self):
+        # Keep fixture setup outside tests' command traces, as with eager setup.
+        _ = self.repo
         real_git = shutil.which("git", path=self.env["PATH"])
         self.assertIsNotNone(real_git)
         path = self.root / "git-trace.jsonl"
