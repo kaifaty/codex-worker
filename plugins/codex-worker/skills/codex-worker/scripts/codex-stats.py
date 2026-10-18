@@ -9,10 +9,12 @@ window if no weekly window is available). The limit is shared by all Codex threa
 delta is only this thread's when nothing else ran meanwhile.
 """
 import json
+import runpy
 import sys
 from datetime import datetime
 from pathlib import Path
 
+ROLLOUT = runpy.run_path(str(Path(__file__).with_name("rollout.py")))
 CODEX_HOME = Path.home() / ".codex"
 TOKENS = ("input_tokens", "cached_input_tokens", "output_tokens", "reasoning_output_tokens", "total_tokens")
 
@@ -32,8 +34,8 @@ def when(ts: str) -> datetime:
     return datetime.fromisoformat(ts.replace("Z", "+00:00"))
 
 
-def limit_window(rate_limits: dict) -> dict:
-    windows = [rate_limits.get(name) for name in ("primary", "secondary") if rate_limits.get(name)]
+def limit_window(windows) -> dict:
+    windows = [window for window in windows if window]
     # Any weekly window (at least 10080 minutes) is longer than every nonweekly window.
     return max(windows, key=lambda window: window.get("window_minutes") or 0, default={})
 
@@ -52,11 +54,7 @@ def turns(path: Path) -> list[dict]:
     usage: dict = {}
     limit = None
     limit_minutes = None
-    for line in path.open(encoding="utf-8"):
-        try:
-            o = json.loads(line)
-        except ValueError:
-            continue
+    for o in ROLLOUT["read_events"](path.open(encoding="utf-8")):
         p, ts = o.get("payload", {}), o.get("timestamp", "")
         kind = p.get("type")
         if o.get("type") == "turn_context":
@@ -66,9 +64,9 @@ def turns(path: Path) -> list[dict]:
             if cur:
                 cur["effort"], cur["model"] = effort, model
         elif kind == "token_count":
-            info = p.get("info") or {}
-            usage = info.get("total_token_usage") or usage
-            window = limit_window(p.get("rate_limits") or {})
+            sample = ROLLOUT["decode_token_count"](o)
+            usage = sample.total_token_usage or usage
+            window = limit_window(sample.windows)
             if window.get("used_percent") is not None:
                 limit = window["used_percent"]
                 limit_minutes = window.get("window_minutes")
