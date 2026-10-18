@@ -11,16 +11,19 @@ import io
 import json
 import os
 import runpy
+import selectors
 import shlex
 import shutil
 import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -121,7 +124,7 @@ def app_server():
             if not gate and (home / "exec-count").exists():
                 gate = value.get("rate_limits_gate_after_exec")
             if gate and not Path(gate).exists():
-                trace({"command": "quota-waiting", "gate": gate})
+                trace({"command": "quota-waiting", "gate": gate, "source": "rpc"})
                 while not Path(gate).exists():
                     time.sleep(0.02)
                 value = fixture()
@@ -224,6 +227,17 @@ def execute():
     signal.signal(signal.SIGTERM, interrupted)
     trace(dict(invocation, thread=thread, mode=run["mode"], journal_before=journal_records()))
 
+    # Arm deadlines before either rollout publication or authentication writes.
+    # Gating only RPCs lets a cached rollout retain the pre-arm reset timestamp.
+    reset_gate = value.get("rate_limits_gate")
+    if reset_gate and not Path(reset_gate).exists():
+        trace({"command": "quota-waiting", "gate": reset_gate, "source": "exec"})
+        while not Path(reset_gate).exists() and not stopped[0]:
+            time.sleep(0.02)
+        if stopped[0]:
+            return 130
+        value = fixture()
+
     def rollout_limits(initial=False):
         if run.get("omit_rollout"):
             return
@@ -234,6 +248,7 @@ def execute():
         used_key = "weekly_used_before" if initial else "weekly_used_after"
         if used_key in run:
             raw["primary"] = dict(raw["primary"], usedPercent=run[used_key])
+        trace({"command": "rollout-snapshot", "thread": thread, "primary": raw["primary"]})
         windows = {}
         for name in ("primary", "secondary"):
             window = raw[name]
@@ -570,9 +585,16 @@ class RotationTests(unittest.TestCase):
         self.git("push", "--quiet", "origin", "main")
 
     def cli(self, *args, **kwargs):
-        result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
-                                env=self.env, text=True, capture_output=True,
-                                timeout=kwargs.get("timeout", 15))
+        prepared = kwargs.get("prepared")
+        if prepared is None:
+            result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
+                                    env=self.env, text=True, capture_output=True,
+                                    timeout=kwargs.get("timeout", 15))
+        else:
+            stdout, stderr = prepared.communicate(json.dumps(list(args)) + "\n",
+                                                   timeout=kwargs.get("timeout", 15))
+            result = subprocess.CompletedProcess([PYTHON, "-I", str(SCRIPT)] + list(args),
+                                                 prepared.returncode, stdout, stderr)
         self.assertEqual(result.returncode, 0,
                          "command: %s\nstdout:\n%s\nstderr:\n%s" % (args, result.stdout, result.stderr))
         # Keep supervisors after their final save clears state['pid']; wait
@@ -583,6 +605,37 @@ class RotationTests(unittest.TestCase):
                 if pid.isdigit():
                     self.extra_pids.add(int(pid))
         return result.stdout
+
+    @contextmanager
+    def prepared_cli(self):
+        # Import the real command before a short observation window begins.
+        # Arguments still pass through its public parser in a separate process.
+        bootstrap = ("import json, runpy, sys\n"
+                     "script = sys.argv[1]\n"
+                     "namespace = runpy.run_path(script)\n"
+                     "print('ready', flush=True)\n"
+                     "sys.argv = [script] + json.loads(sys.stdin.readline())\n"
+                     "namespace['main']()\n")
+        proc = subprocess.Popen([PYTHON, "-I", "-c", bootstrap, str(SCRIPT)],
+                                cwd=self.repo, env=self.env, text=True,
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                stderr=subprocess.PIPE, start_new_session=True)
+        self.extra_pids.add(proc.pid)
+        try:
+            with selectors.DefaultSelector() as selector:
+                selector.register(proc.stdout, selectors.EVENT_READ)
+                self.until(lambda: bool(selector.select(0)))
+                self.assertEqual(proc.stdout.readline(), "ready\n")
+            yield proc
+        finally:
+            if proc.poll() is None:
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            proc.wait()
+            for stream in (proc.stdin, proc.stdout, proc.stderr):
+                stream.close()
 
     def account(self, home, account_id, reset, used=10, runs=None, auto_reset=False, release_at=None):
         value = {"account": {"type": "chatgpt", "email": account_id.lower() + "@example.test", "planType": "pro"},
@@ -599,8 +652,8 @@ class RotationTests(unittest.TestCase):
         return value
 
     def reset_after_ready(self, command, reset, delay, after_exec=False):
-        # Start reset deadlines at the quota request that precedes the sleep,
-        # after repository setup and subprocess startup have finished.
+        # Arm before the first exec publication, or the initial quota request
+        # when no account can run, after expensive subprocess startup.
         gate = self.root / ("quota-ready-" + uuid.uuid4().hex)
         for home in (self.home, self.other):
             path = home / "fixture.json"
@@ -609,27 +662,40 @@ class RotationTests(unittest.TestCase):
             if after_exec:
                 value["rate_limits_gate_after_trigger"] = str(self.home / "exec-count")
             path.write_text(json.dumps(value))
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(command)
+        stopped = threading.Event()
+
+        def arm():
             try:
-                self.until(lambda: any(event.get("command") == "quota-waiting"
-                                       and event.get("gate") == str(gate) for event in self.trace()))
-                armed = time.time() + delay
-                for home in (self.home, self.other):
-                    path = home / "fixture.json"
-                    value = json.loads(path.read_text())
-                    if not value.get("auto_reset"):
-                        continue
-                    for name in ("primary", "secondary"):
-                        if value.get(name) and value[name].get("resetsAt") is not None:
-                            value[name]["resetsAt"] = armed + (value[name]["resetsAt"] - reset)
-                    if "release_at" in value:
-                        value["release_at"] = armed + (value["release_at"] - reset)
-                    path.write_text(json.dumps(value))
+                while not stopped.is_set():
+                    if any(event.get("command") == "quota-waiting" and event.get("gate") == str(gate)
+                           for event in self.trace()):
+                        armed = time.time() + delay
+                        for home in (self.home, self.other):
+                            path = home / "fixture.json"
+                            value = json.loads(path.read_text())
+                            if not value.get("auto_reset"):
+                                continue
+                            for name in ("primary", "secondary"):
+                                if value.get(name) and value[name].get("resetsAt") is not None:
+                                    value[name]["resetsAt"] = armed + (value[name]["resetsAt"] - reset)
+                            if "release_at" in value:
+                                value["release_at"] = armed + (value["release_at"] - reset)
+                            path.write_text(json.dumps(value))
+                        return armed
+                    stopped.wait(0.02)
             finally:
                 gate.touch()
-            future.result()
-        return armed
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(arm)
+            try:
+                # Keep the CLI's existing startup timeout. Its startup must not
+                # consume the short event wait used after it returns.
+                command()
+                self.until(future.done)
+                return future.result()
+            finally:
+                stopped.set()
 
     def configure(self, credits=False, wait_for_reset=None, language="ru",
                   use_reset_credits=None, reset_credit_min_hours=None, **settings):
@@ -798,14 +864,14 @@ class RotationTests(unittest.TestCase):
             time.sleep(0.05)
         self.fail("timed out waiting for fake Codex fixture")
 
-    def wait(self, slug, timeout=90, through_sleep=False):
+    def wait(self, slug, timeout=90, through_sleep=False, prepared=None):
         args = ["wait", slug, "--timeout", str(timeout)]
         if through_sleep:
             args.append("--through-sleep")
         pid = self.state(slug).get("pid")
         if pid:
             self.extra_pids.add(pid)
-        output = self.cli(*args, timeout=timeout + 15)
+        output = self.cli(*args, timeout=timeout + 15, prepared=prepared)
         state = self.state(slug)
         stderr_path = self.home / "claude-tasks" / slug / "stderr.log"
         stderr = stderr_path.read_text() if stderr_path.exists() else ""
@@ -1502,6 +1568,30 @@ class RotationTests(unittest.TestCase):
         self.assertEqual([entry["event"] for entry in state["rotations"]], ["sleep", "wake"])
         self.assertIn("Finished after a long quota sleep", output)
         self.assertNotIn("time budget", output)
+
+    def test_reset_readiness_publishes_only_armed_rollout_deadlines(self):
+        self.configure()
+        reset = time.time() + 4
+        # Without a usage-error event, the supervisor must cache the exhausted
+        # rollout before it can request account quotas and decide to sleep.
+        self.account(self.home, "A", reset, auto_reset=True, runs=[
+            {"mode": "limit"}, {"mode": "complete", "reply": "Resumed from the armed rollout"}])
+        self.account(self.other, "B", self.reset, used=99)
+        reset = self.reset_after_ready(
+            lambda: self.start("armed-rollout"), reset, 4, after_exec=True)
+        self.wait("armed-rollout", through_sleep=True, timeout=12)
+        state = self.state("armed-rollout")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual([entry["event"] for entry in state["rotations"]], ["sleep", "wake"])
+        self.assertAlmostEqual(state["rotations"][0]["until"], reset + 0.1, places=3)
+        trace = self.trace()
+        ready = next(index for index, event in enumerate(trace)
+                     if event.get("command") == "quota-waiting" and event.get("source") == "exec")
+        published = [(index, event["primary"]) for index, event in enumerate(trace)
+                     if event.get("command") == "rollout-snapshot" and event["home"] == str(self.home)]
+        self.assertTrue(any(primary["usedPercent"] == 99 for _, primary in published))
+        self.assertTrue(all(index > ready and primary["resetsAt"] == reset
+                            for index, primary in published), published)
 
     def test_time_budget_accumulates_exec_time_across_account_rotation(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
@@ -4580,33 +4670,34 @@ class RotationTests(unittest.TestCase):
 
     def test_delayed_reset_sleeps_again_before_continuing(self):
         self.configure()
-        reset = time.time() + 3
-        release = reset + 3
-        self.account(self.home, "A", reset, auto_reset=True, release_at=release, runs=[
-            {"mode": "usage_error"}, {"mode": "complete", "reply": "Задержанный сброс завершён"}])
-        self.account(self.other, "B", self.reset, used=99)
-        reset = self.reset_after_ready(lambda: self.start("delayed-reset"), reset, 3, after_exec=True)
-        release = reset + 3
-        self.assert_sleeping("delayed-reset", self.wait("delayed-reset"), reset)
-        self.until(lambda: len([entry for entry in self.state("delayed-reset")["rotations"]
-                               if entry.get("event") == "sleep"]) >= 2, timeout=8)
-        retry = self.wait("delayed-reset")
-        self.assert_sleeping("delayed-reset", retry, release)
-        self.assertEqual(len(self.invocations()), 1)
-        self.assertTrue(any(event.get("command") == "quota-snapshot" and
-                            event["primary"]["usedPercent"] == 99 and
-                            event["primary"]["resetsAt"] == release for event in self.trace()))
+        with self.prepared_cli() as waiter:
+            reset = time.time() + 3
+            release = reset + 3
+            self.account(self.home, "A", reset, auto_reset=True, release_at=release, runs=[
+                {"mode": "usage_error"}, {"mode": "complete", "reply": "Задержанный сброс завершён"}])
+            self.account(self.other, "B", self.reset, used=99)
+            reset = self.reset_after_ready(lambda: self.start("delayed-reset"), reset, 3, after_exec=True)
+            release = reset + 3
+            self.assert_sleeping("delayed-reset", self.wait("delayed-reset"), reset)
+            self.until(lambda: len([entry for entry in self.state("delayed-reset")["rotations"]
+                                   if entry.get("event") == "sleep"]) >= 2, timeout=8)
+            retry = self.wait("delayed-reset", prepared=waiter)
+            self.assert_sleeping("delayed-reset", retry, release)
+            self.assertEqual(len(self.invocations()), 1)
+            self.assertTrue(any(event.get("command") == "quota-snapshot" and
+                                event["primary"]["usedPercent"] == 99 and
+                                event["primary"]["resetsAt"] == release for event in self.trace()))
 
-        self.until(lambda: len(self.invocations()) == 2, timeout=10)
-        output = self.wait("delayed-reset")
-        self.assertIn("Задержанный сброс завершён", output)
-        self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
-        self.assertTrue(self.invocations()[1]["resume"])
-        state = self.state("delayed-reset")
-        self.assertEqual(state["outcome"], "completed")
-        sleeps = [entry for entry in state["rotations"] if entry.get("event") == "sleep"]
-        self.assertEqual(len(sleeps), 2)
-        self.assertLess(sleeps[0]["until"], sleeps[1]["until"])
+            self.until(lambda: len(self.invocations()) == 2, timeout=10)
+            output = self.wait("delayed-reset")
+            self.assertIn("Задержанный сброс завершён", output)
+            self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
+            self.assertTrue(self.invocations()[1]["resume"])
+            state = self.state("delayed-reset")
+            self.assertEqual(state["outcome"], "completed")
+            sleeps = [entry for entry in state["rotations"] if entry.get("event") == "sleep"]
+            self.assertEqual(len(sleeps), 2)
+            self.assertLess(sleeps[0]["until"], sleeps[1]["until"])
 
     def test_mid_turn_rotation_preserves_work_and_followups(self):
         self.configure()
