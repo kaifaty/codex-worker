@@ -295,6 +295,13 @@ def reap_notifications():
     NOTIFY_PROCESSES[:] = [proc for proc in NOTIFY_PROCESSES if proc.poll() is None]
 
 
+def current_turn_account(st):
+    if st.get("kind") == "review":
+        reviews = st.get("reviews", [])[st.get("review_start", 0):]
+        return st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
+    return st["account"]
+
+
 def notify(st, cfg, event, message, **fields):
     reap_notifications()
     cfg = accounts_config() if cfg is None else cfg
@@ -303,7 +310,7 @@ def notify(st, cfg, event, message, **fields):
         return
     message = st["slug"] + ": " + " ".join(message.splitlines())
     payload = dict(event=event, slug=st["slug"], repo=st["repo"], branch=st["branch"],
-                   kind=st.get("kind", "work"), account=st["account"], at=time.time(), message=message)
+                   kind=st.get("kind", "work"), account=current_turn_account(st), at=time.time(), message=message)
     payload.update(fields)
     if setting == "macos":
         escaped = message.replace("\\", "\\\\").replace('"', '\\"')
@@ -605,10 +612,16 @@ def consume_reset_credit(account, credit, slug="", cancelled=lambda: False):
 
 
 def reset_credit_action(account, credit_id=None, slug="", cancelled=lambda: False,
-                        confirmed=False, pending_only=False, allow_consume=True, quota_cfg=None):
+                        confirmed=False, pending_only=False, allow_consume=True, quota_cfg=None,
+                        credit_id_is_hint=False):
     """Resolve a lost reply before selecting another credit, under the same lock."""
     with reset_journal(cancelled) as (entries, record):
         pending = pending_resets(entries, account)
+        if pending and not credit_id_is_hint and credit_id is not None and credit_id != pending[0]["creditId"]:
+            pending_id = pending[0]["creditId"]
+            raise RuntimeError(f"credit {pending_id} has a pending attempt with an unknown outcome; "
+                               f"resolve it first (reset-credit {account['name']} --credit {pending_id} "
+                               "--yes retries it with the same key)")
         if pending_only and not pending:
             return None
         info = account_read(account, cancelled)
@@ -931,11 +944,57 @@ def telemetry_phase(st):
     return next((phase for phase in reversed(TELEMETRY_PHASES) if phase.st is st and not phase.finished), None)
 
 
+def write_telemetry(st, row, stopped):
+    try:
+        payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+        with (CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
+            deadline = time.monotonic() + 2
+            while True:
+                try:
+                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if stopped() or remaining <= 0:
+                        raise
+                    time.sleep(min(0.05, remaining))
+            if stream.seek(0, os.SEEK_END):
+                stream.seek(-1, os.SEEK_END)
+                if stream.read(1) != b"\n":
+                    payload = b"\n" + payload
+            remaining = memoryview(payload)
+            while remaining:
+                written = stream.write(remaining)
+                if not written:
+                    raise OSError("short telemetry write")
+                remaining = remaining[written:]
+    except Exception as exc:
+        telemetry_error(st, exc)
+
+
+def record_turn_result(st, stopped):
+    """Persist the supervisor's final result separately from measured stages."""
+    try:
+        reviews = st.get("reviews", [])[st.get("review_start", 0):]
+        review = st.get("review_result") or ((reviews[-1].get("result") or {}) if reviews else {})
+        result = st.get("result") or {}
+        row = {"v": 1, "at": time.time(), "slug": st["slug"], "repo": Path(st["repo"]).name,
+               "created": st.get("created"), "kind": st.get("kind", "work"), "phase": "turn",
+               "turn": st.get("turns", 0), "round": len(st.get("rounds", [])),
+               "account": current_turn_account(st), "started": st.get("turn_started"),
+               "finished": st.get("turn_finished"), "outcome": st.get("outcome"),
+               "result_status": result.get("status"), "verdict": review.get("verdict")}
+        write_telemetry(st, row, stopped)
+    except Exception as exc:
+        telemetry_error(st, exc)
+
+
 class PhaseTelemetry:
     """Supervisor-only, best-effort accounting. Never persist prompts or output."""
 
-    def __init__(self, st, phase):
+    def __init__(self, st, phase, stopped=lambda: False):
         self.st, self.phase = st, phase
+        self.stopped = stopped
         self.started, self.clock = time.time(), time.monotonic()
         self.sleep_seconds = 0.0
         self.finished = False
@@ -1012,27 +1071,14 @@ class PhaseTelemetry:
                                     for entry in st.get("rotations", [])[self.rotation_start:]),
                    "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
                    "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage}
-            payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-            with (CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
-                # Telemetry is best effort: an unavailable lock must not stall work or stop.
-                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                if stream.seek(0, os.SEEK_END):
-                    stream.seek(-1, os.SEEK_END)
-                    if stream.read(1) != b"\n":
-                        payload = b"\n" + payload
-                remaining = memoryview(payload)
-                while remaining:
-                    written = stream.write(remaining)
-                    if not written:
-                        raise OSError("short telemetry write")
-                    remaining = remaining[written:]
+            write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)
 
 
 @contextmanager
 def record_phase(st, phase, stopped):
-    entry = PhaseTelemetry(st, phase)
+    entry = PhaseTelemetry(st, phase, stopped)
     TELEMETRY_PHASES.append(entry)
     try:
         yield entry
@@ -1444,7 +1490,9 @@ def try_reset_credit(st, infos, cfg, stopped):
     event = {"event": "reset_credit", "at": time.time(), "account": info["name"],
              "credit_id": credit["id"], "expires_at": credit.get("expiresAt")}
     try:
-        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True, quota_cfg=cfg)
+        # A concurrent unknown attempt takes priority over the candidate selected above.
+        action = reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True,
+                                     quota_cfg=cfg, credit_id_is_hint=True)
         if action["outcome"] == "available":
             return [action["info"] if i["name"] == info["name"] else i for i in infos]
     except (OSError, ValueError, KeyError, RuntimeError) as exc:
@@ -2354,7 +2402,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             if reviews:
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
-                      "account": st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"]),
+                      "account": current_turn_account(st),
                       "started": started, "finished": time.time()}
             if outcome == "refused":
                 record["refusal"] = st.get("refusal", "")
@@ -2374,7 +2422,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
         st.pop("review_angle", None)
         if st.get("outcome") != "refused":
             st.pop("refusal", None)
-        account = st.get("review_account") or (records[-1]["account"] if records else st["account"])
+        account = current_turn_account(st)
         outcome = "stopped" if stopped() else st["outcome"]
         notify(st, cfg, "review_done", f"review {outcome} on {account}",
                outcome=outcome, account=account, angles=[entry["angle"] for entry in records],
@@ -2568,11 +2616,9 @@ def cmd__run(a):
         st.pop("sleeping", None)
         st["turn_finished"] = time.time()
         st.pop("pending", None)
+        record_turn_result(st, stopped)
         if cfg is not None:
-            account = st["account"]
-            if st.get("kind") == "review":
-                reviews = st.get("reviews", [])[st.get("review_start", 0):]
-                account = st.get("review_account") or (reviews[-1]["account"] if reviews else account)
+            account = current_turn_account(st)
             message = f"turn {st['outcome']} on {account}"
             result = st.get("result")
             message += ", result " + (result["status"] if result is not None else "unknown")

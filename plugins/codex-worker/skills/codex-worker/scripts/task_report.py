@@ -105,7 +105,7 @@ def _read_rows(log_path, since, until, repo, slug):
                     continue
                 if not _identifier(row.get("repo")) or not _identifier(row.get("slug")):
                     continue
-                if not isinstance(row.get("phase"), str) or row["phase"] not in MODEL_PHASES | CHECK_PHASES:
+                if not isinstance(row.get("phase"), str) or row["phase"] not in MODEL_PHASES | CHECK_PHASES | {"turn"}:
                     continue
                 if repo is not None and row["repo"] != repo:
                     continue
@@ -122,7 +122,7 @@ def _task(repo, slug, created):
     return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
-            "_reviews": {}}
+            "_reviews": {}, "_turns": [], "_latest_turn": 0}
 
 
 def _account(name):
@@ -201,6 +201,12 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         else:
             identity = pair + (created,)
         task = tasks.setdefault(identity, _task(row["repo"], row["slug"], created))
+        task["_latest_turn"] = max(task["_latest_turn"], _round(row.get("turn")))
+        if phase == "turn":
+            # Final supervisor results carry no additional stage cost or usage.
+            task["_turns"].append(row)
+            task["rounds"] = max(task["rounds"], _round(row.get("round")))
+            continue
         is_turn = phase in MODEL_PHASES
         seconds = _number(row.get("active_seconds")) or 0
         active_seconds += seconds
@@ -270,11 +276,24 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
     result_status = Counter()
     for task in tasks.values():
         groups = list(task.pop("_reviews").items())
-        for (_, round_number), review_rows in groups:
-            if _review_verdict(review_rows) == "clean":
+        verdicts = {group: _review_verdict(review_rows) for group, review_rows in groups}
+        final_turns = task.pop("_turns")
+        for row in final_turns:
+            if row.get("kind") == "review":
+                verdicts[(_round(row.get("turn")), _round(row.get("round")))] = (
+                    _identifier(row.get("verdict")) if row.get("outcome") == "completed" else None)
+        for (_, round_number), verdict in verdicts.items():
+            if verdict == "clean":
                 fix_rounds[str(round_number)] += 1
                 break
-        if groups:
+        latest_turn = task.pop("_latest_turn")
+        # A newer turn may have saved its stages but lost its final journal row.
+        if final_turns and _round(final_turns[-1].get("turn")) == latest_turn:
+            final = final_turns[-1]
+            task["outcome"] = _identifier(final.get("outcome"))
+            task["result_status"] = _identifier(final.get("result_status"))
+            task["last_verdict"] = _identifier(final.get("verdict"))
+        elif groups:
             task["last_verdict"] = _review_verdict(groups[-1][1])
         if task["outcome"] is not None:
             outcomes[task["outcome"]] += 1
