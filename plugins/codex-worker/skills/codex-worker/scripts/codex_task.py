@@ -40,6 +40,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import termios
 import threading
 import time
 import uuid
@@ -1971,6 +1972,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     current_info = None
     failed = False
     turn_completed = False
+    pending_weekly_spent = None
+    pending_weekly_bytes = 0
     authentication_failed = False
     refusal = None
     final_message = ""
@@ -2015,8 +2018,13 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                         return stop_outcome(st, stopped), None
                     if control.expired(active_started):
                         return "budget_exhausted", None
-                    for key, _ in sel.select(0.2):
-                        chunk = os.read(key.fileobj.fileno(), 65536)
+                    ready = ([] if pending_weekly_spent is not None and pending_weekly_bytes == 0
+                             else sel.select(0 if pending_weekly_spent is not None else 0.2))
+                    for key, _ in ready:
+                        size = min(65536, pending_weekly_bytes) if pending_weekly_spent is not None else 65536
+                        chunk = os.read(key.fileobj.fileno(), size)
+                        if pending_weekly_spent is not None:
+                            pending_weekly_bytes -= len(chunk)
                         if not chunk:
                             sel.unregister(key.fileobj)
                             eof = True
@@ -2068,6 +2076,17 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                         if authentication_failed or reason:
                             return "failed", None
                         continue
+                    if pending_weekly_spent is not None:
+                        # Rollout and stdout are separate streams. A completion
+                        # sent before the quota sample can still be queued here.
+                        # Drain that queued prefix (including partial JSON),
+                        # without waiting for or following subsequent output.
+                        if not turn_completed:
+                            if ready and pending_weekly_bytes > 0 and not eof:
+                                continue
+                            if control.weekly_exhausted(pending_weekly_spent):
+                                return "budget_exhausted", None
+                        pending_weekly_spent = None
                     if authentication_failed:
                         return ("auth" if cfg["enabled"] else "failed"), None
                     if reason:
@@ -2096,8 +2115,11 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                              + (telemetry.weekly_spent() if telemetry else 0)
                                              + weekly_delta({"weekly_used_before": weekly_before,
                                                              "weekly_used_after": used}))
-                                    if control.weekly_exhausted(spent):
-                                        return "budget_exhausted", None
+                                    if spent >= control.weekly:
+                                        pending_weekly_spent = spent
+                                        queued = fcntl.ioctl(proc.stdout.fileno(), termios.FIONREAD, bytes(4))
+                                        pending_weekly_bytes = int.from_bytes(queued, sys.byteorder)
+                                        continue
                                 current_info = dict(account, logged_in=True, limits=limits)
                                 if cfg["enabled"] and exhausted(current_info, cfg):
                                     decision = quota_decision(current_info, limit_reason(current_info, cfg), True)

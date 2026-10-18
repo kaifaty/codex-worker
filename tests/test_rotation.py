@@ -1704,6 +1704,102 @@ class RotationTests(unittest.TestCase):
                          ("budget_exhausted", 5, "weekly"))
         self.assertEqual(task["weekly_used_percent"], 6)
 
+    def test_final_weekly_budget_drains_completion_before_counting_fix_once(self):
+        worker = self.worker()
+        slug = "weekly-completion-order"
+        (worker.TASKS / slug).mkdir(parents=True)
+        account = {"name": "main", "home": str(self.home)}
+        st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo),
+              "base": "main", "kind": "work", "account": "main", "thread": "same-thread",
+              "threads": [], "reviews": [], "rotations": [], "rounds": [], "turns": 1,
+              "outcome": "running", "max_task_weekly_percent": 5}
+
+        def quota(used):
+            return json.dumps({"type": "event_msg", "payload": {"type": "token_count",
+                               "rate_limits": {"primary": {"used_percent": used,
+                                                          "window_minutes": 10080}}}}) + "\n"
+
+        work = self.root / "work-rollout.jsonl"
+        work.write_text(quota(10) + quota(11))
+        with worker.record_phase(st, "work", lambda: False) as phase:
+            phase.add_usage("main", "work-thread", None, work, 0)
+            phase.finish(outcome="completed")
+        st["kind"] = "review"
+        review = self.root / "review-rollout.jsonl"
+        review.write_text(quota(11) + quota(12))
+        with worker.record_phase(st, "review", lambda: False) as phase:
+            phase.add_usage("main", "review-thread", None, review, 0)
+            phase.finish(outcome="completed")
+        self.assertEqual(st["weekly_used_percent"], 2)
+        st.update(kind="work", rounds=[{}])
+        rollout = self.root / "fix-rollout.jsonl"
+        rollout.write_text(quota(12))
+        result = self.work_result()
+        message = (json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": json.dumps(result)}}) + "\n").encode()
+        chunks = [message]
+        observed = []
+        exited = [False]
+        proc = mock.Mock(pid=12345)
+        proc.stdout.fileno.return_value = 99
+        proc.poll.side_effect = lambda: 0 if exited[0] else None
+        proc.wait.return_value = 0
+        selector = mock.MagicMock()
+        selector.__enter__.return_value = selector
+        selector.select.side_effect = lambda timeout: (
+            [(SimpleNamespace(fileobj=proc.stdout), worker.selectors.EVENT_READ)] if chunks else [])
+
+        def read(fd, size):
+            chunk = chunks.pop(0)
+            self.assertLessEqual(len(chunk), size)
+            if chunk == message:
+                observed.append("agent_message")
+                with rollout.open("a") as stream:
+                    stream.write(quota(12))
+            elif chunk:
+                observed.append("completion fragment")
+                self.assertEqual(st["weekly_used_percent"], 2, "live polling must not commit phase usage")
+            else:
+                exited[0] = True
+            return chunk
+
+        def read_limits(path):
+            self.assertEqual(observed, ["agent_message"])
+            self.assertIs(path, rollout)
+            # The completion was sent before the final quota, but has not been
+            # read from stdout. Split it across reads to require a full drain.
+            chunks.extend([b'{"type":"turn.', b'completed"}\n', b""])
+            with rollout.open("a") as stream:
+                stream.write(quota(16))
+            observed.append("final quota")
+            return worker.normalize_limits({"primary": {"used_percent": 16, "window_minutes": 10080}})
+
+        with mock.patch.object(worker, "prepare_home"), \
+                mock.patch.object(worker, "terminate"), \
+                mock.patch.object(worker.subprocess, "Popen", return_value=proc) as popen, \
+                mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
+                mock.patch.object(worker.os, "read", side_effect=read), \
+                mock.patch.object(worker.fcntl, "ioctl", return_value=(
+                    len(b'{"type":"turn.completed"}\n').to_bytes(4, sys.byteorder))), \
+                mock.patch.object(worker, "rollout_path", return_value=rollout), \
+                mock.patch.object(worker, "rollout_limits", side_effect=read_limits), \
+                mock.patch.object(worker, "wrapup_turn", side_effect=AssertionError("unexpected wrap-up")) as wrapup:
+            worker.run_turn(st, {"enabled": False, "accounts": [account]}, "finish the fix", None,
+                            False, lambda: False, lambda seconds: None, new_turn=False)
+        self.assertEqual(observed, ["agent_message", "final quota", "completion fragment", "completion fragment"])
+        popen.assert_called_once()
+        wrapup.assert_not_called()
+        self.assertEqual(st["weekly_used_percent"], 6)
+        self.assertEqual(st["outcome"], "budget_exhausted")
+        self.assertEqual(st["turn_stop"]["spent"], 6)
+        self.assertEqual(st["result"], result)
+        rows = self.phase_telemetry_journal()
+        self.assertEqual([(row["phase"], worker.weekly_delta(row["usage"][0])) for row in rows],
+                         [("work", 1), ("review", 1), ("fix", 4)])
+        self.assertEqual(len(rows[-1]["usage"]), 1)
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], 6)
+
     def test_final_weekly_budget_publishes_completed_workspace_work_before_check(self):
         self.configure(language="en", sandbox="workspace")
         subject = "Publish completed budgeted work"
