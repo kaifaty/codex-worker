@@ -462,7 +462,8 @@ elif args[:2] == ["pr", "list"]:
     for entry in entries:
         entry = {"url": entry, "state": "OPEN"} if isinstance(entry, str) else dict(entry)
         entry.setdefault("number", 42)
-        entry.setdefault("headRepository", {"nameWithOwner": "fixture/repo"})
+        entry.setdefault("headRepository", {"id": "R_fixture", "name": "repo", "nameWithOwner": ""})
+        entry.setdefault("headRepositoryOwner", {"login": "fixture"})
         prs.append(entry)
     if "--jq" in args:
         expression = args[args.index("--jq") + 1]
@@ -475,8 +476,22 @@ elif args[:2] == ["pr", "create"]:
     if os.environ.get("CODEX_FAKE_GH_CREATE_ERROR"):
         print("fixture PR creation failed", file=sys.stderr)
         sys.exit(1)
+    entries = state.get(branch, [])
+    if not isinstance(entries, list):
+        entries = [entries] if entries else []
+    for entry in entries:
+        entry = {"url": entry, "state": "OPEN"} if isinstance(entry, str) else entry
+        repository = entry.get("headRepository", {"name": "repo"}) or {}
+        owner = entry.get("headRepositoryOwner", {"login": "fixture"}) or {}
+        if (entry.get("state") == "OPEN" and repository.get("name", "").casefold() == "repo"
+                and owner.get("login", "").casefold() == "fixture"):
+            print('a pull request for branch "' + branch + '" into branch "main" already exists',
+                  file=sys.stderr)
+            sys.exit(1)
     url = "https://example.test/pull/" + str(len(state) + 1)
-    state[branch] = {"url": url, "state": "OPEN"}
+    state[branch] = {"url": url, "state": "OPEN",
+                     "headRepository": {"id": "R_fixture", "name": "repo", "nameWithOwner": ""},
+                     "headRepositoryOwner": {"login": "fixture"}}
     state_path.write_text(json.dumps(state))
     print(url)
 elif args[:2] == ["pr", "edit"]:
@@ -1275,15 +1290,22 @@ class RotationTests(unittest.TestCase):
                 (self.home / "exec-count").unlink(missing_ok=True)
                 slug = "pr-head-repo-" + (own_state or "missing").lower()
                 own_url = "https://example.test/pull/42"
-                prs = [{"url": "https://example.test/pull/99", "state": "OPEN",
-                        "headRepository": {"nameWithOwner": "other/repo"}},
-                       {"url": "https://example.test/pull/98", "state": "OPEN",
-                        "headRepository": {"nameWithOwner": "fixture/another-repo"}},
-                       {"url": "https://example.test/pull/97", "state": "OPEN",
-                        "headRepository": None}]
+                foreign_prs = [{"url": "https://example.test/pull/99", "state": "OPEN",
+                                "headRepository": {"id": "R_other", "name": "repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": {"login": "other"}},
+                               {"url": "https://example.test/pull/98", "state": "OPEN",
+                                "headRepository": {"id": "R_another", "name": "another-repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": {"login": "fixture"}},
+                               {"url": "https://example.test/pull/97", "state": "OPEN",
+                                "headRepository": None, "headRepositoryOwner": None},
+                               {"url": "https://example.test/pull/96", "state": "OPEN",
+                                "headRepository": {"id": "R_no_owner", "name": "repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": None}]
+                prs = list(foreign_prs)
                 if own_state:
                     prs.append({"url": own_url, "state": own_state,
-                                "headRepository": {"nameWithOwner": "Fixture/Repo"}})
+                                "headRepository": {"id": "R_fixture", "name": "Repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": {"login": "Fixture"}})
                 Path(self.env["CODEX_FAKE_GH_STATE"]).write_text(json.dumps({"codex/" + slug: prs}))
                 before = len(self.gh_writes())
                 result = self.work_result(pr_title="Publish our task", pr_body="Describe our complete PR.")
@@ -1310,7 +1332,7 @@ class RotationTests(unittest.TestCase):
                     create, = writes
                     self.assertEqual(create["argv"][:2], ["pr", "create"])
                     self.assertEqual(create["body"], result["pr_body"])
-                for foreign in prs[:3]:
+                for foreign in foreign_prs:
                     self.assertFalse(any(foreign["url"] in event["argv"] for event in writes))
 
     def test_pr_supervisor_fix_round_updates_only_with_a_nonempty_body(self):
@@ -1933,6 +1955,67 @@ class RotationTests(unittest.TestCase):
                                  "--repo", "github.com/fixture/repo"]])
         self.assertEqual(len(self.ci_polls()), 4)
         self.assertEqual(state["ci"]["sha"], self.git("rev-parse", state["branch"]))
+        publication = state["publish"]
+        self.assertEqual((publication["action"], publication["error"]), ("updated", ""))
+        create, edit = self.gh_writes()
+        self.assertEqual(create["argv"][:2], ["pr", "create"])
+        self.assertEqual(edit["argv"][:3], ["pr", "edit", publication["pr"]])
+        self.assertTrue(publication["pr"])
+        self.assertTrue(all(event["argv"][2] == publication["pr"] for event in self.ci_polls()))
+        for event in self.gh_invocations():
+            if event["argv"][:2] == ["pr", "list"]:
+                self.assertEqual(event["argv"][event["argv"].index("--json") + 1],
+                                 "url,state,headRepository,headRepositoryOwner")
+        pr = json.loads(Path(self.env["CODEX_FAKE_GH_STATE"]).read_text())[state["branch"]]
+        self.assertEqual(pr["headRepository"]["nameWithOwner"], "")
+        self.assertEqual(pr["headRepositoryOwner"]["login"] + "/" + pr["headRepository"]["name"],
+                         "fixture/repo")
+
+    def test_ci_repair_prompt_uses_russian_and_keeps_the_failed_job_evidence(self):
+        self.configure(language="ru", sandbox="workspace")
+        log = "fixture Russian CI repair traceback\nAssertionError: Python 3.9 support\n"
+        self.configure_ci([[self.ci_check("fail")], [self.ci_check()]], jobs={"123": log})
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed Python 3.9\n")])
+        self.start("ci-fixed-ru", "--ci", "--check", "true")
+        self.wait("ci-fixed-ru")
+        state = self.state("ci-fixed-ru")
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"]), ("passed", 1))
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        prompt = executions[1]["prompt"]
+        for text in ("CI этой ветки упал", self.ci_check()["name"], "fixture Russian CI repair traceback",
+                     "Python 3.9 support", "исправь его и запушь ветку", "ничего не меняй", 'status: "blocked"'):
+            self.assertIn(text, prompt)
+        self.assertNotIn("CI failed for this branch", prompt)
+        self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
+                         [["pr", "create"], ["pr", "edit"]])
+        self.assertEqual(len(self.ci_polls()), 2)
+
+    def test_ci_repair_prompt_localizes_rules_and_workspace_publication_in_both_languages(self):
+        worker = self.worker()
+        check = self.ci_check("fail")
+        check["tail"] = "fixture failed job evidence\nAssertionError: Python 3.9\n"
+        ci = {"sha": "a" * 40, "outcome": "failed", "checks": [check]}
+        expected = {
+            "en": ("CI failed for this branch", "fix it and push", "flaky or unrelated", "change nothing",
+                   "including evidence", "work JSON schema", "leave committing/pushing to the supervisor"),
+            "ru": ("CI этой ветки упал", "исправь его и запушь ветку", "нестабильный или не связан",
+                   "ничего не меняй", "приведя доказательства", "JSON-схему работы",
+                   "оставь коммит и пуш надзирателю")}
+        for language in ("en", "ru"):
+            for sandbox in ("off", "workspace"):
+                with self.subTest(language=language, sandbox=sandbox):
+                    prompt = worker.ci_fix_prompt({"sandbox": sandbox}, ci, {"language": language})
+                    for text in expected[language][:-1]:
+                        self.assertIn(text, prompt)
+                    for text in (check["name"], check["link"], "fixture failed job evidence",
+                                 "Python 3.9", 'status: "blocked"'):
+                        self.assertIn(text, prompt)
+                    if sandbox == "workspace":
+                        self.assertIn(expected[language][-1], prompt)
+                    else:
+                        self.assertNotIn(expected[language][-1], prompt)
 
     def test_ci_starts_after_review_auto_fix_and_its_second_local_check(self):
         self.configure(language="en", sandbox="workspace")
