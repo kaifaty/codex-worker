@@ -95,7 +95,9 @@ RESULT_SCHEMA = object_schema({
         "outcome": {"type": "string", "enum": ["passed", "failed", "not_run"]},
         "details": {"type": "string", "description": "Include numerical evidence: counts, exits, attempts."},
     })},
-    "pr": {"type": "string", "description": "PR URL, or an empty string."},
+    "pr": {"type": "string", "description": "Compatibility field; always return an empty string."},
+    "pr_title": {"type": "string", "description": "PR title for the supervisor to publish. Empty uses the last commit subject."},
+    "pr_body": {"type": "string", "description": "Description of the entire PR. Empty leaves an existing PR unchanged; a new PR uses summary."},
     "commit_message": {"type": "string", "description": "Repository-style commit message; first line is the subject. Empty if already committed or unchanged."},
     "questions": {"type": "array", "items": {"type": "string"}},
     "remaining": {"type": "array", "items": {"type": "string"}},
@@ -151,8 +153,6 @@ def result_lines(result, raw="(no final message)"):
     lines = ["== result: " + label[result["status"]], result["summary"]]
     for check in result["checks"]:
         lines.append(f"- {check['command']}: {check['outcome']} — {check['details']}")
-    if result["pr"]:
-        lines.append("PR: " + result["pr"])
     if result["questions"]:
         lines.append("Questions:")
         lines.extend(f"{n}. {question}" for n, question in enumerate(result["questions"], 1))
@@ -361,7 +361,8 @@ def sandbox_rules(cfg, reviewing=False):
     if cfg.get("language", "en") == "ru":
         rules = ("## Песочница worktree\n\n"
                  "Этот раздел отменяет правила про коммиты и публикацию выше. "
-                 "git commit, git push и gh pr create в песочнице недоступны, не пытайся их запускать. ")
+                 "git commit и git push в песочнице недоступны, не пытайся их запускать. "
+                 "Не открывай и не редактируй PR: надзиратель делает это из pr_title/pr_body. ")
         if reviewing:
             return rules + "Файлы не меняй; верни только JSON по схеме ревью."
         return rules + ("Оставь изменения в worktree: надзиратель закоммитит и опубликует их после хода. "
@@ -369,7 +370,8 @@ def sandbox_rules(cfg, reviewing=False):
                         "Если изменений нет или ты уже закоммитил их сам, commit_message — пустая строка.")
     rules = ("## Workspace sandbox\n\n"
              "This section overrides the commit and publication rules above. "
-             "git commit, git push and gh pr create are unavailable in the sandbox; do not try them. ")
+             "git commit and git push are unavailable in the sandbox; do not try them. "
+             "Do not open or edit PRs yourself: the supervisor does it from pr_title/pr_body. ")
     if reviewing:
         return rules + "Do not change files; return only JSON matching the review schema."
     return rules + ("Leave changes in the worktree: the supervisor will commit and publish them after the turn. "
@@ -2342,6 +2344,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             if phase is not None:
                 phase.finish(outcome=result)
             publish_work(st, stopped)
+            publish_pr(st, stopped)
             stop_at_weekly_budget(st)
             break
         if result in ("budget_exhausted", "stuck"):
@@ -2673,12 +2676,18 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
     return result
 
 
+def completed_work_turn(st):
+    return (st.get("kind") == "work" and
+            (st.get("outcome") == "completed" or
+             (st.get("outcome") in ("budget_exhausted", "stuck") and
+              st.get("wrapup", {}).get("outcome") == "completed")))
+
+
 def publish_work(st, stopped):
     """Publish a completed workspace turn outside the worker's write boundary."""
-    if (st.get("sandbox") != "workspace" or st.get("kind") != "work"
-            or st.get("outcome") != "completed" or stopped()):
+    if st.get("sandbox") != "workspace" or not completed_work_turn(st) or stopped():
         return
-    receipt = {"at": time.time(), "sha": "", "pushed": False, "pr": "", "error": ""}
+    receipt = {"at": time.time(), "sha": "", "pushed": False, "pr": "", "action": "skipped", "error": ""}
 
     def run(args):
         return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
@@ -2708,24 +2717,94 @@ def publish_work(st, stopped):
         stage = "push"
         run(GIT + ["push", "-u", "origin", st["branch"]])
         receipt["pushed"] = True
-        gh = shutil.which("gh")
-        if gh:
-            stage = "PR"
-            receipt["pr"] = run([gh, "pr", "list", "--head", st["branch"], "--state", "all",
-                                 "--json", "url", "--jq", ".[0].url // empty"])
-            if not receipt["pr"]:
-                subject, _, body = message.partition("\n")
-                with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="pr-",
-                                                 dir=str(TASKS / st["slug"])) as file:
-                    file.write(body.strip() or subject)
-                    file.flush()
-                    receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].removeprefix("origin/"),
-                                         "--head", st["branch"], "--title", subject, "--body-file", file.name])
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         detail = (exc.stderr or exc.stdout or str(exc)) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         receipt["error"] = stage + ": " + detail.strip()
     st["publish"] = receipt
     save(st)
+
+
+def publish_pr(st, stopped):
+    """The supervisor is the only PR writer, in every work mode."""
+    if not completed_work_turn(st) or stopped():
+        return
+    receipt = st.setdefault("publish", {"at": time.time(), "sha": "", "pushed": False,
+                                        "pr": "", "action": "skipped", "error": ""})
+    receipt.update(at=time.time(), action="skipped", pr="")
+
+    def run(args):
+        return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
+                              text=True, errors="replace").stdout.strip()
+
+    def detail(exc):
+        return ((exc.stderr or exc.stdout or str(exc))
+                if isinstance(exc, subprocess.CalledProcessError) else str(exc)).strip()
+
+    def skip(reason):
+        receipt["error"] = receipt["error"] + "; " + reason if receipt["error"] else reason
+
+    stage = "not pushed"
+    try:
+        # Remote-tracking refs can be stale: verify the actual origin branch.
+        try:
+            head = run(GIT + ["rev-parse", "HEAD"])
+            remote = run(GIT + ["ls-remote", "--heads", "origin", "refs/heads/" + st["branch"]])
+            receipt["pushed"] = bool(remote and remote.split()[0] == head)
+        except (OSError, subprocess.CalledProcessError) as exc:
+            receipt["pushed"] = False
+            skip("not pushed: " + detail(exc))
+            return
+        if not receipt["pushed"]:
+            skip("not pushed")
+            return
+        gh = shutil.which("gh")
+        if not gh:
+            skip("gh unavailable")
+            return
+        stage = "origin remote"
+        remote_url = run(GIT + ["remote", "get-url", "origin"])
+        stage = "gh repo view"
+        run([gh, "repo", "view", remote_url, "--json", "nameWithOwner"])
+        stage = "gh pr list"
+        prs = json.loads(run([gh, "pr", "list", "--head", st["branch"], "--state", "all",
+                             "--json", "url,state", "--repo", remote_url]))
+        # Prefer the current open PR if this branch name has been reused.
+        pr = next((item for item in prs if item["state"] == "OPEN"), prs[0] if prs else None)
+        result = st.get("result") or {}
+        body = result.get("pr_body", "")
+        if pr:
+            receipt["pr"] = pr["url"]
+            if pr["state"] in ("CLOSED", "MERGED"):
+                skip("pr " + pr["state"].lower())
+                return
+            if not body:
+                receipt["action"] = "unchanged"
+                return
+        title = result.get("pr_title") or run(GIT + ["log", "-1", "--format=%s"])
+        if not pr:
+            body = body or result.get("summary", "")
+        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="pr-",
+                                         dir=str(TASKS / st["slug"])) as file:
+            file.write(body)
+            file.flush()
+            if stopped():
+                skip("stopped")
+                return
+            if pr:
+                stage = "gh pr edit"
+                run([gh, "pr", "edit", receipt["pr"], "--title", title, "--body-file", file.name,
+                     "--repo", remote_url])
+                receipt["action"] = "updated"
+            else:
+                stage = "gh pr create"
+                receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].removeprefix("origin/"),
+                                     "--head", st["branch"], "--title", title, "--body-file", file.name,
+                                     "--repo", remote_url])
+                receipt["action"] = "created"
+    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError) as exc:
+        skip(stage + ": " + detail(exc))
+    finally:
+        save(st)
 
 
 def fix_round_changes(st, before, after):
@@ -2803,12 +2882,14 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         st["rounds"].append(entry)
         st.update(kind="work", result=None, outcome="running", reset_wait_seconds=0)
         st.pop("review_skipped", None)
+        st.pop("publish", None)
         prompt = followup_prompt(st, message, cfg, source="review")
         save(st)
         work_paths = check_paths(st)
         before = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         run_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
         publish_work(st, stopped)
+        publish_pr(st, stopped)
         st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
         after = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         entry.update(fix_round_changes(st, before, after))
@@ -2905,6 +2986,7 @@ def cmd__run(a):
             run_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
                      stopped, stopped_flag.wait)
             publish_work(st, stopped)
+            publish_pr(st, stopped)
             if work_paths is not None:
                 st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
                 save(st)
@@ -3160,6 +3242,11 @@ def cmd_wait(a):
             print(line)
         if publication["error"]:
             print("== publish error: " + publication["error"])
+        action = publication.get("action")
+        if action in ("created", "updated"):
+            print("== PR " + action + " " + publication["pr"])
+        elif action == "skipped":
+            print("== PR skipped: " + publication["error"])
     print(f"== {a.slug}: turn {st.get('turns')} {state} after "
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
     if st.get("turn_stop"):
@@ -3179,6 +3266,8 @@ def cmd_wait(a):
             raw = ("(no wrap-up result)" if st.get("wrapup", {}).get("outcome") not in (None, "completed")
                    else last.read_text().strip() if last.exists() else last_message(st) or "(no final message)")
             print(raw if st.get("kind") == "scout" else "\n".join(result_lines(st.get("result"), raw)))
+            if publication and publication["pr"]:
+                print("PR: " + publication["pr"])
     for line in guarded_lines(guarded_changes(st)):
         print(line)
     for number, entry in enumerate(st.get("rounds", []), 1):
@@ -3317,9 +3406,7 @@ def describe(st, detail):
         return line
     if scouting:
         return line + "\nlast message:\n" + (last_message(st) or "(none)")
-    pr = (sh(["gh", "pr", "list", "--head", st["branch"], "--state", "all", "--json", "number,state,url",
-              "--jq", '.[] | "\\(.number) \\(.state) \\(.url)"'], cwd=st["worktree"], check=False)
-          if shutil.which("gh") else "")
+    pr = st.get("publish", {}).get("pr", "")
     commits = sh(GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = TASKS / st["slug"] / "review.md"
     message = review.read_text().strip() if reviewing and review.exists() else last_message(st)

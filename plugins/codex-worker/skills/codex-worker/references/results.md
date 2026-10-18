@@ -12,11 +12,20 @@ The supervisor saves valid implementation JSON in state as `result`; `status` sh
 | `status` | `done` (every "Done when" condition met), `partial` (some work done, can continue), `blocked` (an external change is needed, or two attempts failed), `needs_decision` (a decision is missing from the brief) |
 | `summary` | short plain-language summary |
 | `checks` | `{command, outcome, details}`; `outcome` is `passed`, `failed` or `not_run`, `details` carries numbers |
-| `pr` | PR URL, or an empty string |
+| `pr` | compatibility field; the worker returns an empty string |
+| `pr_title` | required string; PR title, or empty to use the latest commit subject |
+| `pr_body` | required string; description of the whole PR, not just this turn; empty leaves an existing PR unchanged, or uses `summary` when creating one |
 | `commit_message` | repository-style message, subject on the first line; empty when the worker committed or nothing changed |
 | `questions` | questions for Claude |
 | `remaining` | unfinished work, including findings deferred as `out of scope` |
 | `findings` | in a fix turn, `{id, decision, note}` per supplied finding, `decision` being `fixed` or `rejected` with a one-line reason; an empty array in ordinary turns |
+
+After every work turn, including fixes and wrap-ups, the supervisor creates or updates the PR only
+when `origin` has the local branch's HEAD. The `publish` receipt records its URL, action (`created`,
+`updated`, `unchanged`, or `skipped`), and error. `wait` prints `== PR created <URL>`,
+`== PR updated <URL>`, or `== PR skipped: <reason>`; its final `PR:` uses the receipt URL.
+Missing or unauthorized GitHub CLI and publication errors do not fail the turn. Closed and merged
+PRs are left unchanged.
 
 ## Review result
 

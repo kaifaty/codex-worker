@@ -342,7 +342,7 @@ def execute():
         Path(name).unlink(missing_ok=True)
     if run.get("commit_files"):
         subprocess.run(["git", "add", "--"] + run["commit_files"], check=True)
-        subprocess.run(["git", "commit", "-qm", "Apply fake worker changes"], check=True)
+        subprocess.run(["git", "commit", "-qm", run.get("commit_subject", "Apply fake worker changes")], check=True)
     for files in run.get("commit_batches", []):
         for name, contents in files.items():
             path = Path(name)
@@ -350,6 +350,8 @@ def execute():
             path.write_text(contents)
         subprocess.run(["git", "add", "--"] + list(files), check=True)
         subprocess.run(["git", "commit", "-qm", "Commit another fake worker change"], check=True)
+    if run.get("push"):
+        subprocess.run(["git", "push", "--quiet", "-u", "origin", "HEAD"], check=True)
     for name, contents in run.get("post_commit_write_files", {}).items():
         Path(name).write_text(contents)
     if run["mode"] == "refused":
@@ -446,21 +448,33 @@ if "--body-file" in args:
 with Path(os.environ["CODEX_FAKE_GH_TRACE"]).open("a") as stream:
     stream.write(json.dumps(event) + "\n")
 branch = args[args.index("--head") + 1] if "--head" in args else ""
-if args[:2] == ["pr", "list"]:
-    url = state.get(branch, "")
+if args[:2] == ["repo", "view"]:
+    if os.environ.get("CODEX_FAKE_GH_REPO_ERROR"):
+        print("fixture remote is not accessible through GitHub", file=sys.stderr)
+        sys.exit(1)
+    print(json.dumps({"nameWithOwner": "fixture/repo"}))
+elif args[:2] == ["pr", "list"]:
+    entry = state.get(branch, "")
+    if isinstance(entry, str):
+        entry = {"url": entry, "state": "OPEN"} if entry else {}
+    url = entry.get("url", "")
     if "--jq" in args:
         expression = args[args.index("--jq") + 1]
-        print(("42 OPEN " + url if "number" in expression else url) if url else "")
+        print(("42 " + entry["state"] + " " + url if "number" in expression else url) if url else "")
     else:
-        print(json.dumps([{"number": 42, "state": "OPEN", "url": url}] if url else []))
+        print(json.dumps([dict(entry, number=42)] if url else []))
 elif args[:2] == ["pr", "create"]:
     if os.environ.get("CODEX_FAKE_GH_CREATE_ERROR"):
         print("fixture PR creation failed", file=sys.stderr)
         sys.exit(1)
     url = "https://example.test/pull/" + str(len(state) + 1)
-    state[branch] = url
+    state[branch] = {"url": url, "state": "OPEN"}
     state_path.write_text(json.dumps(state))
     print(url)
+elif args[:2] == ["pr", "edit"]:
+    if os.environ.get("CODEX_FAKE_GH_EDIT_ERROR"):
+        print("fixture PR edit failed", file=sys.stderr)
+        sys.exit(1)
 else:
     sys.exit("unsupported fake gh invocation")
 '''
@@ -838,6 +852,10 @@ class RotationTests(unittest.TestCase):
             return []
         return [json.loads(line) for line in self.gh_trace_path.read_text().splitlines()]
 
+    def gh_writes(self):
+        return [event for event in self.gh_invocations()
+                if event["argv"][:2] in (["pr", "create"], ["pr", "edit"])]
+
     def record_git_calls(self):
         real_git = shutil.which("git", path=self.env["PATH"])
         self.assertIsNotNone(real_git)
@@ -976,7 +994,7 @@ class RotationTests(unittest.TestCase):
         result = {"status": status, "summary": "Implemented the typed final result.",
                   "checks": [{"command": "python3 -I tests/test_rotation.py", "outcome": "passed",
                               "details": "3 tests passed, 0 failed"}],
-                  "pr": "https://example.test/pull/42", "questions": [], "remaining": [],
+                  "pr": "", "pr_title": "", "pr_body": "", "questions": [], "remaining": [],
                   "findings": [], "commit_message": ""}
         result.update(changes)
         return result
@@ -1049,6 +1067,9 @@ class RotationTests(unittest.TestCase):
         self.assertCountEqual(properties[field]["enum"], choices)
         if not review:
             self.assertEqual(properties["commit_message"]["type"], "string")
+            for name in ("pr_title", "pr_body"):
+                self.assertEqual(properties[name]["type"], "string")
+                self.assertIn(name, schema["required"])
             decision = properties["findings"]["items"]["properties"]["decision"]
             self.assertCountEqual(decision["enum"], ["fixed", "rejected"])
 
@@ -1136,8 +1157,9 @@ class RotationTests(unittest.TestCase):
                 self.wait("sandbox-rules-" + language)
                 prompt = self.invocations()[-1]["prompt"]
                 self.assertIn(heading, prompt)
-                for text in ("git commit", "git push", "gh pr create", "commit_message", "worktree"):
+                for text in ("git commit", "git push", "commit_message", "pr_title", "pr_body", "worktree"):
                     self.assertIn(text, prompt[prompt.index(heading):])
+                self.assertNotIn("gh pr create", prompt)
                 self.start("sandbox-off-" + language, "--sandbox", "off")
                 output = self.wait("sandbox-off-" + language)
                 self.assert_no_workspace_sandbox(self.invocations()[-1])
@@ -1149,6 +1171,246 @@ class RotationTests(unittest.TestCase):
         self.wait("sandbox-default-off")
         self.assert_no_workspace_sandbox(self.invocations()[-1])
         self.assertIn("sandbox off", self.cli("status", "sandbox-default-off"))
+
+    def test_pr_supervisor_creates_from_result_and_wait_uses_receipt_url(self):
+        self.configure(language="en")
+        self.env["GH_REPO"] = "unrelated/host-repository"
+        result = self.work_result(pr_title='Publish the worker\'s "complete" change',
+                                  pr_body="\nDescribe the whole task.\n\nKeep this exact body.\n",
+                                  pr="https://example.test/pull/stale-model-url")
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "implemented\n"},
+            "commit_files": ["tracked.txt"], "push": True, "reply": result}])
+        self.start("pr-create")
+        output = self.wait("pr-create")
+        state = self.state("pr-create")
+        self.assertEqual(state["outcome"], "completed")
+        self.assert_output_schema(self.invocations()[0], "pr-create")
+        self.assertEqual([event["argv"][:2] for event in self.gh_invocations()],
+                         [["repo", "view"], ["pr", "list"], ["pr", "create"]])
+        origin = str(self.root / "origin.git")
+        self.assertEqual(self.gh_invocations()[0]["argv"][2], origin)
+        for event in self.gh_invocations()[1:]:
+            self.assertEqual(event["argv"][event["argv"].index("--repo") + 1], origin)
+        create, = self.gh_writes()
+        args = create["argv"]
+        self.assertEqual(args[args.index("--base") + 1], "main")
+        self.assertEqual(args[args.index("--head") + 1], state["branch"])
+        self.assertEqual(args[args.index("--title") + 1], result["pr_title"])
+        self.assertEqual(create["body"], result["pr_body"])
+        publication = state["publish"]
+        self.assertEqual(publication["sha"], "", "Codex owns the ordinary turn's commit")
+        self.assertTrue(publication["pushed"])
+        self.assertEqual((publication["action"], publication["error"]), ("created", ""))
+        self.assertIn("== PR created " + publication["pr"], output)
+        self.assertIn("PR: " + publication["pr"], output)
+        self.assertNotIn(result["pr"], output)
+
+    def test_pr_supervisor_fix_round_updates_only_with_a_nonempty_body(self):
+        self.configure(language="en")
+        for body in ("Describe the entire PR after fixing the defect.\n", ""):
+            with self.subTest(body=body):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                slug = "pr-fix-update" if body else "pr-fix-unchanged"
+                before = len(self.gh_writes())
+                decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed the defect."}
+                             for finding in self.review_result()["findings"]]
+                fix_result = self.work_result(pr_title="Describe all completed work", pr_body=body,
+                                              findings=decisions)
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "write_files": {"tracked.txt": "first implementation\n"},
+                     "commit_files": ["tracked.txt"], "push": True,
+                     "reply": self.work_result(pr_title="Implement the whole task", pr_body="Initial PR body.")},
+                    {"mode": "complete", "reply": self.review_result()},
+                    {"mode": "complete", "write_files": {"tracked.txt": "corrected implementation\n"},
+                     "commit_files": ["tracked.txt"], "push": True, "reply": fix_result},
+                    {"mode": "complete", "reply": self.review_result(False)}])
+                self.start(slug, "--review", "--fix-rounds", "1")
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["auto_fix_stop"], "clean")
+                self.assertEqual(len(state["rounds"]), 1)
+                writes = self.gh_writes()[before:]
+                expected = [["pr", "create"], ["pr", "edit"]] if body else [["pr", "create"]]
+                self.assertEqual([event["argv"][:2] for event in writes], expected)
+                self.assertEqual(state["publish"]["action"], "updated" if body else "unchanged")
+                self.assertEqual(state["publish"]["error"], "")
+                if body:
+                    edit = writes[-1]
+                    self.assertIn(state["publish"]["pr"], edit["argv"])
+                    self.assertEqual(edit["argv"][edit["argv"].index("--title") + 1], fix_result["pr_title"])
+                    self.assertEqual(edit["body"], body)
+                    self.assertIn("== PR updated " + state["publish"]["pr"], output)
+                self.assertIn("PR: " + state["publish"]["pr"], output)
+
+    def test_pr_supervisor_edit_failure_keeps_url_and_does_not_fail_the_turn(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": "initial PR implementation\n"},
+             "commit_files": ["tracked.txt"], "push": True,
+             "reply": self.work_result(pr_title="Implement the whole task", pr_body="Initial complete description.")},
+            {"mode": "complete", "write_files": {"tracked.txt": "updated PR implementation\n"},
+             "commit_files": ["tracked.txt"], "push": True,
+             "reply": self.work_result(pr_title="Update the whole task", pr_body="Updated complete description.")}])
+        self.start("pr-edit-error")
+        self.wait("pr-edit-error")
+        url = self.state("pr-edit-error")["publish"]["pr"]
+        self.env["CODEX_FAKE_GH_EDIT_ERROR"] = "1"
+        self.cli("say", "pr-edit-error", "Publish the updated task description")
+        output = self.wait("pr-edit-error")
+        state = self.state("pr-edit-error")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["publish"]["action"], "skipped")
+        self.assertEqual(state["publish"]["pr"], url)
+        self.assertIn("fixture PR edit failed", state["publish"]["error"])
+        self.assertIn("== PR skipped: ", output)
+        self.assertIn("PR: " + url, output)
+        self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
+                         [["pr", "create"], ["pr", "edit"]])
+
+    def test_pr_supervisor_empty_fields_use_commit_subject_and_result_summary(self):
+        self.configure(language="en")
+        result = self.work_result(summary="The complete task summary.\nPreserve its final newline.\n")
+        subject = "Use the last commit subject as the PR title"
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "fallback implementation\n"},
+            "commit_files": ["tracked.txt"], "commit_subject": subject, "push": True, "reply": result}])
+        self.start("pr-fallback")
+        self.wait("pr-fallback")
+        create, = self.gh_writes()
+        self.assertEqual(create["argv"][create["argv"].index("--title") + 1], subject)
+        self.assertEqual(create["body"], result["summary"])
+
+    def test_pr_supervisor_requires_origin_branch_to_match_local_head(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": "not pushed yet\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result(pr_body="Do not publish yet.")},
+            {"mode": "complete", "push": True, "reply": self.work_result()},
+            {"mode": "complete", "write_files": {"tracked.txt": "ahead of origin\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result(pr_body="Still not pushed.")}])
+        self.start("pr-not-pushed")
+        output = self.wait("pr-not-pushed")
+        publication = self.state("pr-not-pushed")["publish"]
+        self.assertEqual(publication["action"], "skipped")
+        self.assertFalse(publication["pushed"])
+        self.assertIn("not pushed", publication["error"])
+        self.assertIn("== PR skipped: not pushed", output)
+        self.assertFalse(self.gh_invocations(), "missing origin branch must stop before gh")
+        self.cli("say", "pr-not-pushed", "Push the completed branch")
+        self.wait("pr-not-pushed")
+        self.assertEqual(self.state("pr-not-pushed")["publish"]["action"], "created")
+        calls = list(self.gh_invocations())
+        self.cli("say", "pr-not-pushed", "Make another local change")
+        output = self.wait("pr-not-pushed")
+        state = self.state("pr-not-pushed")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["publish"]["action"], "skipped")
+        self.assertIn("not pushed", state["publish"]["error"])
+        self.assertIn("== PR skipped: not pushed", output)
+        self.assertEqual(self.gh_invocations(), calls, "a stale remote SHA must stop before gh")
+
+    def test_pr_supervisor_missing_gh_skips_without_changing_turn_outcome(self):
+        self.configure(language="en")
+        # Restrict PATH so the host's installed gh can never run in this case.
+        bin_dir = self.root / "without-gh"
+        bin_dir.mkdir()
+        real_git = shutil.which("git", path=self.env["PATH"])
+        self.assertIsNotNone(real_git)
+        (bin_dir / "git").symlink_to(real_git)
+        self.env["PATH"] = str(bin_dir)
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "pushed without gh\n"},
+            "commit_files": ["tracked.txt"], "push": True, "reply": self.work_result()}])
+        self.start("pr-no-gh")
+        output = self.wait("pr-no-gh")
+        state = self.state("pr-no-gh")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["action"], "skipped")
+        self.assertIn("gh unavailable", state["publish"]["error"])
+        self.assertIn("== PR skipped: gh unavailable", output)
+        self.assertFalse(self.gh_invocations())
+
+    def test_pr_supervisor_inaccessible_repo_skips_without_changing_turn_outcome(self):
+        self.configure(language="en")
+        self.env["CODEX_FAKE_GH_REPO_ERROR"] = "1"
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "pushed to inaccessible remote\n"},
+            "commit_files": ["tracked.txt"], "push": True, "reply": self.work_result()}])
+        self.start("pr-no-repo")
+        output = self.wait("pr-no-repo")
+        state = self.state("pr-no-repo")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["action"], "skipped")
+        self.assertIn("gh repo view", state["publish"]["error"])
+        self.assertIn("fixture remote is not accessible", state["publish"]["error"])
+        self.assertIn("== PR skipped: ", output)
+        self.assertEqual([event["argv"][:2] for event in self.gh_invocations()], [["repo", "view"]])
+
+    def test_pr_supervisor_closed_and_merged_prs_are_preserved(self):
+        self.configure(language="en")
+        for pr_state in ("CLOSED", "MERGED"):
+            with self.subTest(pr_state=pr_state):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                slug = "pr-" + pr_state.lower()
+                url = "https://example.test/pull/" + pr_state.lower()
+                Path(self.env["CODEX_FAKE_GH_STATE"]).write_text(json.dumps({
+                    "codex/" + slug: {"url": url, "state": pr_state}}))
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {"tracked.txt": pr_state + " implementation\n"},
+                    "commit_files": ["tracked.txt"], "push": True,
+                    "reply": self.work_result(pr_title="Do not reopen this PR", pr_body="Do not edit this PR.")}])
+                self.start(slug)
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "completed")
+                self.assertEqual((state["publish"]["pr"], state["publish"]["action"]), (url, "skipped"))
+                self.assertEqual(state["publish"]["error"], "pr " + pr_state.lower())
+                self.assertIn("== PR skipped: pr " + pr_state.lower(), output)
+                self.assertIn("PR: " + url, output)
+                self.assertFalse(self.gh_writes())
+
+    def test_pr_supervisor_successful_wrapup_publishes_in_both_sandbox_modes(self):
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
+        for sandbox in ("off", "workspace"):
+            with self.subTest(sandbox=sandbox):
+                self.configure(language="en", sandbox=sandbox)
+                (self.home / "exec-count").unlink(missing_ok=True)
+                before = len(self.gh_writes())
+                result = self.work_result("partial", pr_title="Publish the saved checkpoint",
+                                          pr_body="Describe the whole PR at the saved checkpoint.\n",
+                                          commit_message="Save the bounded checkpoint" if sandbox == "workspace" else "")
+                wrapup = {"mode": "complete", "write_files": {"tracked.txt": "saved checkpoint\n"},
+                          "reply": result}
+                if sandbox == "off":
+                    wrapup.update(commit_files=["tracked.txt"], push=True)
+                self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}, wrapup])
+                slug = "pr-wrapup-" + sandbox
+                self.start(slug, "--max-minutes", "10")
+                output = self.wait(slug, timeout=15)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "budget_exhausted")
+                self.assertEqual(state["wrapup"]["outcome"], "completed")
+                self.assertEqual(state["result"], result)
+                self.assertEqual(state["publish"]["action"], "created")
+                self.assertEqual(state["publish"]["error"], "")
+                create, = self.gh_writes()[before:]
+                self.assertEqual(create["argv"][:2], ["pr", "create"])
+                self.assertEqual(create["argv"][create["argv"].index("--title") + 1], result["pr_title"])
+                self.assertEqual(create["body"], result["pr_body"])
+                self.assertIn("== PR created " + state["publish"]["pr"], output)
+
+    def test_pr_rules_delegate_publication_and_forbid_description_attribution(self):
+        rules = (SKILL / "references" / "rules.md").read_text()
+        self.assertIn("push the branch; do not open or edit PRs yourself", rules)
+        self.assertIn("pr_title", rules)
+        self.assertIn("pr_body", rules)
+        attribution = next(line for line in rules.splitlines() if "Co-Authored-By" in line)
+        self.assertIn("Generated with", attribution)
+        self.assertIn("pr_body", attribution)
+        self.assertNotIn("gh", rules)
 
     def test_workspace_rotation_and_review_fallback_keep_the_sandbox_and_scout_stays_read_only(self):
         self.configure(language="en", sandbox="workspace", writable_dirs=[str(self.root / "cache")])
@@ -1210,11 +1472,12 @@ class RotationTests(unittest.TestCase):
         output = self.wait("sandbox-publish")
         state = self.state("sandbox-publish")
         publish = state["publish"]
-        self.assertEqual(set(publish), {"at", "sha", "pushed", "pr", "error"})
+        self.assertEqual(set(publish), {"at", "sha", "pushed", "pr", "action", "error"})
         self.assertGreater(publish["at"], 0)
         self.assertEqual(publish["sha"], self.git("rev-parse", state["branch"]))
         self.assertTrue(publish["pushed"])
         self.assertEqual(publish["error"], "")
+        self.assertEqual(publish["action"], "created")
         self.assertEqual(publish["pr"], "https://example.test/pull/1")
         self.assertEqual(self.git("log", "-1", "--format=%B", state["branch"]), message)
         self.assertEqual(self.git("--git-dir", str(self.root / "origin.git"), "rev-parse", state["branch"]),
@@ -1228,7 +1491,8 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(args[args.index("--base") + 1], "main")
         self.assertEqual(args[args.index("--head") + 1], state["branch"])
         self.assertEqual(args[args.index("--title") + 1], subject)
-        self.assertEqual(creates[0]["body"], message.partition("\n")[2].strip())
+        self.assertEqual(creates[0]["body"], self.work_result()["summary"])
+        self.assertIn("== PR created " + publish["pr"], output)
         first_sha = publish["sha"]
         self.cli("say", "sandbox-publish", "Make another change")
         self.wait("sandbox-publish")
@@ -1244,7 +1508,7 @@ class RotationTests(unittest.TestCase):
         self.cli("say", "sandbox-publish", "Confirm that no more changes are needed")
         self.wait("sandbox-publish")
         self.assertEqual(self.git("rev-parse", state["branch"]), second_sha)
-        self.assertFalse(self.state("sandbox-publish").get("publish"))
+        self.assertEqual(self.state("sandbox-publish")["publish"]["action"], "unchanged")
         self.assertEqual(len([event for event in self.gh_invocations()
                               if event["argv"][:2] == ["pr", "create"]]), 1)
 
@@ -1286,7 +1550,8 @@ class RotationTests(unittest.TestCase):
         error = ("commit: filter driver project is configured; the supervisor does not run filters "
                  "on worker-written files — commit this turn manually")
         self.assertEqual(state["outcome"], "completed")
-        self.assertEqual(state["publish"]["error"], error)
+        self.assertIn(error, state["publish"]["error"])
+        self.assertIn("not pushed", state["publish"]["error"])
         self.assertEqual(state["publish"]["sha"], "")
         self.assertFalse(state["publish"]["pushed"])
         self.assertEqual(state["publish"]["pr"], "")
@@ -1439,7 +1704,8 @@ class RotationTests(unittest.TestCase):
              "reply": self.work_result(commit_message="Save work without an origin")}])
         self.start("sandbox-no-origin")
         self.wait("sandbox-no-origin")
-        self.assertFalse(self.state("sandbox-no-origin").get("publish"))
+        self.assertEqual(self.state("sandbox-no-origin")["publish"]["action"], "skipped")
+        self.assertIn("not pushed", self.state("sandbox-no-origin")["publish"]["error"])
         self.git("remote", "remove", "origin")
         self.cli("say", "sandbox-no-origin", "Save another change")
         output = self.wait("sandbox-no-origin")
@@ -2191,11 +2457,13 @@ class RotationTests(unittest.TestCase):
                     len(b'{"type":"turn.completed"}\n').to_bytes(4, sys.byteorder))), \
                 mock.patch.object(worker, "rollout_path", return_value=rollout), \
                 mock.patch.object(worker, "rollout_limits", side_effect=read_limits), \
+                mock.patch.object(worker, "publish_pr") as publish_pr, \
                 mock.patch.object(worker, "wrapup_turn", side_effect=AssertionError("unexpected wrap-up")) as wrapup:
             worker.run_turn(st, {"enabled": False, "accounts": [account]}, "finish the fix", None,
                             False, lambda: False, lambda seconds: None, new_turn=False)
         self.assertEqual(observed, ["agent_message", "final quota", "completion fragment", "completion fragment"])
         popen.assert_called_once()
+        publish_pr.assert_called_once_with(st, mock.ANY)
         wrapup.assert_not_called()
         self.assertEqual(st["weekly_used_percent"], 6)
         self.assertEqual(st["outcome"], "budget_exhausted")
@@ -2238,7 +2506,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(publish["pr"], "https://example.test/pull/1")
         self.assertEqual(publish["error"], "")
         self.assertEqual([event["argv"][:2] for event in self.gh_invocations()],
-                         [["pr", "list"], ["pr", "create"]])
+                         [["repo", "view"], ["pr", "list"], ["pr", "create"]])
         self.assertIn("== committed " + publish["sha"] + " " + json.dumps(subject) +
                       "; pushed; PR " + publish["pr"], output)
         self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)
@@ -2293,7 +2561,8 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(publish["pr"], "https://example.test/pull/1")
         self.assertEqual(publish["error"], "")
         self.assertEqual([event["argv"][:2] for event in self.gh_invocations()],
-                         [["pr", "list"], ["pr", "create"], ["pr", "list"]])
+                         [["repo", "view"], ["pr", "list"], ["pr", "create"],
+                          ["repo", "view"], ["pr", "list"]])
         self.assertIn("== committed " + publish["sha"] + " " + json.dumps(fix_subject) +
                       "; pushed; PR " + publish["pr"], output)
         self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)

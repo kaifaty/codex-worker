@@ -56,8 +56,9 @@ Do not touch: <what is outside the task>.
 ```
 
 `start` appends the standing rules from [rules.md](references/rules.md) (own worktree, focused checks,
-stop after two failed attempts, push and open a PR but never merge, a typed JSON result); don't repeat
-them in the brief.
+stop after two failed attempts, push the branch, a typed JSON result); don't repeat them in the brief.
+Codex supplies `pr_title` and the whole PR's `pr_body`; the supervisor creates or updates the PR in
+every mode and records a receipt for `wait`. An empty body leaves an existing PR unchanged. Claude merges.
 
 One task per brief; split independent parts into several tasks (stacked branches with `--base` when one
 builds on another). Before starting, split any task that promises more than about 60 minutes of work.
