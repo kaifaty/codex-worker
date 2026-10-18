@@ -925,11 +925,11 @@ def rollout_path(home, thread):
     return max(paths, key=lambda p: p.stat().st_mtime) if paths else None
 
 
-def rollout_limits(path, on_limits=None):
-    """Replay quota samples when accounting; otherwise read only the latest tail."""
+def rollout_limits(path, on_limits=None, offset=0):
+    """Replay this exec's quota samples; otherwise read only the latest tail."""
     with path.open("rb") as f:
         size = f.seek(0, os.SEEK_END)
-        f.seek(0 if on_limits else max(0, size - 262144))
+        f.seek(offset if on_limits else max(0, size - 262144))
         lines = f.read().splitlines()
     limits = None
     for line in lines if on_limits else reversed(lines):
@@ -1615,9 +1615,6 @@ def exclude_auth_account(st, account, info):
 
 def task_snapshots(st, cfg, stopped, new_turn=False):
     infos = snapshots(cfg, stopped, prepare=True)
-    for info in infos:
-        if info.get("logged_in") and info["name"] not in st.get("weekly_marks", {}):
-            record_weekly_usage(st, info["name"], info.get("limits", {}))
     if cfg.get("use_reset_credits", False):
         for info in infos:
             if (stopped() or not info.get("logged_in") or info.get("duplicate")
@@ -1785,8 +1782,8 @@ def weekly_used(limits):
     return None
 
 
-def record_weekly_usage(st, account, limits):
-    """Charge only advances of an account's high-water mark in its weekly window."""
+def record_weekly_usage(st, account, limits, seed=False):
+    """Advance an account's weekly high-water mark; exec seeds are free."""
     used = weekly_used(limits)
     if used is None:
         return 0
@@ -1806,7 +1803,7 @@ def record_weekly_usage(st, account, limits):
         return 0
     if mark["reset"] is None:
         mark["reset"] = reset
-    delta = max(0, used - mark["used"])
+    delta = 0 if seed else max(0, used - mark["used"])
     mark["used"] = max(used, mark["used"])
     st["weekly_used_percent"] = st.get("weekly_used_percent", 0) + delta
     return delta
@@ -1957,7 +1954,7 @@ def wrapup_prompt(st, reason, cfg):
 
 
 def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
-            control=None, wrapup=False, wrapup_thread=None):
+            control=None, wrapup=False, wrapup_thread=None, quota_snapshot=None):
     """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
     d = TASKS / st["slug"]
     prepare_home(account)
@@ -1999,9 +1996,15 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     usage_before = rollout_usage(path)[1] if telemetry is not None else None
     usage_offset = previous_size
     weekly_started = st.get("weekly_used_percent", 0)
+    weekly_seeded = weekly_used(quota_snapshot or {}) is not None
+    if weekly_seeded:
+        record_weekly_usage(st, account["name"], quota_snapshot, seed=True)
 
     def record_limits(limits):
-        return record_weekly_usage(st, account["name"], limits)
+        nonlocal weekly_seeded
+        delta = record_weekly_usage(st, account["name"], limits, seed=not weekly_seeded)
+        weekly_seeded = weekly_seeded or weekly_used(limits) is not None
+        return delta
 
     next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
     next_poll = 0.0
@@ -2138,7 +2141,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                             size = path.stat().st_size
                             if size == previous_size:
                                 continue
-                            limits = rollout_limits(path, record_limits)
+                            limits = rollout_limits(path, record_limits, usage_offset)
                             previous_size = size
                             if limits is not None:
                                 # A completed model turn needs no wrap-up while the CLI exits.
@@ -2178,7 +2181,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                 try:
                     final_path = path or rollout_path(account["home"], thread)
                     if final_path is not None:
-                        rollout_limits(final_path, record_limits)
+                        rollout_limits(final_path, record_limits, usage_offset)
                     if telemetry is not None:
                         telemetry.add_usage(account["name"], thread, usage_before,
                                             final_path, usage_offset,
@@ -2259,6 +2262,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         st.update(auth_excluded=[], auth_excluded_ids=[], auth_transitions=0, auth_failures={})
         st.pop("reset_reconciled", None)
     account = account_named(cfg, st["account"])
+    quota_snapshot = None
     if cfg["enabled"]:
         infos = task_snapshots(st, cfg, stopped, new_turn=new_turn)
         warn_weekly_headroom(st, cfg, infos)
@@ -2285,6 +2289,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             visited.add(st["account"])
             st["thread"] = ""
         account = account_named(cfg, chosen["name"])
+        quota_snapshot = chosen.get("limits")
         if not reviewing:
             st["account"] = account["name"]
     if reviewing:
@@ -2313,7 +2318,9 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         st.pop("reset_reconciled", None)
         visited.add(account["name"])
         review_start = len(st.get("reviews", []))
-        result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control)
+        result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control,
+                                   quota_snapshot=quota_snapshot)
+        quota_snapshot = None
         phase = telemetry_phase(st)
         weekly_exhausted = (result in ("auth", "limit", "failed", "completed")
                             and control.weekly_exhausted(st.get("weekly_used_percent", 0)))
@@ -2356,6 +2363,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             current = next((i for i in infos if i["name"] == account["name"]), {})
             capped = st["auth_transitions"] >= 2 * len(cfg["accounts"])
             if not capped and failures[account["name"]] == 1 and current.get("logged_in") and not exhausted(current, cfg):
+                quota_snapshot = current.get("limits")
                 if not reviewing and st.get("thread"):
                     prompt = auth_resume_prompt(cfg)
                 save(st)
@@ -2379,6 +2387,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             # Fresh quota snapshots start a new rotation cycle, including past accounts.
             visited.clear()
             rotations = 0
+        quota_snapshot = chosen.get("limits")
         if chosen["name"] == account["name"]:
             if not reviewing and st.get("thread"):
                 prompt = reset_resume_prompt(cfg)

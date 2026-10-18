@@ -239,7 +239,7 @@ def execute():
             return 130
         value = fixture()
 
-    def rollout_limits(initial=False):
+    def rollout_limits(initial=False, weekly_used=None):
         if run.get("omit_rollout"):
             return
         current = fixture()
@@ -249,6 +249,8 @@ def execute():
         used_key = "weekly_used_before" if initial else "weekly_used_after"
         if used_key in run:
             raw["primary"] = dict(raw["primary"], usedPercent=run[used_key])
+        if weekly_used is not None:
+            raw["primary"] = dict(raw["primary"], usedPercent=weekly_used)
         trace({"command": "rollout-snapshot", "thread": thread, "primary": raw["primary"]})
         windows = {}
         for name in ("primary", "secondary"):
@@ -308,6 +310,8 @@ def execute():
         if stopped[0]:
             return 130
     rollout_limits(initial=True)
+    for used in run.get("weekly_samples_after_initial", []):
+        rollout_limits(weekly_used=used)
     # Publish the ready fixture before the supervisor starts looking for its rollout.
     emit({"type": "thread.started", "thread_id": thread})
     emit({"type": "turn.started"})
@@ -769,10 +773,17 @@ class RotationTests(unittest.TestCase):
                 "output_tokens": output_tokens, "reasoning_output_tokens": reasoning_output_tokens,
                 "total_tokens": input_tokens + output_tokens}
 
-    def record_weekly_phase_usage(self, worker, st, phase, account, thread, path):
+    def record_weekly_phase_usage(self, worker, st, phase, account, thread, path, seed_first=True):
         before = st.get("weekly_used_percent", 0)
-        worker.rollout_limits(path, on_limits=lambda limits:
-                              worker.record_weekly_usage(st, account, limits))
+        seeded = not seed_first
+
+        def record(limits):
+            nonlocal seeded
+            if worker.weekly_used(limits) is not None:
+                worker.record_weekly_usage(st, account, limits, seed=not seeded)
+                seeded = True
+
+        worker.rollout_limits(path, on_limits=record)
         phase.add_usage(account, thread, None, path, 0,
                         weekly_spent=st.get("weekly_used_percent", 0) - before)
 
@@ -1574,7 +1585,7 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(self.state("weekly-accounts")["weekly_used_percent"], 2)
         path = self.home / "fixture.json"
         account = json.loads(path.read_text())
-        account["primary"]["resetsAt"] = self.reset + 7200
+        account["primary"].update(usedPercent=12, resetsAt=self.reset + 7200)
         path.write_text(json.dumps(account))
         self.cli("review", "weekly-accounts")
         self.wait("weekly-accounts")
@@ -1597,7 +1608,7 @@ class RotationTests(unittest.TestCase):
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "usage_error", "weekly_used_before": 10, "weekly_used_after": 12}])
         self.account(self.other, "B", self.reset + 3600, used=20, runs=[
-            {"mode": "hold", "weekly_used_before": 20, "weekly_used_after": 23.5,
+            {"mode": "hold", "weekly_used_before": 22, "weekly_used_after": 23.5,
              "weekly_update_after": 0.35},
             {"mode": "complete", "reply": self.work_result("partial"),
              "weekly_used_before": 23.5, "weekly_used_after": 24}])
@@ -1754,7 +1765,8 @@ class RotationTests(unittest.TestCase):
                     "primary": {"used_percent": value, "window_minutes": 10080,
                                 "resets_at": self.reset}}}}) + "\n" for value in values))
                 with worker.record_phase(st, "work", lambda: False) as phase:
-                    self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path)
+                    self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path,
+                                                   seed_first=False)
                     phase.finish(outcome="completed")
                 self.assertEqual(st["weekly_used_percent"], 7)
                 self.assertEqual(st["weekly_marks"]["main"], {"reset": self.reset, "used": 17})
@@ -1815,6 +1827,106 @@ class RotationTests(unittest.TestCase):
         self.assertEqual([row["weekly_spent"] for row in rows], [4])
         report = json.loads(self.cli("report", "--slug", "weekly-snapshot-seed", "--json"))
         self.assertEqual(report["tasks"][0]["weekly_used_percent"], state["weekly_used_percent"])
+
+    def weekly_exec_gap_scenario(self, snapshots):
+        if snapshots:
+            self.configure(language="en")
+        else:
+            (self.home / "codex-worker.json").write_text(json.dumps({"language": "en"}))
+        slug = "weekly-gap-snapshot" if snapshots else "weekly-gap-first-sample"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 10, "weekly_used_after": 12,
+             "final_usage_after_completion": True},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 20, "weekly_samples_after_initial": [12],
+             "weekly_used_after": 21, "final_usage_after_completion": True}])
+        self.start(slug, "--max-weekly", "5")
+        self.wait(slug)
+        self.assertEqual(self.state(slug)["weekly_used_percent"], 2)
+        path = self.home / "fixture.json"
+        fixture = json.loads(path.read_text())
+        fixture["primary"]["usedPercent"] = 20
+        path.write_text(json.dumps(fixture))
+        self.cli("say", slug, "Continue after other tasks used the account")
+        self.wait(slug)
+        state = self.state(slug)
+        self.assertEqual(state["weekly_used_percent"], 3)
+        self.assertEqual(state["weekly_marks"]["main"], {"reset": self.reset, "used": 21})
+        self.assertEqual(state["outcome"], "completed")
+        self.assertNotIn("turn_stop", state)
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertTrue(self.invocations()[1]["resume"])
+        self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
+        self.until(lambda: len(self.telemetry_journal()) == 4)
+        self.assertEqual([row["weekly_spent"] for row in self.phase_telemetry_journal()], [2, 1])
+        task = json.loads(self.cli("report", "--slug", slug, "--json"))["tasks"][0]
+        self.assertEqual(task["weekly_used_percent"], state["weekly_used_percent"])
+        quota_calls = [event for event in self.trace() if event.get("command") == "quota-snapshot"]
+        self.assertEqual(len(quota_calls), 4 if snapshots else 0,
+                         "seeding must reuse account-selection snapshots, without another quota RPC")
+        if snapshots:
+            self.assertEqual([event["primary"]["usedPercent"] for event in quota_calls
+                              if event["home"] == str(self.home)], [10, 20])
+        second_thread = self.invocations()[1]["thread"]
+        self.assertEqual([event["primary"]["usedPercent"] for event in self.trace()
+                          if event.get("command") == "rollout-snapshot"
+                          and event.get("thread") == second_thread], [10, 12, 20, 12, 21])
+
+    def test_weekly_marks_reseed_exec_from_selection_snapshot_without_charging_pause(self):
+        self.weekly_exec_gap_scenario(snapshots=True)
+
+    def test_weekly_marks_reseed_exec_from_first_fresh_sample_without_charging_pause(self):
+        self.weekly_exec_gap_scenario(snapshots=False)
+
+    def test_weekly_marks_reseed_same_account_auth_retry_from_fresh_snapshot(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "auth_error", "weekly_used_before": 12, "used_after": 20},
+            {"mode": "complete", "reply": self.work_result(),
+             "weekly_used_before": 20, "weekly_samples_after_initial": [12],
+             "weekly_used_after": 21, "final_usage_after_completion": True}])
+        self.start("weekly-auth-reseed", "--max-weekly", "5")
+        self.wait("weekly-auth-reseed")
+        state = self.state("weekly-auth-reseed")
+        self.assertEqual(state["weekly_used_percent"], 3)
+        self.assertEqual(state["outcome"], "completed")
+        self.assertNotIn("turn_stop", state)
+        self.assertFalse(state["rotations"])
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertTrue(self.invocations()[1]["resume"])
+        self.until(lambda: len(self.telemetry_journal()) == 2)
+        self.assertEqual(self.phase_telemetry_journal()[0]["weekly_spent"], 3)
+        self.assertEqual([entry["weekly_spent"] for entry in
+                          self.phase_telemetry_journal()[0]["usage"]], [2, 1])
+        quota_calls = [event for event in self.trace() if event.get("command") == "quota-snapshot"]
+        self.assertEqual(len(quota_calls), 4)
+        self.assertEqual([event["primary"]["usedPercent"] for event in quota_calls
+                          if event["home"] == str(self.home)], [10, 20])
+        task = json.loads(self.cli("report", "--slug", "weekly-auth-reseed", "--json"))["tasks"][0]
+        self.assertEqual(task["weekly_used_percent"], state["weekly_used_percent"])
+
+    def test_weekly_marks_count_growth_on_both_sides_of_reset_within_exec(self):
+        worker = self.worker()
+        slug = "weekly-reset-inside-exec"
+        (worker.TASKS / slug).mkdir(parents=True)
+        st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo),
+              "created": time.time(), "account": "main", "turns": 1}
+        samples = [(90, self.reset), (92, self.reset), (1, self.reset + 604800),
+                   (3, self.reset + 604800), (95, self.reset)]
+        path = self.root / "reset-inside-exec.jsonl"
+        path.write_text("".join(json.dumps({"type": "event_msg", "payload": {
+            "type": "token_count", "rate_limits": {"primary": {
+                "used_percent": used, "window_minutes": 10080, "resets_at": reset}}}}) + "\n"
+            for used, reset in samples))
+        with worker.record_phase(st, "work", lambda: False) as phase:
+            self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path)
+            phase.finish(outcome="completed")
+        self.assertEqual(st["weekly_used_percent"], 4)
+        self.assertEqual(st["weekly_marks"]["main"], {"reset": self.reset + 604800, "used": 3})
+        self.assertEqual(self.phase_telemetry_journal()[0]["weekly_spent"], 4)
+        task = json.loads(self.cli("report", "--slug", slug, "--json"))["tasks"][0]
+        self.assertEqual(task["weekly_used_percent"], 4)
 
     def test_weekly_budget_counts_new_window_before_automatic_review(self):
         (self.home / "codex-worker.json").write_text(json.dumps({"language": "en"}))
@@ -2025,7 +2137,7 @@ class RotationTests(unittest.TestCase):
 
         read_rollout_limits = worker.rollout_limits
 
-        def read_limits(path, on_limits=None):
+        def read_limits(path, on_limits=None, offset=0):
             self.assertIs(path, rollout)
             if observed == ["agent_message"]:
                 # Completion precedes the final quota, but remains unread.
@@ -2034,7 +2146,7 @@ class RotationTests(unittest.TestCase):
                 with rollout.open("a") as stream:
                     stream.write(quota(16))
                 observed.append("final quota")
-            return read_rollout_limits(path, on_limits=on_limits)
+            return read_rollout_limits(path, on_limits=on_limits, offset=offset)
 
         with mock.patch.object(worker, "prepare_home"), \
                 mock.patch.object(worker, "terminate"), \
@@ -7451,7 +7563,7 @@ with open(sys.argv[1], "a+") as journal:
                     searches.append(clock[0])
                     return cached_rollout if resumed or clock[0] >= 11 else None
 
-                def read_limits(path, on_limits=None):
+                def read_limits(path, on_limits=None, offset=0):
                     self.assertIs(path, cached_rollout)
                     reads.append(clock[0])
                     limits = worker.normalize_limits({"primary": {"usedPercent": 10,

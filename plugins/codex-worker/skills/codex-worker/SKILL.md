@@ -109,8 +109,11 @@ the same thread.
 
 Use `--max-weekly P` (greater than 0 and at most 100) to cap the task in percentage points of the weekly
 limit. The task accumulates usage across follow-ups, work, reviews, angles, fix rounds, wrap-ups, and
-accounts. Each account keeps a weekly high-water mark: repeated or lower samples add zero; a reset
-timestamp advancing by more than an hour starts a new mark without charging the reset sample.
+accounts. Each exec seeds its account's high-water mark without charge from the greater of the saved
+mark and a fresh baseline in the same window: the account-selection snapshot, or its first weekly
+sample when no snapshot is available. Gaps between execs are excluded. Repeated or lower samples add
+zero; a reset timestamp advancing by more than an hour starts a new mark without charging the reset sample.
+The budget counts growth of the account's weekly percentage during task phases; parallel tasks on one account count against each other, so allow extra budget for parallel work.
 The default is `max_task_weekly_percent`, or no weekly cap when
 unset. An exhausted task rejects `say` and `review` until `--max-weekly P` raises its budget above the
 measured spend. Exhaustion wraps up, runs the saved check, and skips further automatic phases. `status`
