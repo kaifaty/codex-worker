@@ -2086,7 +2086,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                             previous_size = size
                             if limits is not None:
                                 # A completed model turn needs no wrap-up while the CLI exits.
-                                # Its final usage is enforced at the next phase boundary.
+                                # The supervisor checks its final usage after monitor returns.
                                 if control.weekly is not None and not turn_completed:
                                     if weekly_before is None:
                                         first, _ = rollout_usage(path, usage_offset)
@@ -2259,8 +2259,10 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         review_start = len(st.get("reviews", []))
         result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control)
         phase = telemetry_phase(st)
-        if result in ("auth", "limit") and control.weekly_exhausted(
-                st.get("weekly_used_percent", 0) + (phase.weekly_spent() if phase else 0)):
+        weekly_exhausted = (result in ("auth", "limit", "failed", "completed")
+                            and control.weekly_exhausted(
+                                st.get("weekly_used_percent", 0) + (phase.weekly_spent() if phase else 0)))
+        if weekly_exhausted and result != "completed":
             result = "budget_exhausted"
         if result in ("auth", "limit") and control.expired(time.monotonic()):
             result = "budget_exhausted"
@@ -2268,6 +2270,14 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             st.setdefault("auth_failures", {})[account["name"]] = 0
         if stopped():
             st["outcome"] = stop_outcome(st, stopped)
+            break
+        if weekly_exhausted and result == "completed":
+            # The model has finished: keep its result and account the phase once,
+            # then record the budget stop even when no automatic phase follows.
+            st["outcome"] = result
+            if phase is not None:
+                phase.finish(outcome=result)
+            stop_at_weekly_budget(st)
             break
         if result in ("budget_exhausted", "stuck"):
             reason = dict(control.reason, active_seconds=round(control.elapsed, 3))

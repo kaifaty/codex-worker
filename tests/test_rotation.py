@@ -1636,6 +1636,74 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(state["rotations"])
         self.assertFalse(self.review_invocations())
 
+    def test_final_weekly_budget_after_failed_exec_with_rotation_disabled_wraps_and_checks(self):
+        (self.home / "codex-worker.json").write_text(json.dumps({"language": "en"}))
+        result = self.work_result("partial", summary="Saved the quota-error checkpoint.",
+                                  remaining=["Continue after increasing the task budget."])
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "usage_error", "weekly_used_before": 10, "weekly_used_after": 16},
+            {"mode": "complete", "reply": result,
+             "weekly_used_before": 16, "weekly_used_after": 16}])
+        self.start("weekly-failed-exec", "--max-weekly", "5", "--review", "--check", "true")
+        output = self.wait("weekly-failed-exec", timeout=12)
+        state = self.state("weekly-failed-exec")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["turn_stop"]["outcome"], "budget_exhausted")
+        self.assertEqual((state["turn_stop"]["weekly"], state["turn_stop"]["spent"]), (5, 6))
+        self.assertEqual(state["weekly_used_percent"], 6)
+        self.assertEqual(state["result"], result)
+        self.assertEqual([(check["cmd"], check["outcome"]) for check in state["checks"]],
+                         [("true", "passed")])
+        self.assertEqual(state["review_skipped"], "budget_exhausted")
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertTrue(executions[1]["resume"])
+        self.assertEqual(executions[0]["thread"], executions[1]["thread"])
+        self.assertTrue(executions[1]["prompt"].startswith("The task's weekly limit budget is exhausted."))
+        self.assertFalse(self.review_invocations())
+        self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
+        self.assertFalse(state["rotations"])
+        self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)
+        self.until(lambda: len(self.telemetry_journal()) == 4)
+        self.assertEqual([(row["phase"], row["outcome"]) for row in self.phase_telemetry_journal()],
+                         [("work", "budget_exhausted"), ("wrapup", "completed"), ("check", "passed")])
+        turn = next(row for row in self.telemetry_journal() if row["phase"] == "turn")
+        self.assertEqual((turn["max_task_weekly_percent"], turn["budget_stop"]), (5, "weekly"))
+        task = json.loads(self.cli("report", "--slug", "weekly-failed-exec", "--json"))["tasks"][0]
+        self.assertEqual((task["outcome"], task["max_task_weekly_percent"], task["budget_stop"]),
+                         ("budget_exhausted", 5, "weekly"))
+        self.assertEqual(task["weekly_used_percent"], 6)
+
+    def test_final_weekly_budget_after_completed_exec_preserves_result_and_checks_without_wrapup(self):
+        (self.home / "codex-worker.json").write_text(json.dumps({"language": "en"}))
+        result = self.work_result(summary="Finished before the final quota sample was flushed.")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": result, "weekly_used_before": 10,
+             "weekly_used_after": 16, "final_usage_after_completion": True}])
+        self.start("weekly-completed-exec", "--max-weekly", "5", "--check", "true")
+        output = self.wait("weekly-completed-exec", timeout=12)
+        state = self.state("weekly-completed-exec")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["turn_stop"]["outcome"], "budget_exhausted")
+        self.assertEqual((state["turn_stop"]["weekly"], state["turn_stop"]["spent"]), (5, 6))
+        self.assertEqual(state["weekly_used_percent"], 6)
+        self.assertEqual(state["result"], result)
+        self.assertEqual([(check["cmd"], check["outcome"]) for check in state["checks"]],
+                         [("true", "passed")])
+        self.assertEqual(len(self.invocations()), 1, "a completed turn needs no wrap-up execution")
+        self.assertFalse(self.review_invocations())
+        self.assertIn("== turn stopped: weekly budget 5% exhausted (spent 6%)", output)
+        self.assertIn(result["summary"], output)
+        self.until(lambda: len(self.telemetry_journal()) == 3)
+        self.assertEqual([(row["phase"], row["outcome"]) for row in self.phase_telemetry_journal()],
+                         [("work", "completed"), ("check", "passed")])
+        turn = next(row for row in self.telemetry_journal() if row["phase"] == "turn")
+        self.assertEqual((turn["max_task_weekly_percent"], turn["budget_stop"]), (5, "weekly"))
+        task = json.loads(self.cli("report", "--slug", "weekly-completed-exec", "--json"))["tasks"][0]
+        self.assertEqual((task["outcome"], task["max_task_weekly_percent"], task["budget_stop"]),
+                         ("budget_exhausted", 5, "weekly"))
+        self.assertEqual(task["weekly_used_percent"], 6)
+
     def test_weekly_budget_after_review_stops_fix_rounds_and_later_angles(self):
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[
