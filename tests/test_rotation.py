@@ -3961,6 +3961,10 @@ class RotationTests(unittest.TestCase):
         self.assertEqual([entry["outcome"] for entry in state["review_result"]["angles"]],
                          ["refused", "refused"])
         self.assertIn("review refused", output)
+        report = json.loads(self.cli("report", "--slug", "angles-all-refused", "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"refused": 1})
+        self.assertEqual(report["summary"]["reviews"]["total"], 0)
+        self.assertEqual(report["summary"]["fix_rounds_to_clean"], {})
 
     def test_review_selects_available_account_and_preserves_working_thread(self):
         self.configure()
@@ -6514,6 +6518,25 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         self.assertEqual(report["tasks"][0]["active_minutes"], 1)
         self.assertIsNone(report["tasks"][0]["last_verdict"])
         self.assertEqual(report["summary"]["fix_rounds_to_clean"], {"0": 1})
+
+    def test_report_falls_back_to_newer_stages_when_the_turn_result_is_missing(self):
+        now = time.time()
+        # A busy journal lost turn 2's final row after saving its failed stage.
+        stages = [{"phase": "work", "turn": 1, "outcome": "completed", "result_status": "done"},
+                  {"phase": "turn", "turn": 1, "outcome": "completed", "result_status": "done",
+                   "verdict": None},
+                  {"phase": "work", "turn": 2, "outcome": "failed", "result_status": None}]
+        rows = [dict(stage, v=1, at=now - 10 + index, repo="repo", slug="report-lost-final",
+                     created=now - 100, kind="work", round=0) for index, stage in enumerate(stages)]
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"failed": 1})
+        self.assertEqual(report["summary"]["result_status"], {})
+        self.assertEqual(report["summary"]["turns"], 2)
+        self.assertEqual(report["tasks"][0]["outcome"], "failed")
+        self.assertIsNone(report["tasks"][0]["result_status"])
+        self.assertIsNone(report["tasks"][0]["last_verdict"])
 
     def test_report_wrapup_preserves_parent_outcome_unless_stopped_or_refused(self):
         now = time.time()
