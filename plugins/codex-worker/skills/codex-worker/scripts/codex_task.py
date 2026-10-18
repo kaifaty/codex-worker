@@ -8,6 +8,7 @@
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
+  codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]
   codex_task.py stop <slug>                           interrupt without rotating
   codex_task.py clean <slug> [--keep-branch]          remove worktree, archive all threads
   codex_task.py accounts                             read account limits and login status
@@ -31,6 +32,7 @@ import json
 import math
 import os
 import re
+import runpy
 import selectors
 import shlex
 import shutil
@@ -63,6 +65,9 @@ MINUTE_SECONDS = float(os.environ.get("CODEX_TASK_MINUTE_SECONDS", "60"))
 RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 NOTIFY_PROCESSES = []
+TELEMETRY_PHASES = []
+TOKEN_FIELDS = {"input": "input_tokens", "cached_input": "cached_input_tokens",
+                "output": "output_tokens", "reasoning": "reasoning_output_tokens"}
 GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 REVIEW_ANGLES = {
     "correctness": "Focus on behavior and acceptance criteria (Done when), including regressions and unmet requirements.",
@@ -863,6 +868,179 @@ def rollout_limits(path):
     return None
 
 
+def telemetry_error(st, exc):
+    try:
+        with (TASKS / st["slug"] / "stderr.log").open("a", encoding="utf-8") as errors:
+            errors.write(f"telemetry unavailable: {exc}\n")
+    except OSError:
+        pass
+
+
+def rollout_usage(path, offset=0):
+    """First/last cumulative counters, using the same token_count data as stats."""
+    first = last = None
+    if path is not None:
+        try:
+            with path.open("rb") as stream:
+                stream.seek(offset)
+                for line in stream:
+                    try:
+                        event = json.loads(line)
+                        payload = event.get("payload") or {}
+                        if payload.get("type") != "token_count":
+                            continue
+                        usage = (payload.get("info") or {}).get("total_token_usage")
+                        windows = [window for window in
+                                   ((payload.get("rate_limits") or {}).get(name) for name in ("primary", "secondary"))
+                                   if isinstance(window, dict)]
+                        window = max(windows, key=lambda w: w.get("window_minutes") or 0, default={})
+                        used = window.get("used_percent")
+                        # A short window cannot stand in for the weekly quota.
+                        weekly = used if (window.get("window_minutes") or 0) >= 10080 else None
+                        sample = {"tokens": {key: None for key in TOKEN_FIELDS}, "weekly": None}
+                        for key, field in TOKEN_FIELDS.items():
+                            value = usage.get(field) if isinstance(usage, dict) else None
+                            if type(value) in (int, float) and math.isfinite(value) and value >= 0:
+                                sample["tokens"][key] = value
+                        if type(weekly) in (int, float) and math.isfinite(weekly) and 0 <= weekly <= 100:
+                            sample["weekly"] = weekly
+                        if first is None:
+                            first = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}
+                            last = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}
+                        # Rate-limit-only notifications must not erase cumulative usage.
+                        for key, value in sample["tokens"].items():
+                            if value is not None:
+                                if first["tokens"][key] is None:
+                                    first["tokens"][key] = value
+                                last["tokens"][key] = value
+                        if sample["weekly"] is not None:
+                            if first["weekly"] is None:
+                                first["weekly"] = sample["weekly"]
+                            last["weekly"] = sample["weekly"]
+                    except (ValueError, TypeError, AttributeError, OverflowError):
+                        continue
+        except OSError:
+            pass
+    return first, last
+
+
+def telemetry_phase(st):
+    return next((phase for phase in reversed(TELEMETRY_PHASES) if phase.st is st and not phase.finished), None)
+
+
+class PhaseTelemetry:
+    """Supervisor-only, best-effort accounting. Never persist prompts or output."""
+
+    def __init__(self, st, phase):
+        self.st, self.phase = st, phase
+        self.started, self.clock = time.time(), time.monotonic()
+        self.sleep_seconds = 0.0
+        self.finished = False
+        self.usage = []
+        self.kind = st.get("kind", "work")
+        self.round = len(st.get("rounds", []))
+        self.angle = (st.get("review_angle") or "correctness") if self.kind == "review" else None
+        self.review_start = len(st.get("reviews", []))
+        self.rotation_start = len(st.get("rotations", []))
+        self.check = None
+
+    def add_usage(self, account, thread, before, path, offset):
+        if not thread:
+            return
+        first, last = rollout_usage(path, offset)
+        weekly_before = (first or {}).get("weekly")
+        if weekly_before is None:
+            weekly_before = (before or {}).get("weekly")
+        last = last or before
+        tokens = {}
+        for key in TOKEN_FIELDS:
+            start = (before or {}).get("tokens", {}).get(key)
+            if start is None:
+                start = (first or {}).get("tokens", {}).get(key)
+            end = (last or {}).get("tokens", {}).get(key)
+            if end is None:
+                end = (before or {}).get("tokens", {}).get(key)
+            tokens[key] = (end - start if type(start) in (int, float) and type(end) in (int, float)
+                           and end >= start else None)
+        self.usage.append({"account": account, "thread": thread, "tokens": tokens,
+                           "weekly_used_before": weekly_before,
+                           "weekly_used_after": ((last or {}).get("weekly")
+                                                 if (last or {}).get("weekly") is not None else weekly_before)})
+
+    def finish(self, outcome=None, result=None):
+        if self.finished:
+            return
+        self.finished = True
+        try:
+            st = self.st
+            reviewing = self.kind == "review"
+            reviews = st.get("reviews", [])[self.review_start:]
+            if result is None:
+                result = (reviews[-1].get("result") if reviews else None) if reviewing else st.get("result")
+            if self.phase == "wrapup":
+                result = st.get("wrapup", {}).get("result")
+            elif self.phase in ("check", "base_check"):
+                result = None
+            result = result or {}
+            decisions = result.get("findings", []) if not reviewing else []
+            tokens = {key: (sum(entry["tokens"][key] for entry in self.usage if entry["tokens"][key] is not None)
+                            if any(entry["tokens"][key] is not None for entry in self.usage)
+                            else None) for key in TOKEN_FIELDS}
+            last = self.usage[-1] if self.usage else {}
+            finished = time.time()
+            check = self.check or {}
+            row = {"v": 1, "at": finished, "slug": st["slug"], "repo": Path(st["repo"]).name,
+                   "created": st.get("created"),
+                   "kind": self.kind, "phase": self.phase, "turn": st.get("turns", 0),
+                   "round": self.round, "angle": self.angle,
+                   "account": last.get("account", st.get("review_account") if reviewing else st.get("account")),
+                   "thread": last.get("thread", (reviews[-1].get("thread") if reviews else None)
+                                      if reviewing else st.get("thread")),
+                   "started": self.started, "finished": finished,
+                   "active_seconds": round(max(0, time.monotonic() - self.clock - self.sleep_seconds), 3),
+                   "sleep_seconds": round(self.sleep_seconds, 3),
+                   "outcome": outcome or st.get("outcome"), "result_status": result.get("status"),
+                   "verdict": result.get("verdict"),
+                   "findings": len(result["findings"]) if "findings" in result else None,
+                   "decisions": {key: sum(item.get("decision") == key for item in decisions)
+                                 for key in ("fixed", "rejected")},
+                   "check_outcome": check.get("outcome"), "check_seconds": check.get("seconds"),
+                   "rotations": sum("from" in entry and "to" in entry
+                                    for entry in st.get("rotations", [])[self.rotation_start:]),
+                   "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
+                   "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage}
+            payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+            with (CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
+                # Telemetry is best effort: an unavailable lock must not stall work or stop.
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                if stream.seek(0, os.SEEK_END):
+                    stream.seek(-1, os.SEEK_END)
+                    if stream.read(1) != b"\n":
+                        payload = b"\n" + payload
+                remaining = memoryview(payload)
+                while remaining:
+                    written = stream.write(remaining)
+                    if not written:
+                        raise OSError("short telemetry write")
+                    remaining = remaining[written:]
+        except Exception as exc:
+            telemetry_error(self.st, exc)
+
+
+@contextmanager
+def record_phase(st, phase, stopped):
+    entry = PhaseTelemetry(st, phase)
+    TELEMETRY_PHASES.append(entry)
+    try:
+        yield entry
+    except (Exception, SystemExit):
+        entry.finish(outcome="stopped" if stopped() else "failed")
+        raise
+    finally:
+        entry.finish(outcome="stopped" if stopped() else None)
+        TELEMETRY_PHASES.pop()
+
+
 def handoff(st, current_message=False, cfg=None):
     cfg = accounts_config() if cfg is None else cfg
     ru = cfg.get("language", "en") == "ru"
@@ -1425,6 +1603,8 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         st["rotations"].append(dict(sleeping, at=started, event="sleep"))
         save(st)
         notify(st, cfg, "paused", f"paused until {local_time(until)}: {sleeping['reason']}", until=until)
+        phase = telemetry_phase(st)
+        sleep_started = time.monotonic() if phase is not None else None
         try:
             while not stopped():
                 left = until - time.time()
@@ -1432,6 +1612,8 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
                     break
                 sleep(min(SLEEP_STEP, left))
         finally:
+            if phase is not None:
+                phase.sleep_seconds += max(0, time.monotonic() - sleep_started)
             update_waited()
         if stopped():
             return None
@@ -1587,6 +1769,9 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     args += effort_args(effort) + [prompt]
     path = rollout_path(account["home"], thread) if thread else None
     previous_size = path.stat().st_size if path else 0
+    telemetry = telemetry_phase(st)
+    usage_before = rollout_usage(path)[1] if telemetry is not None else None
+    usage_offset = previous_size
     next_search = time.monotonic() + 5 if thread else 0.0
     next_poll = 0.0
     reason = None
@@ -1729,6 +1914,12 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                         review_entry.update(outcome="refused", refusal=refusal)
                 elif not reviewing and st.get("kind") != "scout":
                     st["result"] = None if refusal else parse_result(message)
+                if telemetry is not None:
+                    try:
+                        telemetry.add_usage(account["name"], thread, usage_before,
+                                            path or rollout_path(account["home"], thread), usage_offset)
+                    except Exception as exc:
+                        telemetry_error(st, exc)
                 save(st)
     if reviewing and not review_fallback and not thread and code == 2:
         with (d / "stderr.log").open("rb") as errors:
@@ -1741,6 +1932,12 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
 
 
 def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
+    with record_phase(st, "wrapup", stopped) as phase:
+        _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry)
+        phase.finish(outcome="stopped" if stopped() else st["wrapup"]["outcome"])
+
+
+def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     """Publish the typed stop and allow exactly one short resume on its thread."""
     st["turn_stop"] = dict(reason, at=time.time())
     st["outcome"] = reason["outcome"]
@@ -1777,6 +1974,13 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
 
 
 def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
+    kind = st.get("kind", "work")
+    phase = "fix" if kind == "work" and st.get("rounds") else kind
+    with record_phase(st, phase, stopped):
+        return _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn)
+
+
+def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
     st.pop("refusal", None)
     reviewing = st.get("kind") == "review"
@@ -1854,6 +2058,9 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
         if result in ("budget_exhausted", "stuck"):
             reason = dict(control.reason, active_seconds=round(control.elapsed, 3))
             reviews = st.get("reviews", [])[review_start:]
+            phase = telemetry_phase(st)
+            if phase is not None:
+                phase.finish(outcome=result)
             wrapup_turn(st, cfg, account, effort, stopped, reason,
                         review_entry=reviews[-1] if reviews else None)
             break
@@ -1964,6 +2171,16 @@ def execute_check(st, stopped, cwd, filename):
 
 
 def run_check(st, stopped):
+    if stopped():
+        return None
+    with record_phase(st, "check", stopped) as phase:
+        result = _run_check(st, stopped)
+        phase.check = result
+        phase.finish(outcome="stopped" if stopped() else (result or {}).get("outcome", "stopped"))
+        return result
+
+
+def _run_check(st, stopped):
     result = execute_check(st, stopped, st["worktree"], "check.log")
     if result is None:
         return None
@@ -1973,6 +2190,14 @@ def run_check(st, stopped):
 
 
 def run_base_check(st, stopped):
+    with record_phase(st, "base_check", stopped) as phase:
+        result = _run_base_check(st, stopped)
+        phase.check = result
+        phase.finish(outcome="stopped" if stopped() else (result or {}).get("outcome", "stopped"))
+        return result
+
+
+def _run_base_check(st, stopped):
     """Check task HEAD with the base's guarded files, leaving the task untouched."""
     driver = workspace_filter_driver(st)
     if driver is not None:
@@ -2728,6 +2953,15 @@ def cmd_stats(a):
             print("(rollout not found)")
 
 
+def cmd_report(a):
+    report = runpy.run_path(str(Path(__file__).with_name("task_report.py")))
+    try:
+        data = report["build_report"](CODEX_HOME / "codex-worker-log.jsonl", a.since, a.repo, a.slug)
+    except ValueError as exc:
+        die(str(exc))
+    print(json.dumps(data, ensure_ascii=False) if a.json else report["render_report"](data))
+
+
 def cmd_stop(a):
     st = load(a.slug)
     pid = st.get("pid")
@@ -2931,6 +3165,11 @@ def main():
     s.add_argument("slug", nargs="?")
     for name in ("stats", "stop", "_run"):
         sub.add_parser(name).add_argument("slug")
+    s = sub.add_parser("report", help="summarize persistent task costs and review/check outcomes")
+    s.add_argument("--since", default="7d", metavar="7d|30d|YYYY-MM-DD")
+    s.add_argument("--repo", help="repository directory name")
+    s.add_argument("--slug")
+    s.add_argument("--json", action="store_true")
     s = sub.add_parser("clean")
     s.add_argument("slug")
     s.add_argument("--keep-branch", action="store_true")
