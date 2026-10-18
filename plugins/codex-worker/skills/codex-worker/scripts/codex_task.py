@@ -3555,8 +3555,8 @@ def cmd_wait(a):
         for finding in st.get("auto_fix_escalations", []):
             print(f"== auto-fix: stop: escalate — {finding['id']} {finding['file']}:{finding['line']} "
                   f"targets code from fix round {finding['round']} ({finding['commit']})")
-    if st.get("kind") == "review" or st.get("rounds"):
-        reviews = st.get("reviews", [])[st.get("review_start", 0):]
+    reviews = st.get("reviews", [])[st.get("review_start", 0):]
+    if st.get("kind") == "review" or st.get("rounds") or reviews:
         aggregate = st.get("review_result")
         if aggregate and aggregate.get("angles"):
             for entry in aggregate["angles"]:
@@ -3576,7 +3576,7 @@ def cmd_wait(a):
                 print(f"[{finding['severity']}] [{finding['angle']}] {finding['id']} {finding['file']}:{finding['line']} — {finding['title']}")
                 print(finding["detail"])
                 print("verify: " + finding["verify"])
-        elif st.get("outcome") == "refused":
+        elif st.get("kind") == "review" and st.get("outcome") == "refused":
             print("== refused by the model: " + st.get("refusal", "")[:200])
         elif reviews:
             entry = reviews[-1]

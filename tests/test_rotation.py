@@ -1937,7 +1937,7 @@ class RotationTests(unittest.TestCase):
         check_log = self.root / "ci-local-checks"
         command = "printf 'checked\\n' >> " + shlex.quote(str(check_log))
         self.start("ci-fixed", "--ci", "--review", "--check", command)
-        self.wait("ci-fixed")
+        output = self.wait("ci-fixed")
         state = self.state("ci-fixed")
         self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"], state["ci"]["reason"]),
                          ("passed", 1, "passed"))
@@ -1970,6 +1970,76 @@ class RotationTests(unittest.TestCase):
         self.assertEqual(pr["headRepository"]["nameWithOwner"], "")
         self.assertEqual(pr["headRepositoryOwner"]["login"] + "/" + pr["headRepository"]["name"],
                          "fixture/repo")
+        self.assertRegex(output, r"== review by main \(\d+(?:\.\d+)? min\): no defects")
+        self.assertIn(self.review_result(False)["summary"], output)
+
+    def test_ci_repair_keeps_current_review_findings_in_wait_without_review_fix_rounds(self):
+        self.configure(language="en", sandbox="workspace")
+        for angled in (False, True):
+            with self.subTest(angled=angled):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.configure_ci([[self.ci_check("fail")], [self.ci_check()]],
+                                  jobs={"123": "fixture CI-only compatibility failure"})
+                review = self.review_result()
+                reviews = [{"mode": "complete", "reply": review}]
+                if angled:
+                    reviews.append({"mode": "complete", "reply": self.review_result(False)})
+                self.account(self.home, "A", self.reset, runs=[
+                    self.ci_work(), *reviews, self.ci_work("fixed CI compatibility\n"),
+                    self.ci_work("followup without review\n")])
+                slug = "ci-retains-angle-review" if angled else "ci-retains-review"
+                options = ("--review-angles", "correctness,tests") if angled else ("--review",)
+                before = len(self.invocations())
+                polls = len(self.ci_polls())
+                self.start(slug, "--ci", *options)
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"]), ("passed", 1))
+                self.assertEqual(state["kind"], "work")
+                self.assertEqual(state["rounds"], [])
+                self.assertEqual(len(state["review_result"]["findings"]), 2)
+                expected_reviews = [False] + [True] * len(reviews) + [False]
+                self.assertEqual([entry["review"] for entry in self.invocations()[before:]],
+                                 expected_reviews)
+                self.assertEqual(len(self.ci_polls()) - polls, 2)
+                heading = "== review angle correctness by main" if angled else "== review by main"
+                self.assertRegex(output, heading + r" \(\d+(?:\.\d+)? min\): 2 defects")
+                for finding in review["findings"]:
+                    self.assertIn("{file}:{line} — {title}".format(**finding), output)
+                    self.assertIn(finding["detail"], output)
+                    self.assertIn("verify: " + finding["verify"], output)
+                self.assertIn("== CI " + state["ci"]["sha"][:7] + ": passed", output)
+
+                self.cli("say", slug, "Continue without another review or CI wait")
+                followup = self.wait(slug)
+                current = self.state(slug)
+                self.assertEqual(current["review_start"], len(current["reviews"]))
+                self.assertNotIn("== review", followup)
+                for finding in review["findings"]:
+                    self.assertNotIn(finding["title"], followup)
+                self.assertEqual(len(self.ci_polls()) - polls, 2)
+
+    def test_ci_repair_refusal_keeps_the_completed_review_findings_in_wait(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check("fail")]])
+        review = self.review_result()
+        refusal = "This content was flagged for possible cybersecurity risk."
+        self.account(self.home, "A", self.reset, runs=[
+            self.ci_work(), {"mode": "complete", "reply": review},
+            {"mode": "refused", "error": refusal}])
+        self.start("ci-refused-retains-review", "--ci", "--review")
+        output = self.wait("ci-refused-retains-review")
+        state = self.state("ci-refused-retains-review")
+        self.assertEqual((state["outcome"], state["ci"]["reason"]), ("refused", "refused"))
+        self.assertEqual(state["rounds"], [])
+        self.assertEqual([entry["review"] for entry in self.invocations()], [False, True, False])
+        self.assertEqual(len(self.ci_polls()), 1)
+        self.assertIn("== refused by the model: " + refusal, output)
+        self.assertRegex(output, r"== review by main \(\d+(?:\.\d+)? min\): 2 defects")
+        for finding in review["findings"]:
+            self.assertIn("{file}:{line} — {title}".format(**finding), output)
+            self.assertIn(finding["detail"], output)
+            self.assertIn("verify: " + finding["verify"], output)
 
     def test_ci_repair_prompt_uses_russian_and_keeps_the_failed_job_evidence(self):
         self.configure(language="ru", sandbox="workspace")
