@@ -17,6 +17,8 @@ from functools import lru_cache
 from pathlib import Path
 from unittest import mock
 
+from process_cleanup import cleanup_processes
+
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "plugins" / "codex-worker" / "skills" / "codex-worker"
@@ -594,77 +596,7 @@ class RotationTestCase(unittest.TestCase):
     def tearDown(self):
         # Supervisors publish final state after SIGTERM. Wait for every owned
         # writer and its tools before removing their directories.
-        owned, groups = set(self.extra_pids), set()
-
-        def processes():
-            for path in (self.home / "claude-tasks").glob("*/state.json"):
-                try:
-                    state = json.loads(path.read_text())
-                    owned.update(int(state[key]) for key in ("pid", "codex_pid", "check_pid") if state.get(key))
-                except (OSError, ValueError):
-                    pass
-            for event in self.trace():
-                if event.get("command") in ("exec", "app-server"):
-                    owned.update(int(event[key]) for key in ("pid", "ppid") if event.get(key))
-                    if event.get("pgid"):
-                        groups.add(int(event["pgid"]))
-            owned.difference_update((0, 1, os.getpid()))
-            groups.difference_update((0, 1, os.getpgrp()))
-            # macOS can truncate a command in the middle of a UTF-8 character.
-            result = subprocess.run(["ps", "-axo", "pid=,ppid=,pgid=,stat=,command="],
-                                    text=True, errors="replace", capture_output=True, check=True)
-            table = {}
-            for line in result.stdout.splitlines():
-                fields = line.split(None, 4)
-                if len(fields) == 5:
-                    table[int(fields[0])] = (int(fields[1]), int(fields[2]), fields[3])
-                    # Hooks start in their own session and may outlive the
-                    # supervisor's final pid=None save. Their fixture paths
-                    # still identify them after they have been reparented.
-                    if str(self.root) in fields[4]:
-                        owned.add(int(fields[0]))
-            while True:
-                descendants = {pid for pid, (parent, group, _) in table.items()
-                               if parent in owned or group in groups}
-                if descendants <= owned:
-                    break
-                owned.update(descendants)
-            groups.update(group for pid, (_, group, _) in table.items() if pid in owned and group == pid)
-            live = set()
-            for pid in owned:
-                try:
-                    os.waitpid(pid, os.WNOHANG)
-                except (ChildProcessError, ProcessLookupError):
-                    pass
-                if pid in table and not table[pid][2].startswith("Z"):
-                    live.add(pid)
-            return live
-
-        live = set()
-        for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, 3)):
-            signalled, signalled_groups = set(), set()
-            deadline = time.monotonic() + grace
-            while True:
-                live = processes()
-                if not live:
-                    break
-                for group in groups - signalled_groups:
-                    try:
-                        os.killpg(group, sig)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-                    signalled_groups.add(group)
-                for pid in live - signalled:
-                    try:
-                        os.kill(pid, sig)
-                    except (ProcessLookupError, PermissionError):
-                        pass
-                    signalled.add(pid)
-                if time.monotonic() >= deadline:
-                    break
-                time.sleep(0.02)
-            if not live:
-                break
+        live = cleanup_processes(self.root, self.extra_pids)
         self.assertFalse(live, "task processes still running before temporary-directory cleanup: %s" % sorted(live))
         self.tmp.cleanup()
 

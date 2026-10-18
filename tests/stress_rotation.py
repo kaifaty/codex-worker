@@ -2,8 +2,9 @@
 """Repeat reset synchronization tests with concurrent suite or CPU load.
 
 Run with /usr/bin/python3 -I tests/stress_rotation.py --repetitions 20 --jobs 4.
-The selected methods are discovered from calls to reset_after_ready, rather
-than maintained as a separate list. Both runners use the current interpreter.
+The selected methods are discovered by following calls to reset_after_ready
+through test helpers, rather than maintained as a separate list. Both runners
+use the current interpreter.
 Use --selection timing to also select CODEX_TASK_MINUTE_SECONDS test methods.
 Use --cpu-load --load-jobs 10 for ten CPU-bound processes instead of full suites.
 """
@@ -30,29 +31,151 @@ _suite_names = []
 _suite_repetitions = 0
 
 
-def reset_tests(selection="reset"):
-    """Find reset synchronization tests, optionally including minute budgets."""
+class _CallGraph:
+    """Resolve calls within test sources without importing helper modules."""
+
+    def __init__(self, sources):
+        self.functions, self.classes, self.symbols = {}, {}, {}
+        for module, tree in sources.items():
+            self._index(tree, (module,))
+        self.edges = {}
+        self.reset, self.timing = set(), set()
+        for key, function in self.functions.items():
+            nodes = list(self._body_nodes(function))
+            self.edges[key] = {target for node in nodes if isinstance(node, ast.Call)
+                               for target in [self._resolve(node.func, key)]
+                               if target in self.functions}
+            if function.name == "reset_after_ready" or any(
+                    isinstance(node, ast.Call) and
+                    ((isinstance(node.func, ast.Attribute) and node.func.attr == "reset_after_ready")
+                     or (isinstance(node.func, ast.Name) and node.func.id == "reset_after_ready"))
+                    for node in nodes):
+                self.reset.add(key)
+            if any((isinstance(node, ast.Constant) and node.value == "CODEX_TASK_MINUTE_SECONDS")
+                   or (isinstance(node, ast.keyword) and node.arg == "CODEX_TASK_MINUTE_SECONDS")
+                   for node in nodes):
+                self.timing.add(key)
+
+    def _index(self, node, scope):
+        symbols = self.symbols.setdefault(scope, {})
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                key = scope + (child.name,)
+                symbols[child.name] = key
+                if isinstance(child, ast.ClassDef):
+                    self.classes[key] = child.bases
+                else:
+                    self.functions[key] = child
+                self._index(child, key)
+            elif isinstance(child, ast.Import):
+                for alias in child.names:
+                    name = alias.name if alias.asname else alias.name.split(".")[0]
+                    symbols[alias.asname or name] = (name,)
+            elif isinstance(child, ast.ImportFrom):
+                for alias in child.names:
+                    if alias.name != "*":
+                        module = child.module or ""
+                        if child.level:
+                            parent = scope[0].split(".")[:-child.level]
+                            module = ".".join(parent + ([module] if module else []))
+                        symbols[alias.asname or alias.name] = (module, alias.name)
+            else:
+                self._index(child, scope)
+
+    def _body_nodes(self, node):
+        # A nested helper participates only when it is called.
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+                yield child
+                yield from self._body_nodes(child)
+
+    def _canonical(self, target):
+        seen = set()
+        while target is not None and target not in seen:
+            seen.add(target)
+            resolved = self.symbols.get(target[:-1], {}).get(target[-1])
+            if resolved is None or resolved == target:
+                break
+            target = resolved
+        return target
+
+    def _member(self, owner, name, seen=None):
+        seen = set() if seen is None else seen
+        if owner in seen:
+            return None
+        seen.add(owner)
+        member = self.symbols.get(owner, {}).get(name)
+        if member is not None:
+            return self._canonical(member)
+        for base in self.classes.get(owner, ()):
+            parent = self._resolve(base, owner[:-1])
+            member = self._member(parent, name, seen)
+            if member is not None:
+                return member
+        return None
+
+    def _resolve(self, node, scope):
+        if isinstance(node, ast.Name):
+            if node.id in ("self", "cls"):
+                return next((scope[:i] for i in range(len(scope), 0, -1)
+                             if scope[:i] in self.classes), None)
+            for i in range(len(scope), 0, -1):
+                outer = scope[:i]
+                if outer in self.classes:
+                    continue
+                target = self.symbols.get(outer, {}).get(node.id)
+                if target is not None:
+                    return self._canonical(target)
+        elif isinstance(node, ast.Attribute):
+            owner = self._resolve(node.value, scope)
+            member = self._member(owner, node.attr)
+            if member is not None:
+                return member
+            if owner is not None:
+                return (".".join(owner), node.attr)
+        elif isinstance(node, ast.Call):
+            # A direct constructor such as Helper().reset() has a known class.
+            target = self._resolve(node.func, scope)
+            if target in self.classes:
+                return target
+        return None
+
+    def reaches(self, start, seeds):
+        pending, seen = [start], set()
+        while pending:
+            key = pending.pop()
+            if key in seeds:
+                return True
+            if key not in seen:
+                seen.add(key)
+                pending.extend(self.edges.get(key, ()))
+        return False
+
+
+def select_tests(modules, directory, selection="reset"):
+    """Find tests transitively using reset or minute-budget helpers in tests/."""
+    directory = Path(directory)
+    sources = {".".join(path.relative_to(directory).with_suffix("").parts):
+               ast.parse(path.read_text()) for path in sorted(directory.rglob("*.py"))}
+    graph = _CallGraph(sources)
+    seeds = graph.reset | (graph.timing if selection == "timing" else set())
     names = []
-    modules = runpy.run_path(str(TEST_SCRIPT), run_name="rotation_tests")["TEST_MODULES"]
     for module in modules:
-        source = ast.parse(Path(module.__file__).read_text())
-        for cls in source.body:
+        module_name = ".".join(Path(module.__file__).relative_to(directory).with_suffix("").parts)
+        for cls in sources[module_name].body:
             if not isinstance(cls, ast.ClassDef):
                 continue
             for method in cls.body:
-                if not isinstance(method, ast.FunctionDef) or not method.name.startswith("test_"):
-                    continue
-                nodes = list(ast.walk(method))
-                uses_reset = any(isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                                 and node.func.attr == "reset_after_ready" for node in nodes)
-                uses_minutes = any((isinstance(node, ast.Constant)
-                                    and node.value == "CODEX_TASK_MINUTE_SECONDS")
-                                   or (isinstance(node, ast.keyword)
-                                       and node.arg == "CODEX_TASK_MINUTE_SECONDS")
-                                   for node in nodes)
-                if uses_reset or (selection == "timing" and uses_minutes):
+                if (isinstance(method, (ast.FunctionDef, ast.AsyncFunctionDef))
+                        and method.name.startswith("test_")
+                        and graph.reaches((module_name, cls.name, method.name), seeds)):
                     names.append("RotationTests." + method.name)
     return names
+
+
+def reset_tests(selection="reset"):
+    modules = runpy.run_path(str(TEST_SCRIPT), run_name="rotation_tests")["TEST_MODULES"]
+    return select_tests(modules, SCRIPT.parent, selection)
 
 
 def load_tests(loader, tests, pattern):

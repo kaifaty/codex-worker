@@ -1,7 +1,9 @@
 """Run isolated unittest cases through a dynamic pool of subprocesses."""
 import contextlib
+from collections import deque
 import io
 import json
+import math
 import os
 from pathlib import Path
 import queue
@@ -18,52 +20,27 @@ import types
 import unittest
 
 
-def _owned_processes(root):
-    # The environment also identifies detached supervisors before they publish a
-    # pid, and tools whose command line contains no fixture path.
-    snapshot = subprocess.run(
-        ["ps", "axeww", "-o", "pid=,ppid=,pgid=,stat=,command="],
-        capture_output=True, text=True, errors="replace", check=True)
-    table, owned = {}, set()
-    for line in snapshot.stdout.splitlines():
-        fields = line.split(None, 4)
-        if len(fields) != 5:
-            continue
-        pid, parent, group = map(int, fields[:3])
-        table[pid] = (parent, group, fields[3])
-        if root in fields[4] and pid != os.getpid():
-            owned.add(pid)
-    while True:
-        children = {pid for pid, (parent, _, _) in table.items() if parent in owned}
-        if children <= owned:
-            break
-        owned.update(children)
-    return {pid: table[pid] for pid in owned
-            if pid != os.getpid() and not table[pid][2].startswith("Z")}
+# Workers and watchdogs are also invoked directly with isolated Python.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from process_cleanup import cleanup_processes
 
 
-def _cleanup(root):
-    for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, 3)):
-        deadline = time.monotonic() + grace
-        while True:
-            owned = _owned_processes(root)
-            if not owned:
-                return
-            groups = {group for pid, (_, group, _) in owned.items() if pid == group}
-            for group in groups - {0, 1, os.getpgrp()}:
-                try:
-                    os.killpg(group, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            for pid in owned.keys() - {0, 1, os.getpid()}:
-                try:
-                    os.kill(pid, sig)
-                except (ProcessLookupError, PermissionError):
-                    pass
-            if time.monotonic() >= deadline:
-                break
-            time.sleep(0.05)
-    raise RuntimeError("test processes survived cleanup: %s" % sorted(_owned_processes(root)))
+def _cleanup(root, process_groups=()):
+    live = cleanup_processes(root, process_groups=process_groups)
+    if live:
+        raise RuntimeError("test processes survived cleanup: %s" % sorted(live))
+
+
+def _wait_for_exit(process):
+    """Never let an uncooperative worker or watchdog hold shutdown open."""
+    try:
+        return process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        return process.wait(timeout=1)
 
 
 def _watch(root):
@@ -95,11 +72,12 @@ def _worker(script, directory):
 def _read_results(worker, events):
     try:
         for line in worker.stdout:
-            events.put((worker, json.loads(line)))
+            received_at = time.monotonic()
+            events.put((worker, json.loads(line), received_at))
     except Exception:
-        events.put((worker, {"runner_error": traceback.format_exc()}))
+        events.put((worker, {"runner_error": traceback.format_exc()}, time.monotonic()))
     finally:
-        events.put((worker, None))
+        events.put((worker, None, time.monotonic()))
 
 
 def _cases(suite):
@@ -121,76 +99,124 @@ def run(module):
             raise ValueError
     except ValueError:
         sys.exit("CODEX_TEST_JOBS must be a positive integer")
+    try:
+        timeout = float(os.environ.get("CODEX_TEST_TIMEOUT", "300"))
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError
+    except ValueError:
+        sys.exit("CODEX_TEST_TIMEOUT must be a positive number of seconds")
     if jobs == 1:
         unittest.main(verbosity=2)
         return
     tests = [test.__class__.__name__ + "." + test._testMethodName
              for test in _cases(unittest.defaultTestLoader.loadTestsFromModule(module))]
-    pending = iter(tests)
+    pending = deque(tests)
     jobs = min(jobs, len(tests))
     counts = {"tests": 0, "failures": 0, "errors": 0, "skipped": 0}
     started = time.monotonic()
-    workers, active = [], {}
+    workers, active, directories = [], {}, {}
     events = queue.Queue()
     runner_errors = []
     interrupted = False
     helper = str(Path(__file__).resolve())
     directory = tempfile.mkdtemp(prefix="codex-rotation-run-")
     watcher = None
+
+    def dispatch(worker):
+        name = pending.popleft()
+        active[worker] = (name, time.monotonic())
+        try:
+            worker.stdin.write(json.dumps(name) + "\n")
+            worker.stdin.flush()
+        except (BrokenPipeError, OSError):
+            events.put((worker, None, time.monotonic()))
+
+    def start_worker():
+        workdir = str(Path(directory) / str(len(workers)))
+        os.mkdir(workdir)
+        worker = subprocess.Popen(
+            [sys.executable, "-I", helper, "--worker", module.__file__, workdir],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            text=True, start_new_session=True)
+        workers.append(worker)
+        directories[worker] = workdir
+        threading.Thread(target=_read_results, args=(worker, events), daemon=True).start()
+        dispatch(worker)
+
+    def retire(worker, reason):
+        name, began = active.pop(worker)
+        counts["tests"] += 1
+        counts["errors"] += 1
+        print("%s ... ERROR (%s after %.3fs)" %
+              (name, reason, time.monotonic() - began), file=sys.stderr, flush=True)
+        # Retain the known group after its leader exits: a child can inherit
+        # stdout while clearing every directory hint from its environment.
+        _cleanup(directories[worker], process_groups=(worker.pid,))
+        _wait_for_exit(worker)
+        with contextlib.suppress(BrokenPipeError, OSError):
+            worker.stdin.close()
+        if pending:
+            start_worker()
+
     try:
         watcher = subprocess.Popen([sys.executable, "-I", helper, "--watch", directory],
                                    stdin=subprocess.PIPE, start_new_session=True)
         for index in range(jobs):
-            workdir = str(Path(directory) / str(index))
-            os.mkdir(workdir)
-            worker = subprocess.Popen(
-                [sys.executable, "-I", helper, "--worker", module.__file__, workdir],
-                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-                text=True, start_new_session=True)
-            workers.append(worker)
-            threading.Thread(target=_read_results, args=(worker, events), daemon=True).start()
-            name = next(pending)
-            active[worker] = name
-            worker.stdin.write(json.dumps(name) + "\n")
-            worker.stdin.flush()
+            start_worker()
         print("Running %d tests with %d workers" % (len(tests), jobs), file=sys.stderr, flush=True)
         while active:
             if watcher.poll() is not None:
                 raise RuntimeError("test cleanup watchdog exited unexpectedly")
             try:
-                worker, result = events.get(timeout=0.1)
+                worker, result, received_at = events.get(timeout=0.1)
             except queue.Empty:
                 # A descendant can inherit stdout and keep its pipe open after
                 # a worker crashes, so EOF alone cannot detect worker death.
-                for worker, name in active.items():
+                for worker in list(active):
                     if worker.poll() is not None:
-                        raise RuntimeError("worker exited during %s (exit %s)" %
-                                           (name, worker.returncode))
-                continue
-            if result is None:
-                if worker in active:
-                    raise RuntimeError("worker exited during %s (exit %s)" %
-                                       (active[worker], worker.poll()))
-                continue
-            if "runner_error" in result:
-                raise RuntimeError(result["runner_error"])
-            if result["name"] != active.pop(worker):
-                raise RuntimeError("worker returned an unexpected test result")
-            for key in counts:
-                counts[key] += result[key]
-            outcome = ("ok" if result["success"] else "FAILED")
-            if result["skipped"]:
-                outcome = "skipped"
-            print("%s ... %s" % (result["name"], outcome), file=sys.stderr, flush=True)
-            if not result["success"]:
-                print(result["output"], file=sys.stderr, end="", flush=True)
-            name = next(pending, None)
-            if name is not None:
-                active[worker] = name
-                worker.stdin.write(json.dumps(name) + "\n")
-                worker.stdin.flush()
+                        retire(worker, "worker exited during %s (exit %s)" %
+                               (active[worker][0], worker.returncode))
+                        break
             else:
-                worker.stdin.close()
+                # Late EOF/results from a retired worker cannot affect its replacement.
+                if worker in active:
+                    if result is None:
+                        retire(worker, "worker exited during %s (exit %s)" %
+                               (active[worker][0], worker.poll()))
+                    elif "runner_error" in result:
+                        retire(worker, result["runner_error"])
+                    else:
+                        if result["name"] != active[worker][0]:
+                            raise RuntimeError("worker returned an unexpected test result")
+                        # The reader keeps observing results while another
+                        # worker's cleanup blocks this loop. Enforce the
+                        # deadline at receipt, preserving on-time queued results.
+                        if received_at - active[worker][1] >= timeout:
+                            retire(worker, "timeout %.3fs exceeded" % timeout)
+                            continue
+                        active.pop(worker)
+                        for key in counts:
+                            counts[key] += result[key]
+                        outcome = ("ok" if result["success"] else "FAILED")
+                        if result["skipped"]:
+                            outcome = "skipped"
+                        print("%s ... %s" % (result["name"], outcome), file=sys.stderr, flush=True)
+                        if not result["success"]:
+                            print(result["output"], file=sys.stderr, end="", flush=True)
+                        if pending:
+                            dispatch(worker)
+                        else:
+                            worker.stdin.close()
+            # Cleanup can take the TERM grace period. Consume results already
+            # queued by healthy workers before checking their deadlines;
+            # each result is checked against its own receipt time above.
+            if not events.empty():
+                continue
+            now = time.monotonic()
+            for worker, (name, began) in list(active.items()):
+                if now - began >= timeout:
+                    retire(worker, "timeout %.3fs exceeded" % timeout)
+                    break
     except KeyboardInterrupt:
         interrupted = True
         runner_errors.append("Interrupted")
@@ -199,22 +225,29 @@ def run(module):
     finally:
         # The watchdog performs the same cleanup even if this finally block is
         # skipped because the controller is killed.
-        if watcher is not None:
-            watcher.stdin.close()
-            try:
-                if watcher.wait(timeout=10) != 0:
-                    _cleanup(directory)
-            except subprocess.TimeoutExpired:
-                watcher.kill()
-                watcher.wait()
-                _cleanup(directory)
-        else:
-            _cleanup(directory)
+        try:
+            if watcher is not None:
+                watcher.stdin.close()
+                _wait_for_exit(watcher)
+        except Exception:
+            runner_errors.append(traceback.format_exc())
+        try:
+            # The watchdog only has directory hints. Known worker groups also
+            # cover orphaned children with sanitized environments after a
+            # successful test or an exception outside retire(). Stop them
+            # before closing stdout, which otherwise waits on the reader.
+            _cleanup(directory, process_groups=tuple(worker.pid for worker in workers))
+        except Exception:
+            runner_errors.append(traceback.format_exc())
         for worker in workers:
-            worker.wait()
-            worker.stdout.close()
-            if not worker.stdin.closed:
-                worker.stdin.close()
+            try:
+                _wait_for_exit(worker)
+            except Exception:
+                runner_errors.append(traceback.format_exc())
+            finally:
+                worker.stdout.close()
+                with contextlib.suppress(BrokenPipeError, OSError):
+                    worker.stdin.close()
         shutil.rmtree(directory, ignore_errors=True)
     elapsed = time.monotonic() - started
     for error in runner_errors:
