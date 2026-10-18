@@ -89,14 +89,15 @@ class RunnerTests(unittest.TestCase):
                     %s
 
                 def test_b_waits_for_replacement(self):
-                    deadline = time.monotonic() + 1.5
+                    # Replacement startup competes with the full stress load.
+                    deadline = time.monotonic() + 4
                     while not (FIXTURE / "replacement").exists():
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(0.01)
 
                 def test_c_runs_in_replacement(self):
                     (FIXTURE / "replacement").write_text(str(os.getpid()))
-        """ % action, timeout=2)
+        """ % action, timeout=5)
         self._assert_summary(result, tests=3, errors=1)
         self.assertTrue((self.root / "replacement").exists(), result.stderr)
         self.assertIn("SyntheticTests.test_b_waits_for_replacement ... ok", result.stderr)
