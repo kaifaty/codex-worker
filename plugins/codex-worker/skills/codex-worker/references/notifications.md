@@ -7,5 +7,6 @@ event types. Hooks run asynchronously and write their output or launch errors to
 
 - `review_done` includes the review's `round` and `angles`.
 - `turn_finished` fires once at the end of the whole cycle and includes `guarded_changed`, the number
-  of changed guarded files, and the typed `outcome`, including `budget_exhausted` or `stuck`.
+  of changed guarded files, the typed `outcome`, including `budget_exhausted` or `stuck`, and the
+  final `ci` result.
 - Separate `budget_exhausted` and `stuck` events obey `notify_events` too.
