@@ -27,6 +27,21 @@ when `origin` has the local branch's HEAD. The `publish` receipt records its URL
 Missing or unauthorized GitHub CLI and publication errors do not fail the turn. Closed and merged
 PRs are left unchanged.
 
+## CI result
+
+With `--ci` or `"ci": true`, the final state includes `ci`: the PR head SHA, outcome (`passed`,
+`failed`, `timeout`, `none`, or `skipped`), checks and states, duration, repair-round count, and stop
+reason (`passed`, `rounds_exhausted`, `blocked`, `timeout`, or `none`; skipped waits record why).
+CI runs only after a completed cycle with a passing or absent local check and a known GitHub PR
+whose head equals local HEAD. A blocked CI repair ends without another wait.
+
+`wait` prints, for example, `== CI 3749d91: passed (8/8, 6.2 min)` or
+`== CI 3749d91: FAILED 1/8: test (macos-latest, 3.9)`, followed by failed-check log tails.
+GitHub Actions job logs are capped at 150 lines per failed check and 400 total; external checks show
+their names and links. No checks after three minutes gives `none`; pending checks beyond
+`ci_timeout_minutes` gives `timeout`. Neither permits merging: Claude requires `CI … passed` and
+must still rerun `gh pr checks <url>` immediately before merging.
+
 ## Review result
 
 Valid review JSON is saved in the task's review record.
@@ -69,4 +84,5 @@ angles, and fix rounds stop. Before increasing the task budget, decide whether t
   targeting code from a fix round, that round's number, and its short commit SHA.
 - `guarded files changed` and `== base tests`: see [checks.md](checks.md).
 - `== sandbox: workspace` and publication results: see [sandbox.md](sandbox.md).
+- CI outcome, checks, and failed-check log tails, when CI waiting is enabled.
 - Account switches, `auto-continue at` and `needs login`: see [accounts.md](accounts.md).

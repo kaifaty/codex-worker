@@ -15,7 +15,7 @@ Creation time identifies each task, so reusing a slug after `clean` produces a s
 
 - Reports cover the last seven days by default; date filters start at UTC midnight.
 - Turns include work, fixes, wrap-ups, individual review angles, and scouts. Active time also includes
-  checks and excludes quota sleeps.
+  checks and excludes quota sleeps and CI waits.
 - Weekly usage sums positive within-stage account deltas, omitting reset crossings; shared account
   activity can affect these estimates. Missing rollout measurements stay null in the journal and add no
   measured usage. The task weekly budget uses the same cumulative sum across phases and accounts,
@@ -24,3 +24,5 @@ Creation time identifies each task, so reusing a slug after `clean` produces a s
   in that round must be clean and none interrupted. Model refusals follow the supervisor's merged
   verdict. The final turn journal row and report record `auto_fix_stop`, including `escalate`;
   escalated turns do not count as rounds to clean.
+- Final turn rows record the CI outcome. `report` prints `CI passed: N/M`; CI waiting itself uses no
+  task weekly budget or implementation time budget.

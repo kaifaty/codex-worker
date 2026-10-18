@@ -436,6 +436,7 @@ else:
 
 FAKE_GH = r'''import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -461,7 +462,8 @@ elif args[:2] == ["pr", "list"]:
     for entry in entries:
         entry = {"url": entry, "state": "OPEN"} if isinstance(entry, str) else dict(entry)
         entry.setdefault("number", 42)
-        entry.setdefault("headRepository", {"nameWithOwner": "fixture/repo"})
+        entry.setdefault("headRepository", {"id": "R_fixture", "name": "repo", "nameWithOwner": ""})
+        entry.setdefault("headRepositoryOwner", {"login": "fixture"})
         prs.append(entry)
     if "--jq" in args:
         expression = args[args.index("--jq") + 1]
@@ -474,14 +476,58 @@ elif args[:2] == ["pr", "create"]:
     if os.environ.get("CODEX_FAKE_GH_CREATE_ERROR"):
         print("fixture PR creation failed", file=sys.stderr)
         sys.exit(1)
+    entries = state.get(branch, [])
+    if not isinstance(entries, list):
+        entries = [entries] if entries else []
+    for entry in entries:
+        entry = {"url": entry, "state": "OPEN"} if isinstance(entry, str) else entry
+        repository = entry.get("headRepository", {"name": "repo"}) or {}
+        owner = entry.get("headRepositoryOwner", {"login": "fixture"}) or {}
+        if (entry.get("state") == "OPEN" and repository.get("name", "").casefold() == "repo"
+                and owner.get("login", "").casefold() == "fixture"):
+            print('a pull request for branch "' + branch + '" into branch "main" already exists',
+                  file=sys.stderr)
+            sys.exit(1)
     url = "https://example.test/pull/" + str(len(state) + 1)
-    state[branch] = {"url": url, "state": "OPEN"}
+    state[branch] = {"url": url, "state": "OPEN",
+                     "headRepository": {"id": "R_fixture", "name": "repo", "nameWithOwner": ""},
+                     "headRepositoryOwner": {"login": "fixture"}}
     state_path.write_text(json.dumps(state))
     print(url)
 elif args[:2] == ["pr", "edit"]:
     if os.environ.get("CODEX_FAKE_GH_EDIT_ERROR"):
         print("fixture PR edit failed", file=sys.stderr)
         sys.exit(1)
+elif args[:2] in (["pr", "view"], ["pr", "checks"], ["run", "view"]):
+    scenario_path = Path(os.environ["CODEX_FAKE_GH_CI"])
+    scenario = json.loads(scenario_path.read_text())
+    if args[:2] == ["pr", "view"]:
+        sha = scenario.get("head_sha") or subprocess.check_output(
+            ["git", "rev-parse", "HEAD"], text=True).strip()
+        print(json.dumps({"headRefOid": sha}))
+    elif args[:2] == ["pr", "checks"]:
+        snapshots = scenario.get("checks", [[]])
+        index = scenario.get("polls", 0)
+        checks = snapshots[min(index, len(snapshots) - 1)]
+        scenario["polls"] = index + 1
+        scenario_path.write_text(json.dumps(scenario))
+        print(json.dumps(checks))
+        if any(check["bucket"] == "pending" for check in checks):
+            sys.exit(8)
+        if any(check["bucket"] in ("fail", "cancel") for check in checks):
+            sys.exit(1)
+    else:
+        job = args[args.index("--job") + 1]
+        repository = (args[args.index("--repo") + 1] if "--repo" in args
+                      else os.environ.get("GH_REPO", "fixture/repo"))
+        if repository.startswith("https://"):
+            repository = repository[len("https://"):]
+        if repository.count("/") == 1:
+            repository = "github.com/" + repository
+        if repository != "github.com/fixture/repo":
+            print("HTTP 404: job " + job + " not found in " + repository, file=sys.stderr)
+            sys.exit(1)
+        print(scenario.get("jobs", {}).get(job, "fixture failed job " + job))
 else:
     sys.exit("unsupported fake gh invocation")
 '''
@@ -820,7 +866,7 @@ class RotationTests(unittest.TestCase):
         # use the short intervals from the integration fixture.
         env = dict(self.env)
         for key in ("CODEX_TASK_WAIT_POLL_SECONDS", "CODEX_TASK_RATE_POLL_SECONDS",
-                    "CODEX_TASK_ROLLOUT_SEARCH_SECONDS"):
+                    "CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "CODEX_TASK_CI_POLL_SECONDS"):
             env.pop(key, None)
         with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "dont_write_bytecode", True):
             spec = importlib.util.spec_from_file_location("rotation_worker", str(SCRIPT))
@@ -862,6 +908,30 @@ class RotationTests(unittest.TestCase):
     def gh_writes(self):
         return [event for event in self.gh_invocations()
                 if event["argv"][:2] in (["pr", "create"], ["pr", "edit"])]
+
+    def configure_ci(self, snapshots, jobs=None, head_sha=None):
+        path = self.root / "fake-gh-ci.json"
+        value = {"checks": snapshots, "jobs": jobs or {}}
+        if head_sha is not None:
+            value["head_sha"] = head_sha
+        path.write_text(json.dumps(value))
+        self.env.update(CODEX_FAKE_GH_CI=str(path), CODEX_TASK_CI_POLL_SECONDS="0.02")
+        return path
+
+    def ci_check(self, bucket="pass", name="test (macos-latest, 3.9)", job="123"):
+        states = {"pending": "IN_PROGRESS", "pass": "SUCCESS", "fail": "FAILURE",
+                  "skipping": "SKIPPED", "cancel": "CANCELLED"}
+        return {"name": name, "state": states[bucket], "bucket": bucket,
+                "link": "https://github.com/fixture/repo/actions/runs/42/job/" + job}
+
+    def ci_work(self, contents="implemented\n", **changes):
+        return {"mode": "complete", "write_files": {"tracked.txt": contents},
+                "reply": self.work_result(commit_message="Implement CI fixture",
+                                          pr_title="Wait for pull request CI",
+                                          pr_body="Wait for all pull request checks.", **changes)}
+
+    def ci_polls(self):
+        return [event for event in self.gh_invocations() if event["argv"][:2] == ["pr", "checks"]]
 
     def record_git_calls(self):
         real_git = shutil.which("git", path=self.env["PATH"])
@@ -1220,15 +1290,22 @@ class RotationTests(unittest.TestCase):
                 (self.home / "exec-count").unlink(missing_ok=True)
                 slug = "pr-head-repo-" + (own_state or "missing").lower()
                 own_url = "https://example.test/pull/42"
-                prs = [{"url": "https://example.test/pull/99", "state": "OPEN",
-                        "headRepository": {"nameWithOwner": "other/repo"}},
-                       {"url": "https://example.test/pull/98", "state": "OPEN",
-                        "headRepository": {"nameWithOwner": "fixture/another-repo"}},
-                       {"url": "https://example.test/pull/97", "state": "OPEN",
-                        "headRepository": None}]
+                foreign_prs = [{"url": "https://example.test/pull/99", "state": "OPEN",
+                                "headRepository": {"id": "R_other", "name": "repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": {"login": "other"}},
+                               {"url": "https://example.test/pull/98", "state": "OPEN",
+                                "headRepository": {"id": "R_another", "name": "another-repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": {"login": "fixture"}},
+                               {"url": "https://example.test/pull/97", "state": "OPEN",
+                                "headRepository": None, "headRepositoryOwner": None},
+                               {"url": "https://example.test/pull/96", "state": "OPEN",
+                                "headRepository": {"id": "R_no_owner", "name": "repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": None}]
+                prs = list(foreign_prs)
                 if own_state:
                     prs.append({"url": own_url, "state": own_state,
-                                "headRepository": {"nameWithOwner": "Fixture/Repo"}})
+                                "headRepository": {"id": "R_fixture", "name": "Repo", "nameWithOwner": ""},
+                                "headRepositoryOwner": {"login": "Fixture"}})
                 Path(self.env["CODEX_FAKE_GH_STATE"]).write_text(json.dumps({"codex/" + slug: prs}))
                 before = len(self.gh_writes())
                 result = self.work_result(pr_title="Publish our task", pr_body="Describe our complete PR.")
@@ -1255,7 +1332,7 @@ class RotationTests(unittest.TestCase):
                     create, = writes
                     self.assertEqual(create["argv"][:2], ["pr", "create"])
                     self.assertEqual(create["body"], result["pr_body"])
-                for foreign in prs[:3]:
+                for foreign in foreign_prs:
                     self.assertFalse(any(foreign["url"] in event["argv"] for event in writes))
 
     def test_pr_supervisor_fix_round_updates_only_with_a_nonempty_body(self):
@@ -1817,7 +1894,498 @@ class RotationTests(unittest.TestCase):
         self.assertTrue(state["publish"]["pushed"])
         self.assertEqual(state["publish"]["pr"], "")
         self.assertIn("fixture PR creation failed", state["publish"]["error"])
-        self.assertIn("== publish error: " + state["publish"]["error"], output)
+        self.assertIn("== PR skipped: " + state["publish"]["error"], output)
+        self.assertNotIn("== publish error:", output)
+
+    def test_ci_pending_then_passed_is_reported_without_an_extra_codex_turn(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_notify()
+        self.configure_ci([[self.ci_check("pending")],
+                           [self.ci_check(), self.ci_check("skipping", name="optional", job="124")]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-pass", "--ci")
+        output = self.wait("ci-pass")
+        state = self.state("ci-pass")
+        ci = state["ci"]
+        self.assertEqual((ci["outcome"], ci["reason"], ci["rounds"]), ("passed", "passed", 0))
+        self.assertEqual(ci["sha"], self.git("rev-parse", state["branch"]))
+        self.assertEqual([check["bucket"] for check in ci["checks"]], ["pass", "skipping"])
+        self.assertGreaterEqual(ci["seconds"], 0)
+        self.assertRegex(output, r"== CI " + ci["sha"][:7] + r": passed \(2/2, \d+(?:\.\d+)? min\)")
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertEqual(len(self.ci_polls()), 2)
+        for event in self.ci_polls():
+            self.assertEqual(event["argv"][2:], [state["publish"]["pr"], "--json", "name,state,bucket,link"])
+        self.assertEqual(self.notification("ci-pass", "turn_finished")["ci"], ci)
+        self.until(lambda: any(row["phase"] == "turn" for row in self.telemetry_journal()))
+        turn = next(row for row in self.telemetry_journal() if row["phase"] == "turn")
+        self.assertEqual(turn["ci"], ci)
+        report = json.loads(self.cli("report", "--slug", "ci-pass", "--json"))
+        self.assertEqual(report["tasks"][0]["ci"], ci)
+        self.assertEqual(report["summary"]["ci"], {"passed": 1, "total": 1, "pass_fraction": 1.0})
+        self.assertIn("CI passed: 1/1", self.cli("report", "--slug", "ci-pass"))
+
+    def test_ci_failed_round_uses_same_thread_log_checks_and_no_second_review(self):
+        self.configure(language="en", sandbox="workspace")
+        self.env["GH_REPO"] = "unrelated/host-repository"
+        log = "fixture macOS traceback\nAssertionError: Python 3.9 compatibility\n"
+        self.configure_ci([[self.ci_check("pending")], [self.ci_check("fail")],
+                           [self.ci_check("pending")], [self.ci_check()]], jobs={"123": log})
+        self.account(self.home, "A", self.reset, runs=[
+            self.ci_work(), {"mode": "complete", "reply": self.review_result(False)},
+            self.ci_work("fixed Python 3.9\n")])
+        check_log = self.root / "ci-local-checks"
+        command = "printf 'checked\\n' >> " + shlex.quote(str(check_log))
+        self.start("ci-fixed", "--ci", "--review", "--check", command)
+        output = self.wait("ci-fixed")
+        state = self.state("ci-fixed")
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"], state["ci"]["reason"]),
+                         ("passed", 1, "passed"))
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertEqual(check_log.read_text().splitlines(), ["checked", "checked"])
+        executions = self.invocations()
+        self.assertEqual([event["review"] for event in executions], [False, True, False])
+        self.assertTrue(executions[2]["resume"])
+        self.assertEqual(executions[2]["thread"], executions[0]["thread"])
+        for text in (self.ci_check()["name"], "fixture macOS traceback", "Python 3.9 compatibility",
+                     "blocked", "push"):
+            self.assertIn(text, executions[2]["prompt"])
+        jobs = [event["argv"] for event in self.gh_invocations() if event["argv"][:2] == ["run", "view"]]
+        self.assertEqual(jobs, [["run", "view", "--job", "123", "--log-failed",
+                                 "--repo", "github.com/fixture/repo"]])
+        self.assertEqual(len(self.ci_polls()), 4)
+        self.assertEqual(state["ci"]["sha"], self.git("rev-parse", state["branch"]))
+        publication = state["publish"]
+        self.assertEqual((publication["action"], publication["error"]), ("updated", ""))
+        create, edit = self.gh_writes()
+        self.assertEqual(create["argv"][:2], ["pr", "create"])
+        self.assertEqual(edit["argv"][:3], ["pr", "edit", publication["pr"]])
+        self.assertTrue(publication["pr"])
+        self.assertTrue(all(event["argv"][2] == publication["pr"] for event in self.ci_polls()))
+        for event in self.gh_invocations():
+            if event["argv"][:2] == ["pr", "list"]:
+                self.assertEqual(event["argv"][event["argv"].index("--json") + 1],
+                                 "url,state,headRepository,headRepositoryOwner")
+        pr = json.loads(Path(self.env["CODEX_FAKE_GH_STATE"]).read_text())[state["branch"]]
+        self.assertEqual(pr["headRepository"]["nameWithOwner"], "")
+        self.assertEqual(pr["headRepositoryOwner"]["login"] + "/" + pr["headRepository"]["name"],
+                         "fixture/repo")
+        self.assertRegex(output, r"== review by main \(\d+(?:\.\d+)? min\): no defects")
+        self.assertIn(self.review_result(False)["summary"], output)
+
+    def test_ci_repair_keeps_current_review_findings_in_wait_without_review_fix_rounds(self):
+        self.configure(language="en", sandbox="workspace")
+        for angled in (False, True):
+            with self.subTest(angled=angled):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.configure_ci([[self.ci_check("fail")], [self.ci_check()]],
+                                  jobs={"123": "fixture CI-only compatibility failure"})
+                review = self.review_result()
+                reviews = [{"mode": "complete", "reply": review}]
+                if angled:
+                    reviews.append({"mode": "complete", "reply": self.review_result(False)})
+                self.account(self.home, "A", self.reset, runs=[
+                    self.ci_work(), *reviews, self.ci_work("fixed CI compatibility\n"),
+                    self.ci_work("followup without review\n")])
+                slug = "ci-retains-angle-review" if angled else "ci-retains-review"
+                options = ("--review-angles", "correctness,tests") if angled else ("--review",)
+                before = len(self.invocations())
+                polls = len(self.ci_polls())
+                self.start(slug, "--ci", *options)
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"]), ("passed", 1))
+                self.assertEqual(state["kind"], "work")
+                self.assertEqual(state["rounds"], [])
+                self.assertEqual(len(state["review_result"]["findings"]), 2)
+                expected_reviews = [False] + [True] * len(reviews) + [False]
+                self.assertEqual([entry["review"] for entry in self.invocations()[before:]],
+                                 expected_reviews)
+                self.assertEqual(len(self.ci_polls()) - polls, 2)
+                heading = "== review angle correctness by main" if angled else "== review by main"
+                self.assertRegex(output, heading + r" \(\d+(?:\.\d+)? min\): 2 defects")
+                for finding in review["findings"]:
+                    self.assertIn("{file}:{line} — {title}".format(**finding), output)
+                    self.assertIn(finding["detail"], output)
+                    self.assertIn("verify: " + finding["verify"], output)
+                self.assertIn("== CI " + state["ci"]["sha"][:7] + ": passed", output)
+
+                self.cli("say", slug, "Continue without another review or CI wait")
+                followup = self.wait(slug)
+                current = self.state(slug)
+                self.assertEqual(current["review_start"], len(current["reviews"]))
+                self.assertNotIn("== review", followup)
+                for finding in review["findings"]:
+                    self.assertNotIn(finding["title"], followup)
+                self.assertEqual(len(self.ci_polls()) - polls, 2)
+
+    def test_ci_repair_refusal_keeps_the_completed_review_findings_in_wait(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check("fail")]])
+        review = self.review_result()
+        refusal = "This content was flagged for possible cybersecurity risk."
+        self.account(self.home, "A", self.reset, runs=[
+            self.ci_work(), {"mode": "complete", "reply": review},
+            {"mode": "refused", "error": refusal}])
+        self.start("ci-refused-retains-review", "--ci", "--review")
+        output = self.wait("ci-refused-retains-review")
+        state = self.state("ci-refused-retains-review")
+        self.assertEqual((state["outcome"], state["ci"]["reason"]), ("refused", "refused"))
+        self.assertEqual(state["rounds"], [])
+        self.assertEqual([entry["review"] for entry in self.invocations()], [False, True, False])
+        self.assertEqual(len(self.ci_polls()), 1)
+        self.assertIn("== refused by the model: " + refusal, output)
+        self.assertRegex(output, r"== review by main \(\d+(?:\.\d+)? min\): 2 defects")
+        for finding in review["findings"]:
+            self.assertIn("{file}:{line} — {title}".format(**finding), output)
+            self.assertIn(finding["detail"], output)
+            self.assertIn("verify: " + finding["verify"], output)
+
+    def test_ci_repair_prompt_uses_russian_and_keeps_the_failed_job_evidence(self):
+        self.configure(language="ru", sandbox="workspace")
+        log = "fixture Russian CI repair traceback\nAssertionError: Python 3.9 support\n"
+        self.configure_ci([[self.ci_check("fail")], [self.ci_check()]], jobs={"123": log})
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed Python 3.9\n")])
+        self.start("ci-fixed-ru", "--ci", "--check", "true")
+        self.wait("ci-fixed-ru")
+        state = self.state("ci-fixed-ru")
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"]), ("passed", 1))
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        prompt = executions[1]["prompt"]
+        for text in ("CI этой ветки упал", self.ci_check()["name"], "fixture Russian CI repair traceback",
+                     "Python 3.9 support", "исправь его и запушь ветку", "ничего не меняй", 'status: "blocked"'):
+            self.assertIn(text, prompt)
+        self.assertNotIn("CI failed for this branch", prompt)
+        self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
+                         [["pr", "create"], ["pr", "edit"]])
+        self.assertEqual(len(self.ci_polls()), 2)
+
+    def test_ci_repair_prompt_localizes_rules_and_workspace_publication_in_both_languages(self):
+        worker = self.worker()
+        check = self.ci_check("fail")
+        check["tail"] = "fixture failed job evidence\nAssertionError: Python 3.9\n"
+        ci = {"sha": "a" * 40, "outcome": "failed", "checks": [check]}
+        expected = {
+            "en": ("CI failed for this branch", "fix it and push", "flaky or unrelated", "change nothing",
+                   "including evidence", "work JSON schema", "leave committing/pushing to the supervisor"),
+            "ru": ("CI этой ветки упал", "исправь его и запушь ветку", "нестабильный или не связан",
+                   "ничего не меняй", "приведя доказательства", "JSON-схему работы",
+                   "оставь коммит и пуш надзирателю")}
+        for language in ("en", "ru"):
+            for sandbox in ("off", "workspace"):
+                with self.subTest(language=language, sandbox=sandbox):
+                    prompt = worker.ci_fix_prompt({"sandbox": sandbox}, ci, {"language": language})
+                    for text in expected[language][:-1]:
+                        self.assertIn(text, prompt)
+                    for text in (check["name"], check["link"], "fixture failed job evidence",
+                                 "Python 3.9", 'status: "blocked"'):
+                        self.assertIn(text, prompt)
+                    if sandbox == "workspace":
+                        self.assertIn(expected[language][-1], prompt)
+                    else:
+                        self.assertNotIn(expected[language][-1], prompt)
+
+    def test_ci_starts_after_review_auto_fix_and_its_second_local_check(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check()]])
+        decisions = [{"id": finding["id"], "decision": "fixed", "note": "Correct the reported issue."}
+                     for finding in self.review_result()["findings"]]
+        self.account(self.home, "A", self.reset, runs=[
+            self.ci_work(), {"mode": "complete", "reply": self.review_result()},
+            self.ci_work("fixed by review\n", findings=decisions),
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("ci-after-fix", "--ci", "--review", "--fix-rounds", "1", "--check", "true")
+        self.wait("ci-after-fix")
+        state = self.state("ci-after-fix")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertEqual(state["ci"]["outcome"], "passed")
+        self.assertEqual(state["ci"]["rounds"], 0)
+        self.assertEqual(len(state["checks"]), 2)
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False, True])
+        self.assertEqual(len(self.ci_polls()), 1)
+        self.assertEqual(state["ci"]["sha"], self.git("rev-parse", state["branch"]))
+
+    def test_ci_failed_after_one_round_exhausts_rounds_and_wait_shows_the_log_tail(self):
+        self.configure(language="en", sandbox="workspace")
+        log = "failure at start\n" + "\n".join("trace line %03d" % index for index in range(200))
+        self.configure_ci([[self.ci_check("fail")]], jobs={"123": log})
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("still broken\n")])
+        self.start("ci-exhausted", "--ci")
+        output = self.wait("ci-exhausted")
+        ci = self.state("ci-exhausted")["ci"]
+        self.assertEqual((ci["outcome"], ci["rounds"], ci["reason"]), ("failed", 1, "rounds_exhausted"))
+        self.assertIn("== CI " + ci["sha"][:7] + ": FAILED 1/1: " + self.ci_check()["name"], output)
+        self.assertIn("trace line 199", output)
+        self.assertNotIn("failure at start", output)
+        self.assertEqual(len(ci["checks"][0]["tail"].splitlines()), 150)
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.ci_polls()), 2)
+
+    def test_ci_blocked_round_checks_locally_and_stops_without_polling_again(self):
+        self.configure(language="en", sandbox="workspace")
+        self.env["GH_REPO"] = "unrelated/host-repository"
+        self.configure_ci([[self.ci_check("fail")]], jobs={"123": "fixture unrelated network outage"})
+        blocked = self.work_result("blocked", summary="A public runner outage predates this branch.",
+                                   remaining=["Runner logs show the same failure on main."])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), {"mode": "complete", "reply": blocked}])
+        self.start("ci-blocked", "--ci", "--check", "true")
+        self.wait("ci-blocked")
+        state = self.state("ci-blocked")
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"], state["ci"]["reason"]),
+                         ("failed", 1, "blocked"))
+        self.assertEqual(state["result"], blocked)
+        self.assertEqual(state["ci"]["checks"][0]["tail"], "fixture unrelated network outage")
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertEqual(len(self.ci_polls()), 1)
+        self.assertEqual(len(self.invocations()), 2)
+
+    def test_ci_flags_and_config_defaults_apply_to_start_and_say(self):
+        self.configure(language="en", sandbox="workspace")
+        defaults = self.worker().accounts_config()
+        self.assertFalse(defaults["ci"])
+        self.assertEqual(defaults["ci_timeout_minutes"], 30)
+        self.configure_ci([[self.ci_check("fail")]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-say")
+        self.wait("ci-say")
+        self.assertFalse(self.state("ci-say").get("ci"))
+        self.assertFalse(self.ci_polls())
+        self.cli("say", "ci-say", "Inspect the existing CI failure", "--ci", "--ci-rounds", "0")
+        self.wait("ci-say")
+        state = self.state("ci-say")
+        self.assertTrue(state["ci_enabled"])
+        self.assertEqual(state["ci_rounds"], 0)
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["reason"]), ("failed", "rounds_exhausted"))
+        self.assertEqual(len(self.invocations()), 2)
+        before = len(self.ci_polls())
+        self.cli("say", "ci-say", "Continue without CI enabled")
+        self.wait("ci-say")
+        self.assertFalse(self.state("ci-say").get("ci"))
+        self.assertEqual(self.state("ci-say")["ci_rounds"], 1)
+        self.assertEqual(len(self.ci_polls()), before)
+        self.configure(language="en", sandbox="workspace", ci=True, ci_timeout_minutes=17)
+        self.configure_ci([[self.ci_check()]])
+        self.start("ci-config")
+        self.wait("ci-config")
+        configured = self.state("ci-config")
+        self.assertTrue(configured["ci_enabled"])
+        self.assertEqual(configured["ci_rounds"], 1)
+        self.assertEqual(configured["ci_timeout_minutes"], 17)
+        self.assertEqual(configured["ci"]["outcome"], "passed")
+
+    def test_ci_rounds_reject_negative_and_fractional_values_before_any_turn(self):
+        self.configure(language="en")
+        self.start("ci-invalid-existing")
+        self.wait("ci-invalid-existing")
+        before, state = len(self.invocations()), self.state("ci-invalid-existing")
+        for value in ("-1", "1.5"):
+            for args in (("start", "ci-invalid", "--brief", str(self.brief), "--repo", str(self.repo)),
+                         ("say", "ci-invalid-existing", "Do not start invalid CI")):
+                with self.subTest(command=args[0], value=value):
+                    result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args) + ["--ci", "--ci-rounds", value],
+                                            cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("ci-rounds", result.stdout + result.stderr)
+                    self.assertEqual(len(self.invocations()), before)
+                    self.assertEqual(self.state("ci-invalid-existing"), state)
+                    self.assertFalse((self.home / "claude-tasks" / "ci-invalid").exists())
+
+    def test_ci_skips_head_mismatch_missing_pr_and_failed_local_check(self):
+        cases = (("mismatch", {"head_sha": "f" * 40}, False, None),
+                 ("no-pr", {}, True, None), ("local-check", {}, False, "false"))
+        for label, settings, no_pr, check in cases:
+            with self.subTest(case=label):
+                self.configure(language="en", sandbox="workspace")
+                self.configure_ci([[self.ci_check()]], **settings)
+                self.account(self.home, "A", self.reset, runs=[self.ci_work(label + "\n")])
+                (self.home / "exec-count").unlink(missing_ok=True)
+                if no_pr:
+                    self.env["CODEX_FAKE_GH_CREATE_ERROR"] = "1"
+                args = ["--ci"] + (["--check", check] if check else [])
+                before = len(self.ci_polls())
+                self.start("ci-skip-" + label, *args)
+                output = self.wait("ci-skip-" + label)
+                self.env.pop("CODEX_FAKE_GH_CREATE_ERROR", None)
+                ci = self.state("ci-skip-" + label)["ci"]
+                self.assertEqual(ci["outcome"], "skipped")
+                self.assertTrue(ci["reason"])
+                self.assertEqual(len(self.ci_polls()), before)
+                if no_pr:
+                    self.assertIn("== PR skipped:", output)
+                    self.assertNotIn("== publish error:", output)
+
+    def test_ci_known_pr_edit_failure_still_waits_for_matching_head(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check()]])
+        url = "https://example.test/pull/42"
+        Path(self.env["CODEX_FAKE_GH_STATE"]).write_text(json.dumps({
+            "codex/ci-edit-error": {"url": url, "state": "OPEN"}}))
+        self.env["CODEX_FAKE_GH_EDIT_ERROR"] = "1"
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-edit-error", "--ci")
+        output = self.wait("ci-edit-error")
+        state = self.state("ci-edit-error")
+        self.assertEqual((state["publish"]["action"], state["publish"]["pr"]), ("skipped", url))
+        self.assertIn("fixture PR edit failed", state["publish"]["error"])
+        self.assertEqual(state["ci"]["outcome"], "passed")
+        self.assertEqual(state["ci"]["sha"], self.git("rev-parse", state["branch"]))
+        self.assertEqual(len(self.ci_polls()), 1)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertIn("== PR skipped:", output)
+        self.assertNotIn("== publish error:", output)
+
+    def test_ci_stop_and_signal_interrupt_pending_polling(self):
+        for label in ("stop", "signal"):
+            with self.subTest(cancel=label):
+                self.configure(language="en", sandbox="workspace")
+                self.configure_ci([[self.ci_check("pending")]])
+                self.account(self.home, "A", self.reset, runs=[self.ci_work(label + "\n")])
+                (self.home / "exec-count").unlink(missing_ok=True)
+                before = len(self.ci_polls())
+                self.start("ci-" + label, "--ci")
+                self.until(lambda: len(self.ci_polls()) > before)
+                if label == "stop":
+                    self.cli("stop", "ci-" + label)
+                else:
+                    os.kill(self.state("ci-" + label)["pid"], signal.SIGTERM)
+                self.wait("ci-" + label)
+                state = self.state("ci-" + label)
+                self.assertEqual(state["outcome"], "stopped" if label == "stop" else "interrupted")
+                count = len(self.ci_polls())
+                self.assertEqual(len(self.invocations()), 1 if label == "stop" else 2)
+                self.assertEqual(len(self.ci_polls()), count)
+
+    def run_ci_wait_fixture(self, snapshots, timeout=30, jobs=None, no_checks_error=False, **changes):
+        worker = self.worker()
+        st = {"slug": "ci-clock", "worktree": str(self.repo), "outcome": "completed", "ci_enabled": True,
+              "ci_timeout_minutes": timeout, "publish": {"pr": "https://example.test/pull/1"}}
+        st.update(changes)
+        clock, calls, waits, polls = [1000.0], [], [], [0]
+        head = self.git("rev-parse", "HEAD")
+
+        def command(state, args, stopped, timeout=60):
+            self.assertIs(state, st)
+            args = list(args)
+            if Path(args[0]).name == "gh":
+                args = args[1:]
+            calls.append(args)
+            if args[:2] == ["pr", "view"]:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"headRefOid": head}), "")
+            if args[:2] == ["pr", "checks"]:
+                checks = snapshots[min(polls[0], len(snapshots) - 1)]
+                polls[0] += 1
+                if not checks and no_checks_error:
+                    return subprocess.CompletedProcess(args, 1, "", "no checks reported on the 'fixture' branch")
+                code = 8 if any(check["bucket"] == "pending" for check in checks) else 0
+                if any(check["bucket"] in ("fail", "cancel") for check in checks):
+                    code = 1
+                return subprocess.CompletedProcess(args, code, json.dumps(checks), "")
+            self.assertEqual(args[:2], ["run", "view"])
+            return subprocess.CompletedProcess(args, 0, (jobs or {})[args[args.index("--job") + 1]], "")
+
+        def sleep(seconds):
+            waits.append(seconds)
+            clock[0] += seconds
+
+        with mock.patch.object(worker, "save"), mock.patch.object(worker, "ci_command", side_effect=command), \
+                mock.patch.object(worker.shutil, "which", return_value=str(self.root / "gh")), \
+                mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker, "MINUTE_SECONDS", 60), mock.patch.object(worker, "CI_POLL_SECONDS", 30):
+            result = worker.wait_ci(st, lambda: False, sleep)
+        self.assertEqual(st["ci"], result)
+        return st, result, calls, waits
+
+    def test_ci_no_checks_grace_and_pending_timeout_use_fake_time(self):
+        for snapshots, timeout, outcome, seconds in (([[]], 30, "none", 180),
+                                                     ([[self.ci_check("pending")]], 2, "timeout", 120)):
+            with self.subTest(outcome=outcome):
+                st, ci, calls, waits = self.run_ci_wait_fixture(snapshots, timeout=timeout)
+                self.assertEqual((ci["outcome"], ci["reason"]), (outcome, outcome))
+                self.assertEqual(ci["seconds"], seconds)
+                self.assertEqual(sum(waits), seconds)
+                self.assertTrue(all(0 < value <= 30 for value in waits))
+                self.assertEqual(st["outcome"], "completed")
+                self.assertGreaterEqual(len(calls), 2)
+
+    def test_ci_wait_does_not_spend_weekly_or_active_minutes_budget(self):
+        pending = [self.ci_check("pending")]
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [pending] * 8 + [[self.ci_check()]], max_turn_minutes=1,
+            max_task_weekly_percent=1, weekly_used_percent=0.75)
+        self.assertEqual((ci["outcome"], st["outcome"]), ("passed", "completed"))
+        self.assertEqual(ci["seconds"], 240)
+        self.assertEqual(st["weekly_used_percent"], 0.75)
+        self.assertNotIn("turn_stop", st)
+        self.assertEqual(sum(waits), 240)
+        self.assertTrue(all(call[:2] in (["pr", "view"], ["pr", "checks"]) for call in calls))
+
+    def test_ci_gh_no_checks_reported_exit_one_observes_the_grace_period(self):
+        st, ci, calls, waits = self.run_ci_wait_fixture([[]], no_checks_error=True)
+        self.assertEqual((ci["outcome"], ci["reason"], ci["seconds"]), ("none", "none", 180))
+        self.assertEqual(sum(waits), 180)
+        self.assertGreaterEqual(len(calls), 2)
+
+    def test_ci_failed_job_logs_limit_150_lines_per_check_400_total_and_external_link(self):
+        checks = [self.ci_check("fail", name="job " + str(index), job=str(index)) for index in range(4)]
+        checks[1]["link"] = checks[1]["link"].replace("/job/", "/jobs/")
+        checks.append({"name": "external lint", "state": "CANCELLED", "bucket": "cancel",
+                       "link": "https://ci.example.test/build/99"})
+        jobs = {str(index): "\n".join("job %s line %03d" % (index, line) for line in range(250))
+                for index in range(4)}
+        st, ci, calls, waits = self.run_ci_wait_fixture([checks], jobs=jobs)
+        self.assertEqual(ci["outcome"], "failed")
+        tails = [check.get("tail", "").splitlines() for check in ci["checks"]]
+        self.assertLessEqual(sum(len(tail) for tail in tails), 400)
+        self.assertTrue(all(len(tail) <= 150 for tail in tails))
+        self.assertEqual(tails[0][-1], "job 0 line 249")
+        self.assertEqual(len(tails[0]), 150)
+        self.assertEqual(ci["checks"][-1]["link"], "https://ci.example.test/build/99")
+        self.assertEqual(tails[-1], [])
+        job_calls = [call for call in calls if call[:2] == ["run", "view"]]
+        self.assertGreaterEqual(len(job_calls), 3)
+        self.assertIn(["run", "view", "--job", "1", "--log-failed",
+                       "--repo", "github.com/fixture/repo"], job_calls)
+        self.assertEqual(waits, [])
+
+    def test_ci_failed_job_logs_use_each_check_repository(self):
+        checks = [self.ci_check("fail", name="first job", job="123"),
+                  self.ci_check("fail", name="second job", job="456")]
+        checks[1]["link"] = checks[1]["link"].replace("fixture/repo", "another-owner/another-repo")
+        checks[1]["link"] += "?check_suite_focus=true#step:1:1"
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [checks], jobs={"123": "first repository log", "456": "second repository log"})
+        job_calls = [call for call in calls if call[:2] == ["run", "view"]]
+        self.assertEqual(job_calls, [
+            ["run", "view", "--job", "123", "--log-failed", "--repo", "github.com/fixture/repo"],
+            ["run", "view", "--job", "456", "--log-failed", "--repo", "github.com/another-owner/another-repo"]])
+        self.assertEqual([check["tail"] for check in ci["checks"]],
+                         ["first repository log", "second repository log"])
+        self.assertEqual(waits, [])
+
+    def test_ci_failed_job_logs_share_the_wait_deadline(self):
+        worker = self.worker()
+        checks = [self.ci_check("fail", name="job " + str(index), job=str(index)) for index in range(4)]
+        st = {"ci": {"checks": checks}}
+        clock = [100.0]
+
+        def timeout(state, args, stopped, timeout=60):
+            self.assertIs(state, st)
+            self.assertEqual(timeout, 1)
+            clock[0] += timeout
+            raise subprocess.TimeoutExpired(args, timeout)
+
+        with mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker, "ci_command", side_effect=timeout) as command:
+            worker.ci_failure_logs(st, str(self.root / "gh"), lambda: False, deadline=101)
+        self.assertEqual(command.call_count, 1)
+        self.assertEqual(clock[0], 101)
+        tails = [check.get("tail", "").splitlines() for check in checks]
+        self.assertTrue(all(tail for tail in tails))
+        self.assertTrue(all(len(tail) <= 150 for tail in tails))
+        self.assertLessEqual(sum(len(tail) for tail in tails), 400)
+        self.assertTrue(all("CI timeout" in check["tail"] for check in checks[1:]))
 
     def test_workspace_fix_round_commits_before_each_sandboxed_check(self):
         self.configure(language="en", sandbox="workspace")

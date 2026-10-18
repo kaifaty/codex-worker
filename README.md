@@ -8,7 +8,8 @@ Claude writes a bounded brief, starts Codex, and waits in the background. Codex 
 the supervisor opens and updates the PR in every mode, using Codex's result title and description.
 Optional Codex reviews run in fresh threads, and the supervisor can send findings back for bounded
 fix rounds. Claude checks the final diff and review and handles merging. Optional account monitoring
-can pause a task until a usage window resets.
+can pause a task until a usage window resets. On GitHub, `--ci` waits for PR checks and gives Codex
+one bounded repair turn with failed-check logs before Claude reviews the final result.
 
 This repository is both the `kaifaty` Claude Code marketplace and the `codex-worker` plugin.
 
@@ -66,7 +67,7 @@ The skill handles these commands for Claude. To run them yourself, set `T` to th
 
 ```sh
 T="$HOME/.claude/skills/codex-worker/scripts/codex_task.py"
-python3 -I "$T" start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --check "python3 -m unittest tests.test_csv_export"
+python3 -I "$T" start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --ci --check "python3 -m unittest tests.test_csv_export"
 python3 -I "$T" wait csv-export
 python3 -I "$T" status csv-export
 ```
@@ -77,6 +78,16 @@ and starts a review in a fresh thread if the check passes and the result is `don
 `--fix-rounds 2`, it can send findings to the worker, check the fixes, and review again twice without
 Claude relaying messages. One `wait` covers the whole cycle; in Claude Code it runs as a background
 Bash command.
+
+For GitHub repositories, include `--ci` on `start` and `say`, or set `"ci": true` in
+`~/.codex/codex-worker.json`. After the work, review, and fix rounds, the supervisor waits for checks
+on the published PR's exact local HEAD. Failed checks send their names and log tails to the same
+worker thread; `--ci-rounds N` allows up to N repair turns (default 1), each followed by the saved
+local check, publication, and another CI wait, without an automatic review. Unrelated or flaky
+failures must return `blocked` with evidence. `ci_timeout_minutes` defaults to 30; absent checks
+stop as `none` after three minutes. Waiting uses no task weekly budget or `--max-minutes` time.
+`wait` shows `== CI <sha>: passed (…)` or the failure and log tail; `report` includes `CI passed: N/M`.
+Claude merges only after `CI … passed` and rechecks `gh pr checks <url>` immediately before merging.
 
 Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
 status (`done`, `partial`, `blocked`, or `needs_decision`), summary, checks, PR, questions, and remaining
@@ -93,7 +104,7 @@ Check the actual diff, latest review, and rejection reasons: the worker's claims
 Send remaining findings through `say` or record issues after the round limit:
 
 ```sh
-python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
+python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2 --ci
 python3 -I "$T" wait csv-export
 ```
 
@@ -134,10 +145,10 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--max-weekly P] [--review [--review-angles LIST] [--fix-rounds N]] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--max-weekly P] [--review [--review-angles LIST] [--fix-rounds N]] [--ci] [--ci-rounds N] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N` or `--ci [--ci-rounds N]`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
 | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
@@ -271,6 +282,8 @@ A minimal configuration is:
 | `max_review_minutes` | `30` | Separate active exec budget for each review or scout turn. |
 | `max_task_weekly_percent` | Absent | Default task weekly budget for `start`; `--max-weekly P` overrides it, and `say` and `review` inherit the task budget. |
 | `review_angles_min_lines` | `400` | Changed-line threshold for `--review-angles auto`; counts `base..HEAD` and uncommitted changes. |
+| `ci` | `false` | Wait for GitHub PR checks after the automatic cycle; `start/say --ci` enables it for the task. |
+| `ci_timeout_minutes` | `30` | Maximum wait for PR checks per CI attempt. |
 | `repeat_limit` | `3` | Matching failures of the same command that trigger `stuck`; success for that command resets its count. |
 | `notify` | Absent | `"macos"` for desktop notifications, or an argv list that receives the event JSON as its final argument. |
 | `notify_events` | All events | Optional list of event types to send. |
@@ -329,7 +342,7 @@ Notifications work even when Claude's session has ended. For macOS, add to `code
 
 An argv hook receives one final JSON argument with `event`, `kind`, `slug`, `repo`, `branch`, `account`, `at`,
 and a short `message`. Event types are `turn_finished` (`outcome`, `result`, also named in `message`,
-and `guarded_changed`, the number of changed guarded files),
+`guarded_changed`, the number of changed guarded files, and `ci`, the final CI result),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
 (`verdict`, finding count, `round`, and `angles`), plus `budget_exhausted`, `stuck`, and `interrupted`.

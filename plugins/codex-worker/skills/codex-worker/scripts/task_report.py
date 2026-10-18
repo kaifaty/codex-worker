@@ -16,6 +16,7 @@ from pathlib import Path
 TOKEN_KEYS = ("input", "cached_input", "output", "reasoning")
 MODEL_PHASES = frozenset(("work", "fix", "wrapup", "review", "scout"))
 CHECK_PHASES = frozenset(("check", "base_check"))
+CI_OUTCOMES = frozenset(("passed", "failed", "timeout", "none"))
 CANCELLATION_OUTCOMES = ("stopped", "interrupted")
 
 
@@ -123,7 +124,7 @@ def _task(repo, slug, created):
     return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
-            "auto_fix_stop": None,
+            "auto_fix_stop": None, "ci": None,
             "max_task_weekly_percent": None, "budget_stop": None,
             "_reviews": {}, "_turns": [], "_latest_turn": 0}
 
@@ -173,6 +174,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
     active_seconds = 0
     turns = 0
     checks = Counter()
+    ci = Counter()
     reviews = Counter()
     findings_samples = 0
 
@@ -293,6 +295,10 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         verdicts = {group: _review_verdict(review_rows) for group, review_rows in groups}
         final_turns = task.pop("_turns")
         for row in final_turns:
+            turn_ci = row.get("ci")
+            if isinstance(turn_ci, dict) and _identifier(turn_ci.get("outcome")) in CI_OUTCOMES:
+                ci["total"] += 1
+                ci["passed"] += turn_ci["outcome"] == "passed"
             if row.get("kind") == "review":
                 verdicts[(_round(row.get("turn")), _round(row.get("round")))] = (
                     _identifier(row.get("verdict")) if row.get("outcome") == "completed" else None)
@@ -312,6 +318,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             task["max_task_weekly_percent"] = _number(final.get("max_task_weekly_percent"))
             task["budget_stop"] = final.get("budget_stop") if final.get("budget_stop") in ("minutes", "weekly") else None
             task["auto_fix_stop"] = _identifier(final.get("auto_fix_stop"))
+            task["ci"] = final.get("ci") if isinstance(final.get("ci"), dict) else None
         elif groups:
             task["last_verdict"] = _review_verdict(groups[-1][1])
         if task["outcome"] is not None:
@@ -337,6 +344,8 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             "weekly_used_percent": sum(task["weekly_used_percent"] for task in task_rows),
             "checks": {"total": checks["total"], "passed": checks["passed"],
                        "pass_fraction": _fraction(checks["passed"], checks["total"])},
+            "ci": {"total": ci["total"], "passed": ci["passed"],
+                   "pass_fraction": _fraction(ci["passed"], ci["total"])},
             "reviews": {"total": reviews["total"], "with_defects": reviews["with_defects"],
                         "defect_fraction": _fraction(reviews["with_defects"], reviews["total"]),
                         "findings": reviews["findings"],
@@ -362,6 +371,7 @@ def render_report(report):
     summary = report["summary"]
     tokens = summary["tokens"]
     checks = summary["checks"]
+    ci = summary["ci"]
     reviews = summary["reviews"]
     average = reviews["average_findings"]
     lines = [
@@ -371,6 +381,7 @@ def render_report(report):
         f"reasoning {tokens['reasoning']:,.0f}, cached input {tokens['cached_input']:,.0f}; "
         f"cache share {_percent(tokens['cached_input_fraction'])})",
         f"Checks passed: {checks['passed']}/{checks['total']} ({_percent(checks['pass_fraction'])})",
+        f"CI passed: {ci['passed']}/{ci['total']} ({_percent(ci['pass_fraction'])})",
         f"Reviews with defects: {reviews['with_defects']}/{reviews['total']} "
         f"({_percent(reviews['defect_fraction'])}); average findings: "
         + ("n/a" if average is None else f"{average:.2f}"),
