@@ -54,7 +54,10 @@ TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
 SKILL = Path(__file__).resolve().parent.parent
 STATS = Path(__file__).resolve().parent / "codex-stats.py"
-RATE_POLL_SECONDS = 30
+# Tests can shorten polling without changing the default CLI intervals.
+RATE_POLL_SECONDS = float(os.environ.get("CODEX_TASK_RATE_POLL_SECONDS", "30"))
+ROLLOUT_SEARCH_SECONDS = float(os.environ.get("CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "5"))
+WAIT_POLL_SECONDS = float(os.environ.get("CODEX_TASK_WAIT_POLL_SECONDS", "1"))
 ACCOUNT_TIMEOUT = 20
 ACCOUNT_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_ACCOUNT_RETRY_SECONDS", "300"))
 MAX_ACCOUNT_RETRIES = 6
@@ -1772,7 +1775,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     telemetry = telemetry_phase(st)
     usage_before = rollout_usage(path)[1] if telemetry is not None else None
     usage_offset = previous_size
-    next_search = time.monotonic() + 5 if thread else 0.0
+    next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
     next_poll = 0.0
     reason = None
     current_info = None
@@ -1880,7 +1883,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                         now = time.monotonic()
                         if path is None and now >= next_search:
                             path = rollout_path(account["home"], thread)
-                            next_search = now + 5
+                            next_search = now + ROLLOUT_SEARCH_SECONDS
                         if path is not None and now >= next_poll:
                             next_poll = now + RATE_POLL_SECONDS
                             size = path.stat().st_size
@@ -2725,7 +2728,7 @@ def cmd_wait(a):
         if a.timeout and time.monotonic() - start > a.timeout:
             print(f"{a.slug}: still running after {a.timeout} s")
             return
-        time.sleep(1)
+        time.sleep(WAIT_POLL_SECONDS)
         st = load(a.slug)
     if st.get("pid") and not alive(st["pid"]):
         # The supervisor may have published its final state since the last poll.
