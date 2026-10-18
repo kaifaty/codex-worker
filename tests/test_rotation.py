@@ -3,6 +3,7 @@
 
 Run with python3 -I tests/test_rotation.py. CODEX_TEST_JOBS controls the parallel
 worker count; set it to 1 to use the standard sequential unittest runner.
+CODEX_TEST_TIMEOUT limits each pooled test to 300 seconds by default.
 """
 import runpy
 import sys
@@ -23,6 +24,10 @@ import rotation_lifecycle
 import rotation_reset_credits
 import rotation_accounts
 import rotation_telemetry
+import test_runner
+import test_stress_selection
+from test_runner import RunnerTests
+from test_stress_selection import StressSelectionTests
 
 
 # Keep historical unittest selectors and IDs while tests live in topic modules.
@@ -42,7 +47,8 @@ class RotationTests(
 
 
 # Source order is also the order used by the AST-based stress selection.
-TEST_MODULES = tuple(sys.modules[cls.__module__] for cls in RotationTests.__bases__)
+TEST_MODULES = (tuple(sys.modules[cls.__module__] for cls in RotationTests.__bases__)
+                + (test_runner, test_stress_selection))
 
 
 if __name__ == "__main__":
