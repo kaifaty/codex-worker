@@ -16,6 +16,7 @@ from pathlib import Path
 TOKEN_KEYS = ("input", "cached_input", "output", "reasoning")
 MODEL_PHASES = frozenset(("work", "fix", "wrapup", "review", "scout"))
 CHECK_PHASES = frozenset(("check", "base_check"))
+CANCELLATION_OUTCOMES = ("stopped", "interrupted")
 
 
 def _number(value):
@@ -219,7 +220,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
             task["turns"] += 1
             # Normal wrap-up success/failure retains the parent budget/stuck
             # outcome. Cancellation or a policy refusal stops the whole task.
-            if ((phase != "wrapup" or row.get("outcome") in ("stopped", "refused"))
+            if ((phase != "wrapup" or row.get("outcome") in CANCELLATION_OUTCOMES + ("refused",))
                     and _identifier(row.get("outcome"))):
                 task["outcome"] = row["outcome"]
         if phase == "scout":
@@ -251,13 +252,15 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
 
         if phase in CHECK_PHASES:
             outcome = row.get("check_outcome")
-            if outcome in ("passed", "failed", "timeout", "stopped"):
+            if outcome in ("passed", "failed", "timeout") or outcome in CANCELLATION_OUTCOMES:
                 checks["total"] += 1
                 checks["passed"] += outcome == "passed"
             # Ordinary check failures leave the model's task outcome intact;
             # cancellation stops the whole task, including during a base check.
-            if outcome == "stopped" or row.get("outcome") == "stopped":
-                task["outcome"] = "stopped"
+            if row.get("outcome") in CANCELLATION_OUTCOMES:
+                task["outcome"] = row["outcome"]
+            elif outcome in CANCELLATION_OUTCOMES:
+                task["outcome"] = outcome
         if phase == "review":
             group = (_round(row.get("turn")), _round(row.get("round")))
             review_rows = task["_reviews"].setdefault(group, [])

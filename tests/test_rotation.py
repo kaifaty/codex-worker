@@ -4472,6 +4472,199 @@ class RotationTests(unittest.TestCase):
         self.assertFalse(self.state("review-stopped").get("checks"))
         self.assertFalse((Path(self.state("review-stopped")["worktree"]) / "unexpected-check").exists())
 
+    def test_external_signal_interrupts_work_keeps_changes_and_skips_review(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "hold", "write_files": {"pending.txt": "unfinished work\n"}}])
+        slug = "work-interrupted"
+        self.start(slug, "--review", "--fix-rounds", "2", "--check", "touch unexpected-check")
+        worktree = Path(self.state(slug)["worktree"])
+        self.until(lambda: (worktree / "pending.txt").exists())
+        supervisor = self.state(slug)["pid"]
+        before = time.time()
+        os.kill(supervisor, signal.SIGTERM)
+        output = self.wait(slug)
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "interrupted")
+        self.assertEqual(state["signal"]["signum"], signal.SIGTERM)
+        self.assertEqual(state["signal"]["name"], "SIGTERM")
+        self.assertGreaterEqual(state["signal"]["at"], before)
+        self.assertLessEqual(state["signal"]["at"], time.time())
+        self.assertNotIn("stop_request", state)
+        stderr = (self.home / "claude-tasks" / slug / "stderr.log").read_text()
+        self.assertIn("SIGTERM", stderr)
+        self.assertIn(str(signal.SIGTERM), stderr)
+        self.assertRegex(stderr, r"ppid=\d+")
+        self.assertRegex(stderr, r"pgid=\d+")
+        expected_time = datetime.datetime.fromtimestamp(state["signal"]["at"]).strftime("%Y-%m-%d %H:%M")
+        self.assertIn("== interrupted externally by SIGTERM at " + expected_time +
+                      "; the worktree is kept — check git status and continue with say", output)
+        self.assertEqual((worktree / "pending.txt").read_text(), "unfinished work\n")
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(state.get("reviews"))
+        self.assertFalse(state.get("checks"))
+        self.assertFalse(state.get("rounds"))
+        self.assertFalse((worktree / "unexpected-check").exists())
+        self.assertEqual(self.notification(slug, "turn_finished")["outcome"], "interrupted")
+        self.assertEqual(self.notification(slug, "interrupted")["outcome"], "interrupted")
+        rows = [row for row in self.telemetry_journal() if row["slug"] == slug]
+        self.assertEqual([(row["phase"], row["outcome"]) for row in rows],
+                         [("work", "interrupted"), ("turn", "interrupted")])
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
+
+    def test_external_signal_interrupts_single_review_and_second_angle(self):
+        self.configure(language="en")
+        for angled in (False, True):
+            with self.subTest(angled=angled):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                runs = [{"mode": "complete", "reply": self.work_result()}]
+                if angled:
+                    runs.append({"mode": "complete", "reply": self.review_result()})
+                runs.append({"mode": "hold"})
+                self.account(self.home, "A", self.reset, runs=runs)
+                slug = "second-angle-interrupted" if angled else "review-interrupted"
+                options = ("--review-angles", "correctness,concurrency") if angled else ("--review",)
+                before = len(self.invocations())
+                self.start(slug, *options, "--fix-rounds", "2")
+                self.until(lambda: len(self.invocations()) == before + len(runs))
+                os.kill(self.state(slug)["pid"], signal.SIGTERM)
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "interrupted")
+                self.assertEqual(state["signal"]["name"], "SIGTERM")
+                self.assertEqual(state["reviews"][-1]["outcome"], "interrupted")
+                self.assertFalse(state.get("rounds"), "interrupted reviews cannot start a fix round")
+                self.assertEqual(len(self.invocations()), before + len(runs))
+                self.assertIn("== interrupted externally by SIGTERM at ", output)
+                if angled:
+                    self.assertEqual([entry["outcome"] for entry in state["review_result"]["angles"]],
+                                     ["completed", "interrupted"])
+                rows = [row for row in self.telemetry_journal() if row["slug"] == slug]
+                self.assertEqual(rows[-1]["phase"], "turn")
+                self.assertEqual(rows[-1]["outcome"], "interrupted")
+                reviews = [row for row in rows if row["phase"] == "review"]
+                self.assertEqual([row["outcome"] for row in reviews],
+                                 ["completed", "interrupted"] if angled else ["interrupted"])
+                if angled:
+                    self.assertEqual(reviews[-1]["angle"], "concurrency")
+                report = json.loads(self.cli("report", "--slug", slug, "--json"))
+                self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
+                self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
+
+    def test_spawn_clears_previous_stop_request_before_external_signal(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}, {"mode": "hold"}])
+        slug = "stale-stop-request"
+        self.start(slug)
+        self.until(lambda: len(self.invocations()) == 1)
+        supervisor = self.state(slug)["pid"]
+        self.cli("stop", slug, timeout=20)
+        self.wait(slug)
+        old = self.state(slug)
+        self.assertEqual(old["outcome"], "stopped")
+        self.assertEqual(old["stop_request"]["pid"], supervisor)
+        self.assertEqual(old["signal"]["name"], "SIGINT")
+        self.cli("say", slug, "Continue the interrupted work")
+        self.until(lambda: len(self.invocations()) == 2)
+        current = self.state(slug)
+        self.assertNotIn("stop_request", current)
+        self.assertNotIn("signal", current)
+        os.kill(current["pid"], signal.SIGTERM)
+        self.wait(slug)
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "interrupted")
+        self.assertEqual(state["signal"]["name"], "SIGTERM")
+        self.assertNotIn("stop_request", state)
+
+    def test_supervisor_preserves_first_signal_and_logs_each_before_cancellation(self):
+        worker = self.worker()
+        slug = "first-external-signal"
+        (worker.TASKS / slug).mkdir(parents=True)
+        state = {"slug": slug, "pid": os.getpid(), "repo": str(self.repo), "worktree": str(self.repo),
+                 "kind": "scout", "outcome": "running", "pending": {"prompt": "question", "effort": None}}
+        worker.save(state)
+        handlers = {}
+        first = []
+        current_signal = []
+        cancellation = threading.Event()
+        set_cancellation = cancellation.set
+
+        def cancel_after_log():
+            log = worker.TASKS / slug / "stderr.log"
+            self.assertIn(signal.Signals(current_signal[0]).name, log.read_text().splitlines()[-1])
+            set_cancellation()
+
+        cancellation.set = cancel_after_log
+
+        def signal_handler(signum, handler):
+            handlers[signum] = handler
+
+        def interrupt(st, cfg, prompt, effort, current_message, stopped, sleep):
+            log = worker.TASKS / slug / "stderr.log"
+            for signum in (signal.SIGTERM, signal.SIGINT):
+                current_signal[:] = [signum]
+                handlers[signum](signum, None)
+                self.assertIn(signal.Signals(signum).name, log.read_text())
+                self.assertTrue(stopped())
+                if not first:
+                    first.append(dict(st["signal"]))
+                self.assertEqual(st["signal"], first[0])
+
+        with mock.patch.object(worker.signal, "signal", side_effect=signal_handler), \
+                mock.patch.object(worker.threading, "Event", return_value=cancellation), \
+                mock.patch.object(worker, "accounts_config", return_value={"enabled": False}), \
+                mock.patch.object(worker, "run_turn", side_effect=interrupt), \
+                mock.patch.object(worker, "record_turn_result"), \
+                mock.patch.object(worker, "notify"), \
+                mock.patch.object(worker, "guarded_changes", return_value=[]):
+            worker.cmd__run(SimpleNamespace(slug=slug))
+        state = worker.load(slug)
+        self.assertEqual(state["outcome"], "interrupted")
+        self.assertEqual(state["signal"], first[0])
+        self.assertEqual(state["signal"]["name"], "SIGTERM")
+        self.assertEqual(len((worker.TASKS / slug / "stderr.log").read_text().splitlines()), 2)
+
+    def test_stop_request_is_durable_before_signal_and_survives_supervisor_save(self):
+        worker = self.worker()
+        slug = "stop-save-race"
+        (worker.TASKS / slug).mkdir(parents=True)
+        state = {"slug": slug, "pid": 12345, "outcome": "running"}
+        worker.save(state)
+        supervisor_state = dict(state)
+
+        def signal_after_request(pid, signum):
+            self.assertEqual((pid, signum), (state["pid"], signal.SIGINT))
+            latest = worker.load(slug)
+            self.assertEqual(latest["stop_request"]["pid"], pid)
+            supervisor_state["checkpoint"] = "concurrent supervisor progress"
+            worker.save(supervisor_state)
+            self.assertEqual(worker.load(slug)["stop_request"], latest["stop_request"])
+
+        with mock.patch.object(worker, "alive", side_effect=[True, False]), \
+                mock.patch.object(worker.os, "killpg", side_effect=signal_after_request) as killpg, \
+                mock.patch.object(worker.time, "sleep"), mock.patch("builtins.print"):
+            worker.cmd_stop(SimpleNamespace(slug=slug))
+        killpg.assert_called_once()
+        self.assertEqual(worker.load(slug)["checkpoint"], "concurrent supervisor progress")
+        self.assertEqual(worker.stop_outcome(dict(state), lambda: True), "stopped")
+        self.assertEqual(worker.stop_outcome(dict(state), lambda: False), None)
+        next_turn = dict(state, pid=state["pid"] + 1)
+        self.assertEqual(worker.stop_outcome(next_turn, lambda: True), "interrupted")
+
+    def test_interrupted_notification_obeys_notify_events_filter(self):
+        self.configure(language="en")
+        self.configure_notify(events=["interrupted"])
+        self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}])
+        slug = "interrupted-notify-filter"
+        self.start(slug)
+        self.until(lambda: bool(self.invocations()))
+        os.kill(self.state(slug)["pid"], signal.SIGTERM)
+        self.wait(slug)
+        self.notification(slug, "interrupted")
+        self.assertEqual([event["event"] for event in self.notifications(slug)], ["interrupted"])
+
     def test_paused_working_turn_does_not_start_automatic_review(self):
         self.configure(wait_for_reset=False)
         self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error"}])
@@ -6062,14 +6255,17 @@ with open(sys.argv[1], "a+") as journal:
 
     def test_monitor_quota_cancellation_preserves_stop_priority_and_unrelated_errors(self):
         worker = self.worker()
-        for case in ("budget", "budget-return", "stop", "error"):
+        for case in ("budget", "budget-return", "stop", "interrupt", "error"):
             with self.subTest(case=case):
                 clock = [0.0]
                 stopped = [False]
                 slug = "quota-cancel-" + case
                 (worker.TASKS / slug).mkdir(parents=True)
-                st = {"slug": slug, "thread": "", "worktree": str(self.repo),
+                st = {"slug": slug, "pid": 1234, "thread": "", "worktree": str(self.repo),
                       "threads": [], "rotations": []}
+                if case == "stop":
+                    st["stop_request"] = {"at": time.time(), "pid": st["pid"]}
+                worker.save(st)
                 proc = mock.Mock(pid=12345)
                 proc.poll.return_value = None
                 proc.stdout.fileno.return_value = 99
@@ -6084,7 +6280,7 @@ with open(sys.argv[1], "a+") as journal:
                     if case == "error":
                         raise RuntimeError("unrelated quota failure")
                     clock[0] = 61.0
-                    stopped[0] = case == "stop"
+                    stopped[0] = case in ("stop", "interrupt")
                     self.assertTrue(cancelled())
                     if case == "budget-return":
                         return {"reason": reason}
@@ -6107,7 +6303,8 @@ with open(sys.argv[1], "a+") as journal:
                             worker.monitor(*args, control=worker.TurnControl(1, 3))
                     else:
                         result = worker.monitor(*args, control=worker.TurnControl(1, 3))
-                        self.assertEqual(result, ("stopped" if case == "stop" else "budget_exhausted", None))
+                        outcome = {"stop": "stopped", "interrupt": "interrupted"}.get(case, "budget_exhausted")
+                        self.assertEqual(result, (outcome, None))
                 terminate.assert_called_with(proc)
                 self.assertNotIn("codex_pid", st)
 
@@ -6423,28 +6620,32 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         self.assertIn("telemetry unavailable", stderr)
         self.assertNotIn("stop must not wait", stderr)
 
-    def test_telemetry_wrapup_stop_overrides_not_run_and_completed_attempts(self):
+    def test_telemetry_wrapup_interruption_overrides_not_run_and_completed_attempts(self):
         worker = self.worker()
-        for timing in ("before", "after"):
-            with self.subTest(timing=timing):
-                stopped = [timing == "before"]
-                state = {"slug": "wrapup-stop-" + timing, "repo": str(self.repo), "kind": "work",
-                         "account": "main", "thread": "existing-thread", "created": time.time()}
-                (worker.TASKS / state["slug"]).mkdir(parents=True)
+        for outcome in ("stopped", "interrupted"):
+            for timing in ("before", "after"):
+                with self.subTest(outcome=outcome, timing=timing):
+                    stopped = [timing == "before"]
+                    state = {"slug": "wrapup-" + outcome + "-" + timing, "repo": str(self.repo),
+                             "kind": "work", "account": "main", "thread": "existing-thread",
+                             "pid": 1234, "created": time.time()}
+                    if outcome == "stopped":
+                        state["stop_request"] = {"at": time.time(), "pid": state["pid"]}
+                    (worker.TASKS / state["slug"]).mkdir(parents=True)
 
-                def complete_then_stop(*args, **kwargs):
-                    state["wrapup"]["result"] = self.work_result("partial")
-                    stopped[0] = True
-                    return "completed", None
+                    def complete_then_stop(*args, **kwargs):
+                        state["wrapup"]["result"] = self.work_result("partial")
+                        stopped[0] = True
+                        return "completed", None
 
-                with mock.patch.object(worker, "monitor", side_effect=complete_then_stop) as monitor:
-                    worker.wrapup_turn(state, {"language": "en"}, {"name": "main"}, None,
-                                       lambda: stopped[0], {"outcome": "budget_exhausted", "minutes": 1})
-                self.assertEqual(monitor.call_count, int(timing == "after"))
-                self.assertEqual(state["wrapup"]["outcome"], "not_run" if timing == "before" else "completed")
-                self.assertEqual(self.phase_telemetry_journal()[-1]["outcome"], "stopped")
+                    with mock.patch.object(worker, "monitor", side_effect=complete_then_stop) as monitor:
+                        worker.wrapup_turn(state, {"language": "en"}, {"name": "main"}, None,
+                                           lambda: stopped[0], {"outcome": "budget_exhausted", "minutes": 1})
+                    self.assertEqual(monitor.call_count, int(timing == "after"))
+                    self.assertEqual(state["wrapup"]["outcome"], "not_run" if timing == "before" else "completed")
+                    self.assertEqual(self.phase_telemetry_journal()[-1]["outcome"], outcome)
         report = json.loads(self.cli("report", "--json"))
-        self.assertEqual(report["summary"]["outcomes"], {"stopped": 2})
+        self.assertEqual(report["summary"]["outcomes"], {"stopped": 2, "interrupted": 2})
 
     def test_clean_preserves_telemetry_and_report_skips_unreadable_lines(self):
         self.configure(language="en")
@@ -6538,15 +6739,15 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         self.assertIsNone(report["tasks"][0]["result_status"])
         self.assertIsNone(report["tasks"][0]["last_verdict"])
 
-    def test_report_wrapup_preserves_parent_outcome_unless_stopped_or_refused(self):
+    def test_report_wrapup_preserves_parent_outcome_unless_interrupted_or_refused(self):
         now = time.time()
         rows = []
         expected = {}
         for parent in ("budget_exhausted", "stuck"):
-            for wrapup in ("completed", "failed", "budget_exhausted", "stuck", "stopped", "refused"):
+            for wrapup in ("completed", "failed", "budget_exhausted", "stuck", "stopped", "interrupted", "refused"):
                 for kind in ("work", "review", "scout"):
                     slug = parent + "-" + wrapup + "-" + kind
-                    expected[slug] = wrapup if wrapup in ("stopped", "refused") else parent
+                    expected[slug] = wrapup if wrapup in ("stopped", "interrupted", "refused") else parent
                     for phase, outcome in ((kind, parent), ("wrapup", wrapup)):
                         rows.append({"v": 1, "at": now - 100 + len(rows), "repo": "repo",
                                      "slug": slug, "created": now - 200, "phase": phase,
@@ -6556,7 +6757,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         report = json.loads(self.cli("report", "--json"))
         self.assertEqual({row["slug"]: row["outcome"] for row in report["tasks"]}, expected)
         self.assertEqual(report["summary"]["outcomes"],
-                         {"budget_exhausted": 12, "stuck": 12, "stopped": 6, "refused": 6})
+                         {"budget_exhausted": 12, "stuck": 12, "stopped": 6, "interrupted": 6, "refused": 6})
 
     def test_report_stop_during_budget_wrapup_matches_actual_task_outcome(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
@@ -6763,6 +6964,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
             "partly-failed": [("completed", "clean"), ("failed", None)],
             "partly-incomplete": [("completed", "clean"), ("completed", None)],
             "partly-stopped": [("completed", "clean"), ("stopped", "clean")],
+            "partly-interrupted": [("completed", "clean"), ("interrupted", "clean")],
         }
         for slug, angles in cases.items():
             for index, (outcome, verdict) in enumerate(angles):
@@ -6776,13 +6978,15 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         report = json.loads(self.cli("report", "--json"))
         self.assertEqual({row["slug"]: row["last_verdict"] for row in report["tasks"]},
                          {"partly-clean": "clean", "partly-defects": "defects", "all-refused": None,
-                          "partly-failed": None, "partly-incomplete": None, "partly-stopped": None})
+                          "partly-failed": None, "partly-incomplete": None, "partly-stopped": None,
+                          "partly-interrupted": None})
         self.assertEqual(report["summary"]["fix_rounds_to_clean"], {"0": 1})
-        self.assertEqual(report["summary"]["reviews"]["total"], 5)
+        self.assertEqual(report["summary"]["reviews"]["total"], 6)
         self.assertEqual(report["summary"]["reviews"]["with_defects"], 1)
         self.assertEqual({row["slug"]: row["outcome"] for row in report["tasks"]},
                          {"partly-clean": "completed", "partly-defects": "completed", "all-refused": "refused",
-                          "partly-failed": "failed", "partly-incomplete": "completed", "partly-stopped": "stopped"})
+                          "partly-failed": "failed", "partly-incomplete": "completed", "partly-stopped": "stopped",
+                          "partly-interrupted": "interrupted"})
 
     def test_report_latest_work_result_clears_stale_status_and_review_preserves_it(self):
         now = time.time()
@@ -6820,6 +7024,10 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
             "timeout-check": ("check", "timeout", "timeout"),
             "stopped-base": ("base_check", "stopped", "failed"),
             "marked-stopped": ("check", "completed", "stopped"),
+            "interrupted-check": ("check", "interrupted", "interrupted"),
+            "interrupted-base": ("base_check", "interrupted", "failed"),
+            "marked-interrupted": ("check", "completed", "interrupted"),
+            "interrupted-marked-stopped": ("check", "interrupted", "stopped"),
             "recovered": ("check", "stopped", "stopped"),
         }
         rows = []
@@ -6835,8 +7043,10 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         report = json.loads(self.cli("report", "--json"))
         self.assertEqual({row["slug"]: row["outcome"] for row in report["tasks"]},
                          {"stopped-check": "stopped", "failed-check": "completed", "timeout-check": "completed",
-                          "stopped-base": "stopped", "marked-stopped": "stopped", "recovered": "completed"})
-        self.assertEqual(report["summary"]["outcomes"], {"completed": 3, "stopped": 3})
+                          "stopped-base": "stopped", "marked-stopped": "stopped", "recovered": "completed",
+                          "interrupted-check": "interrupted", "interrupted-base": "interrupted",
+                          "marked-interrupted": "interrupted", "interrupted-marked-stopped": "interrupted"})
+        self.assertEqual(report["summary"]["outcomes"], {"completed": 3, "stopped": 3, "interrupted": 4})
 
     def test_telemetry_rollout_usage_keeps_independent_counters_and_ignores_malformed_records(self):
         worker = self.worker()

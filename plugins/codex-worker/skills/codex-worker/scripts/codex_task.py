@@ -727,6 +727,13 @@ def local_time(stamp):
     return time.strftime("%Y-%m-%d %H:%M", time.localtime(stamp)) if stamp is not None else "unknown"
 
 
+def interruption_message(st):
+    received = st.get("signal") or {}
+    return (f"interrupted externally by {received.get('name', 'unknown signal')} "
+            f"at {local_time(received.get('at'))}; "
+            "the worktree is kept — check git status and continue with say")
+
+
 def state_path(slug):
     return TASKS / slug / "state.json"
 
@@ -752,11 +759,47 @@ def load(slug):
     return st
 
 
-def save(st):
+@contextmanager
+def state_lock(slug):
+    # stop is the only concurrent state writer; serialize its read/modify/write
+    # with supervisor saves so neither can lose the other's published fields.
+    with state_path(slug).with_suffix(".lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        yield
+
+
+def write_state(st):
     p = state_path(st["slug"])
     tmp = p.with_suffix(f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(st, ensure_ascii=False, indent=2))
     tmp.replace(p)
+
+
+def save(st):
+    with state_lock(st["slug"]):
+        p = state_path(st["slug"])
+        if st.get("pid") and p.exists():
+            latest = json.loads(p.read_text())
+            if latest.get("pid") == st["pid"] and "stop_request" in latest:
+                st["stop_request"] = latest["stop_request"]
+        write_state(st)
+
+
+def stop_outcome(st, stopped):
+    """Classify cancellation only by a stop request addressed to this supervisor."""
+    if not stopped():
+        return None
+    pid = st.get("pid")
+    request = st.get("stop_request") or {}
+    if pid and request.get("pid") != pid:
+        # The signal can arrive before the supervisor's next save imports stop's
+        # durable request. Atomic state replacement makes this read consistent.
+        latest = load(st["slug"])
+        if latest.get("pid") == pid:
+            request = latest.get("stop_request") or {}
+            if request.get("pid") == pid:
+                st["stop_request"] = request
+    return "stopped" if pid and request.get("pid") == pid else "interrupted"
 
 
 def alive(pid):
@@ -810,6 +853,8 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     st.pop("review_result", None)
     st.pop("review_angle", None)
     st.pop("refusal", None)
+    st.pop("stop_request", None)
+    st.pop("signal", None)
     if kind != "review":
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
@@ -1083,10 +1128,10 @@ def record_phase(st, phase, stopped):
     try:
         yield entry
     except (Exception, SystemExit):
-        entry.finish(outcome="stopped" if stopped() else "failed")
+        entry.finish(outcome=stop_outcome(st, stopped) or "failed")
         raise
     finally:
-        entry.finish(outcome="stopped" if stopped() else None)
+        entry.finish(outcome=stop_outcome(st, stopped))
         TELEMETRY_PHASES.pop()
 
 
@@ -1835,7 +1880,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     save(st)
     with (d / "events.jsonl").open("ab", buffering=0) as log, (d / "stderr.log").open("a") as errors:
         if stopped():
-            return "stopped", None
+            return stop_outcome(st, stopped), None
         error_start = errors.tell()
         attempt_started = time.time()
         active_started = time.monotonic()
@@ -1857,7 +1902,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                     raise
                 decision = None
             if stopped():
-                return "stopped", None
+                return stop_outcome(st, stopped), None
             if control.expired(active_started):
                 return "budget_exhausted", None
             return ("limit", decision) if decision is not None or not allow_credits else None
@@ -1869,7 +1914,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                 while not eof or proc.poll() is None:
                     if stopped():
                         terminate(proc)
-                        return "stopped", None
+                        return stop_outcome(st, stopped), None
                     if control.expired(active_started):
                         return "budget_exhausted", None
                     for key, _ in sel.select(0.2):
@@ -1985,7 +2030,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
 def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     with record_phase(st, "wrapup", stopped) as phase:
         _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry)
-        phase.finish(outcome="stopped" if stopped() else st["wrapup"]["outcome"])
+        phase.finish(outcome=stop_outcome(st, stopped) or st["wrapup"]["outcome"])
 
 
 def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
@@ -2019,8 +2064,8 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
         review_entry.update(result=st["wrapup"]["result"], finished=time.time())
     if review_entry is not None and st["wrapup"]["outcome"] == "refused":
         review_entry.update(outcome="refused", refusal=st["refusal"], result=None, finished=time.time())
-    st["outcome"] = ("stopped" if stopped() else "refused" if st["wrapup"]["outcome"] == "refused"
-                     else reason["outcome"])
+    st["outcome"] = (stop_outcome(st, stopped) or
+                     ("refused" if st["wrapup"]["outcome"] == "refused" else reason["outcome"]))
     save(st)
 
 
@@ -2103,8 +2148,8 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             result = "budget_exhausted"
         if result != "auth":
             st.setdefault("auth_failures", {})[account["name"]] = 0
-        if stopped() or result == "stopped":
-            st["outcome"] = "stopped"
+        if stopped():
+            st["outcome"] = stop_outcome(st, stopped)
             break
         if result in ("budget_exhausted", "stuck"):
             reason = dict(control.reason, active_seconds=round(control.elapsed, 3))
@@ -2195,7 +2240,7 @@ def execute_check(st, stopped, cwd, filename):
             deadline = started + st.get("check_timeout", 1800)
             while proc.poll() is None:
                 if stopped():
-                    outcome = "stopped"
+                    outcome = stop_outcome(st, stopped)
                     break
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -2212,8 +2257,8 @@ def execute_check(st, stopped, cwd, filename):
                 code = proc.wait()
             st.pop("check_pid", None)
     if stopped():
-        outcome = "stopped"
-        st["outcome"] = "stopped"
+        outcome = stop_outcome(st, stopped)
+        st["outcome"] = outcome
     result = {"cmd": st["check"], "exit": code, "seconds": round(time.monotonic() - started, 3),
               "at": time.time(), "outcome": outcome}
     if outcome in ("failed", "timeout"):
@@ -2227,7 +2272,7 @@ def run_check(st, stopped):
     with record_phase(st, "check", stopped) as phase:
         result = _run_check(st, stopped)
         phase.check = result
-        phase.finish(outcome="stopped" if stopped() else (result or {}).get("outcome", "stopped"))
+        phase.finish(outcome=stop_outcome(st, stopped) or (result or {}).get("outcome"))
         return result
 
 
@@ -2244,7 +2289,7 @@ def run_base_check(st, stopped):
     with record_phase(st, "base_check", stopped) as phase:
         result = _run_base_check(st, stopped)
         phase.check = result
-        phase.finish(outcome="stopped" if stopped() else (result or {}).get("outcome", "stopped"))
+        phase.finish(outcome=stop_outcome(st, stopped) or (result or {}).get("outcome"))
         return result
 
 
@@ -2279,8 +2324,6 @@ def _run_base_check(st, stopped):
                 execution = execute_check(st, stopped, worktree, "base-check.log")
                 if execution is not None:
                     result = {key: execution[key] for key in ("outcome", "exit", "seconds")}
-                    if result["outcome"] == "stopped":
-                        result["outcome"] = "failed"
             finally:
                 if (worktree / ".git").exists():
                     subprocess.run(GIT + ["worktree", "remove", "--force", str(worktree)],
@@ -2389,7 +2432,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
     try:
         for angle in angles or [None]:
             if stopped():
-                st["outcome"] = "stopped"
+                st["outcome"] = stop_outcome(st, stopped)
                 break
             start = len(st.get("reviews", []))
             started = time.time()
@@ -2397,7 +2440,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             focused = prompt + f"\n\nReview angle: {angle}. {REVIEW_ANGLES[angle]}" if angle else prompt
             run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
             reviews = st.get("reviews", [])[start:]
-            outcome = "stopped" if stopped() else st["outcome"]
+            outcome = stop_outcome(st, stopped) or st["outcome"]
             result = reviews[-1].get("result") if reviews else None
             if reviews:
                 reviews[-1]["outcome"] = outcome
@@ -2416,14 +2459,14 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
         if not stopped() and records and all(entry["outcome"] in ("completed", "refused") for entry in records):
             st["outcome"] = "refused" if all(entry["outcome"] == "refused" for entry in records) else "completed"
     except (Exception, SystemExit):
-        st["outcome"] = "stopped" if stopped() else "failed"
+        st["outcome"] = stop_outcome(st, stopped) or "failed"
         raise
     finally:
         st.pop("review_angle", None)
         if st.get("outcome") != "refused":
             st.pop("refusal", None)
         account = current_turn_account(st)
-        outcome = "stopped" if stopped() else st["outcome"]
+        st["outcome"] = outcome = stop_outcome(st, stopped) or st["outcome"]
         notify(st, cfg, "review_done", f"review {outcome} on {account}",
                outcome=outcome, account=account, angles=[entry["angle"] for entry in records],
                verdict=result["verdict"] if result else None,
@@ -2555,10 +2598,30 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
 
 def cmd__run(a):
     stopped_flag = threading.Event()
+    received_signal = None
+    st = None
     def stop(signum, frame):
-        stopped_flag.set()
+        nonlocal received_signal
+        at = time.time()
+        name = signal.Signals(signum).name
+        if received_signal is None:
+            received_signal = {"signum": signum, "name": name, "at": at}
+        if st is not None:
+            st.setdefault("signal", received_signal)
+        line = (f"supervisor signal: signum={signum} name={name} "
+                f"at={time.strftime('%Y-%m-%d %H:%M:%S%z', time.localtime(at))} "
+                f"ppid={os.getppid()} pgid={os.getpgrp()}\n")
+        # A separate unbuffered append avoids re-entering Python's stderr buffer
+        # when a signal interrupts another log write. No sender inference.
+        try:
+            with (TASKS / a.slug / "stderr.log").open("ab", buffering=0) as log:
+                log.write(line.encode("utf-8"))
+        finally:
+            stopped_flag.set()
     def stopped():
         reap_notifications()
+        if received_signal is not None and st is not None:
+            st.setdefault("signal", received_signal)
         return stopped_flag.is_set()
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
@@ -2607,8 +2670,9 @@ def cmd__run(a):
         st.update(outcome="failed", error=str(exc))
         print(f"supervisor failed: {exc}", file=sys.stderr)
     finally:
+        guarded_changed = len(guarded_changes(st)) if cfg is not None else 0
         if stopped():
-            st["outcome"] = "stopped"
+            st["outcome"] = stop_outcome(st, stopped)
         if st.get("fix_rounds") and (st.get("outcome") != "completed" or not st.get("auto_fix_stop")):
             st["auto_fix_stop"] = ("review refused" if st.get("outcome") == "refused" and st.get("kind") == "review"
                                    else st.get("outcome") if st.get("outcome") != "completed"
@@ -2625,13 +2689,20 @@ def cmd__run(a):
             if check is not None:
                 message += ", check " + check["outcome"]
             notify(st, cfg, "turn_finished", message, outcome=st["outcome"], account=account, result=result,
-                   guarded_changed=len(guarded_changes(st)))
+                   guarded_changed=guarded_changed)
+            if st["outcome"] == "interrupted":
+                notify(st, cfg, "interrupted", interruption_message(st), outcome=st["outcome"],
+                       signal=st.get("signal"))
             if (result is not None and result["status"] in ("blocked", "needs_decision")
                     and st.get("kind") not in ("review", "scout")):
                 question = next(iter(result["questions"]), "")
                 notify(st, cfg, "needs_input", f"result {result['status']}: {question}",
                        result=result, question=question)
         reap_notifications()
+        if stopped():
+            st["outcome"] = stop_outcome(st, stopped)
+            if st.get("fix_rounds"):
+                st["auto_fix_stop"] = st["outcome"]
         # Publishing idle permits clean to remove both the task and its worktree.
         st["pid"] = None
         save(st)
@@ -2827,6 +2898,8 @@ def cmd_wait(a):
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
     if st.get("turn_stop"):
         print("== turn stopped: " + turn_stop_message(st["turn_stop"]))
+    if st.get("outcome") == "interrupted":
+        print("== " + interruption_message(st))
     if st.get("outcome") == "refused" and st.get("kind") != "review":
         print("== refused by the model: " + st.get("refusal", "")[:200])
     d = TASKS / a.slug
@@ -2858,7 +2931,7 @@ def cmd_wait(a):
                 print(f"- rejected {decision['id']}: {decision['note']}")
     checks = [] if st.get("kind") == "scout" else st.get("checks", [])[st.get("check_start", 0):]
     for check in checks:
-        label = {"passed": "passed", "stopped": "stopped"}.get(check["outcome"], "FAILED")
+        label = {"passed": "passed", "stopped": "stopped", "interrupted": "interrupted"}.get(check["outcome"], "FAILED")
         reason = "timeout, " if check["outcome"] == "timeout" else ""
         print(f"== check `{check['cmd']}`: {label} ({reason}exit {check['exit']}, {check['seconds']:.0f} s)")
         if check["outcome"] in ("failed", "timeout"):
@@ -2868,7 +2941,7 @@ def cmd_wait(a):
             if base["outcome"] == "skipped":
                 print(f"== base tests: skipped ({base['reason']})")
             else:
-                label = "passed" if base["outcome"] == "passed" else "FAILED"
+                label = {"passed": "passed", "stopped": "stopped", "interrupted": "interrupted"}.get(base["outcome"], "FAILED")
                 reason = "timeout, " if base["outcome"] == "timeout" else ""
                 print(f"== base tests: {label} ({reason}exit {base['exit']}, {base['seconds']:.0f} s)")
             if base.get("tail"):
@@ -3012,11 +3085,14 @@ def cmd_report(a):
 
 
 def cmd_stop(a):
-    st = load(a.slug)
-    pid = st.get("pid")
-    if not alive(pid):
-        print("not running")
-        return
+    with state_lock(a.slug):
+        st = load(a.slug)
+        pid = st.get("pid")
+        if not alive(pid):
+            print("not running")
+            return
+        st["stop_request"] = {"at": time.time(), "pid": pid}
+        write_state(st)
     try:
         os.killpg(pid, signal.SIGINT)
     except (ProcessLookupError, PermissionError):

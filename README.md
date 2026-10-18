@@ -94,6 +94,9 @@ python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-r
 python3 -I "$T" wait csv-export
 ```
 
+After `interrupted`, check the preserved worktree with `git status` and continue through `say`.
+If interruptions repeat, inspect the signal line in `stderr.log`.
+
 Codex does not merge. After the result has been reviewed and merged under your repository's rules,
 remove the worktree and archive its threads:
 
@@ -191,7 +194,7 @@ task worktree after every completed implementation turn, including follow-ups. `
 replaces the saved command; `say --no-check` removes it. `--check-timeout SEC` defaults to 1800 seconds.
 In workspace sandbox mode, checks run through `codex sandbox` with the same write permissions as the
 worker and reviews.
-Failed, manually stopped, and paused turns do not run checks. Turns ending with `budget_exhausted`
+Failed, stopped, interrupted, and paused turns do not run checks. Turns ending with `budget_exhausted`
 or `stuck` still run the saved check and skip automatic review and fix rounds.
 
 Output goes to the task's `check.log`. `wait` prints the exit code and duration; on failure or timeout,
@@ -281,8 +284,8 @@ and network access are **not** restricted.
 The worker leaves changes in the worktree and returns a `commit_message` whose first line is the
 subject. After each completed work turn, including fix rounds and any result status, the supervisor
 commits changes before checking them, with Git hooks and fsmonitor disabled. It pushes without force
-and creates a PR if `gh` is available and the branch has none. Failed or stopped turns are not committed. Empty
-messages use `<slug>: turn <N>`. Push or PR failures do not fail the turn; `wait` shows the publication
+and creates a PR if `gh` is available and the branch has none. Failed, stopped, or interrupted turns
+are not committed. Empty messages use `<slug>: turn <N>`. Push or PR failures do not fail the turn; `wait` shows the publication
 result or error and `== sandbox: workspace`. `status` also shows the mode.
 
 Only filters whose `clean`, `smudge`, or `process` commands start with `git-lfs ` or `git lfs ` allow
@@ -304,9 +307,9 @@ and a short `message`. Event types are `turn_finished` (`outcome`, `result`, als
 and `guarded_changed`, the number of changed guarded files),
 `needs_input` (`result` and the first question for `blocked` or `needs_decision`), `paused` (`until`),
 `woke`, `rotated` (`from` and `to`), `needs_login`, `reset_credit_used`, `check_failed`, and `review_done`
-(`verdict`, finding count, `round`, and `angles`), plus `budget_exhausted` and `stuck`.
-`turn_finished` is sent once when the entire cycle ends, with `outcome` including `budget_exhausted`
-or `stuck` when a guard stopped the turn. The separate guard events also obey `notify_events`.
+(`verdict`, finding count, `round`, and `angles`), plus `budget_exhausted`, `stuck`, and `interrupted`.
+`turn_finished` is sent once when the entire cycle ends, with `outcome` including `budget_exhausted`,
+`stuck`, or `interrupted`. Separate guard and interruption events also obey `notify_events`.
 Use `notify_events` to select the events you want. For example, send the event JSON to an ntfy topic
 with `curl`; the appended argument supplies the value for `--data-binary`:
 
