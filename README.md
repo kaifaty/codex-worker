@@ -4,8 +4,8 @@ Let Claude plan and review while Codex implements in its own git worktree. This 
 moves substantial coding work to your ChatGPT subscription, saving Claude subscription usage for the
 parts where you want Claude's judgment.
 
-Claude writes a bounded brief, starts Codex, and waits in the background. Codex commits and opens a PR,
-or the supervisor publishes its changes when the optional workspace sandbox is enabled.
+Claude writes a bounded brief, starts Codex, and waits in the background. Codex commits and pushes;
+the supervisor opens and updates the PR in every mode, using Codex's result title and description.
 Optional Codex reviews run in fresh threads, and the supervisor can send findings back for bounded
 fix rounds. Claude checks the final diff and review and handles merging. Optional account monitoring
 can pause a task until a usage window resets.
@@ -19,7 +19,7 @@ This repository is both the `kaifaty` Claude Code marketplace and the `codex-wor
 - Python 3.9 or newer, using only the standard library.
 - Git, a repository with an `origin` remote, and permission to push task branches.
 - macOS or Linux.
-- Optional: GitHub CLI (`gh`), authenticated for the repository, to open and inspect PRs.
+- Optional: GitHub CLI (`gh`), authenticated for the repository, for supervisor PR publication and inspection.
 
 Install [Codex CLI](https://github.com/openai/codex) if needed (`npm install -g @openai/codex`), then run
 `codex login`. The worker uses your existing Codex model, reasoning, and permission settings. There is
@@ -82,6 +82,9 @@ Work and review turns use strict JSON schemas through `--output-schema`. `wait` 
 status (`done`, `partial`, `blocked`, or `needs_decision`), summary, checks, PR, questions, and remaining
 work, plus round summaries, rejected findings with reasons, the latest review, and the stop reason.
 Implementation results include `findings` decisions (`fixed` or `rejected`), empty on ordinary turns.
+Codex supplies `pr_title` and the whole PR's `pr_body`; an empty body leaves an existing PR unchanged.
+The supervisor publishes only a branch pushed to `origin` and records the URL, action, and error in
+`publish`. `wait` shows `== PR created`, `== PR updated`, or the skip reason; its `PR:` comes from that receipt.
 Review findings include IDs, severity, locations, and verification steps. `status <slug>`
 includes the latest `result`. Invalid or non-JSON finals remain readable as `result: unknown`, and
 automatic review keeps its previous behavior for them. Scouts return plain text.
@@ -305,10 +308,10 @@ and network access are **not** restricted.
 
 The worker leaves changes in the worktree and returns a `commit_message` whose first line is the
 subject. After each completed work turn, including fix rounds and any result status, the supervisor
-commits changes before checking them, with Git hooks and fsmonitor disabled. It pushes without force
-and creates a PR if `gh` is available and the branch has none. Failed, stopped, or interrupted turns
-are not committed. Empty messages use `<slug>: turn <N>`. Push or PR failures do not fail the turn; `wait` shows the publication
-result or error and `== sandbox: workspace`. `status` also shows the mode.
+commits changes before checking them, with Git hooks and fsmonitor disabled. It pushes without force,
+then uses the same PR publication step as every other mode. Failed, stopped, or interrupted turns
+are not committed. Empty messages use `<slug>: turn <N>`. Push or PR failures do not fail the turn;
+`wait` shows the publication result or error and `== sandbox: workspace`. `status` also shows the mode.
 
 Only filters whose `clean`, `smudge`, or `process` commands start with `git-lfs ` or `git lfs ` allow
 supervisor publication; otherwise, commit the turn manually. Workspace mode is unsuitable for a
@@ -433,8 +436,8 @@ On macOS, that command may be available from the ChatGPT.app bundle listed above
   only access and actions you intend to authorize.
 - Automatic account monitoring and reset handling require explicit `accounts`; single-login use has
   no automatic rotation or reset supervisor.
-- PR creation needs `gh` support for the remote. Otherwise Codex is instructed to push the branch and
-  report its name.
+- PR publication needs `gh` support for the remote and a pushed branch. Otherwise the supervisor
+  records a skip reason without failing the turn. Closed and merged PRs are left unchanged.
 - Cleanup removes the worktree and task logs. Review and merge before running `clean`.
 - Windows is not supported; process supervision uses Unix process groups and signals.
 
