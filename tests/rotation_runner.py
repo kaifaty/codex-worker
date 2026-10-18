@@ -72,11 +72,12 @@ def _worker(script, directory):
 def _read_results(worker, events):
     try:
         for line in worker.stdout:
-            events.put((worker, json.loads(line)))
+            received_at = time.monotonic()
+            events.put((worker, json.loads(line), received_at))
     except Exception:
-        events.put((worker, {"runner_error": traceback.format_exc()}))
+        events.put((worker, {"runner_error": traceback.format_exc()}, time.monotonic()))
     finally:
-        events.put((worker, None))
+        events.put((worker, None, time.monotonic()))
 
 
 def _cases(suite):
@@ -128,7 +129,7 @@ def run(module):
             worker.stdin.write(json.dumps(name) + "\n")
             worker.stdin.flush()
         except (BrokenPipeError, OSError):
-            events.put((worker, None))
+            events.put((worker, None, time.monotonic()))
 
     def start_worker():
         workdir = str(Path(directory) / str(len(workers)))
@@ -167,7 +168,7 @@ def run(module):
             if watcher.poll() is not None:
                 raise RuntimeError("test cleanup watchdog exited unexpectedly")
             try:
-                worker, result = events.get(timeout=0.1)
+                worker, result, received_at = events.get(timeout=0.1)
             except queue.Empty:
                 # A descendant can inherit stdout and keep its pipe open after
                 # a worker crashes, so EOF alone cannot detect worker death.
@@ -187,6 +188,12 @@ def run(module):
                     else:
                         if result["name"] != active[worker][0]:
                             raise RuntimeError("worker returned an unexpected test result")
+                        # The reader keeps observing results while another
+                        # worker's cleanup blocks this loop. Enforce the
+                        # deadline at receipt, preserving on-time queued results.
+                        if received_at - active[worker][1] >= timeout:
+                            retire(worker, "timeout %.3fs exceeded" % timeout)
+                            continue
                         active.pop(worker)
                         for key in counts:
                             counts[key] += result[key]
@@ -201,7 +208,8 @@ def run(module):
                         else:
                             worker.stdin.close()
             # Cleanup can take the TERM grace period. Consume results already
-            # queued by healthy workers before checking their deadlines.
+            # queued by healthy workers before checking their deadlines;
+            # each result is checked against its own receipt time above.
             if not events.empty():
                 continue
             now = time.monotonic()

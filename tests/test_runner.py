@@ -176,6 +176,65 @@ class RunnerTests(unittest.TestCase):
         self.assertTrue(not status.stdout.strip() or status.stdout.strip().startswith("Z"),
                         "unmarked child is still holding worker stdout: " + status.stdout)
 
+    def _assert_neighbor_deadline_during_cleanup(self, delay, overdue):
+        result = self._run("""
+            class SyntheticTests(unittest.TestCase):
+                def test_a_crashes_with_child(self):
+                    read_fd, write_fd = os.pipe()
+                    child = subprocess.Popen(
+                        [sys.executable, "-I", "-c",
+                         "import os, signal, sys, time; "
+                         "from pathlib import Path; "
+                         "signal.signal(signal.SIGTERM, "
+                         "lambda *_: Path(sys.argv[2]).touch()); "
+                         "os.write(int(sys.argv[1]), b'1'); "
+                         "os.close(int(sys.argv[1])); time.sleep(60)",
+                         str(write_fd), str(FIXTURE / "cleanup-started")],
+                        env={}, pass_fds=(write_fd,))
+                    (FIXTURE / "detached.json").write_text(json.dumps({"pid": child.pid}))
+                    os.close(write_fd)
+                    try:
+                        self.assertEqual(os.read(read_fd, 1), b"1")
+                    finally:
+                        os.close(read_fd)
+                    deadline = time.monotonic() + 4
+                    while not (FIXTURE / "neighbor-started").exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    os._exit(17)
+
+                def test_b_completes_during_cleanup(self):
+                    (FIXTURE / "neighbor-started").touch()
+                    deadline = time.monotonic() + 4
+                    while not (FIXTURE / "cleanup-started").exists():
+                        self.assertLess(time.monotonic(), deadline)
+                        time.sleep(0.01)
+                    time.sleep(%s)
+                    (FIXTURE / "neighbor-finished").touch()
+
+                def test_c_passes(self):
+                    self.assertTrue(True)
+        """ % delay)
+        self._assert_summary(result, tests=3, errors=2 if overdue else 1)
+        self.assertIn("(exit 17)", result.stderr)
+        self.assertTrue((self.root / "neighbor-finished").exists(), result.stderr)
+        self.assertIn("SyntheticTests.test_c_passes ... ok", result.stderr)
+        if overdue:
+            self.assertNotIn("SyntheticTests.test_b_completes_during_cleanup ... ok",
+                             result.stderr)
+            self.assertRegex(result.stderr,
+                             r"SyntheticTests\.test_b_completes_during_cleanup.*"
+                             r"timeout.*\d+\.\d+s")
+        else:
+            self.assertIn("SyntheticTests.test_b_completes_during_cleanup ... ok",
+                          result.stderr)
+
+    def test_runner_rejects_overdue_result_received_during_cleanup(self):
+        self._assert_neighbor_deadline_during_cleanup(delay=1.5, overdue=True)
+
+    def test_runner_keeps_on_time_result_received_during_cleanup(self):
+        self._assert_neighbor_deadline_during_cleanup(delay=0.2, overdue=False)
+
     def test_runner_times_out_hanging_test_and_continues(self):
         result = self._run("""
             class SyntheticTests(unittest.TestCase):
