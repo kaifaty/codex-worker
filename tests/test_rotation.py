@@ -1705,6 +1705,126 @@ class RotationTests(unittest.TestCase):
                          ("budget_exhausted", 5, "weekly"))
         self.assertEqual(task["weekly_used_percent"], 6)
 
+    def test_weekly_usage_boundaries_preserve_account_gaps_and_resets(self):
+        worker = self.worker()
+        slug = "weekly-account-boundaries"
+        (worker.TASKS / slug).mkdir(parents=True)
+        st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "created": time.time()}
+        cases = [("main", 10, 17, 7), ("second", 20, 22, 2),
+                 ("main", 16, 18, 1), ("main", 20, 22, 2),
+                 ("main", 2, 4, 0), ("main", 4, 5, 1)]
+        expected = 0
+        for turn, (account, before, after, delta) in enumerate(cases, 1):
+            with self.subTest(account=account, before=before, after=after):
+                path = self.root / ("boundary-%d.jsonl" % turn)
+                path.write_text("".join(json.dumps({"payload": {"type": "token_count", "rate_limits": {
+                    "primary": {"used_percent": value, "window_minutes": 10080}}}}) + "\n"
+                                        for value in (before, after)))
+                st.update(account=account, turns=turn)
+                with worker.record_phase(st, "work", lambda: False) as phase:
+                    phase.add_usage(account, "thread-%d" % turn, None, path, 0)
+                    phase.finish(outcome="completed")
+                expected += delta
+                self.assertEqual(st["weekly_used_percent"], expected)
+                self.assertEqual(st["weekly_usage_boundaries"][account], after)
+                worker.save(st)
+                st = worker.load(slug)
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], 13)
+        self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
+                         {"main": 11, "second": 2})
+
+    def test_weekly_budget_late_stopped_sample_does_not_overlap_wrapup(self):
+        worker = self.worker()
+        slug = "weekly-late-stop"
+        (worker.TASKS / slug).mkdir(parents=True)
+        account = {"name": "main", "home": str(self.home)}
+        st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "base": "main",
+              "kind": "work", "account": "main", "thread": "same-thread", "threads": [],
+              "reviews": [], "rotations": [], "rounds": [], "turns": 1, "outcome": "running",
+              "max_task_weekly_percent": 5}
+        rollout = self.root / "late-rollout.jsonl"
+
+        def quota(used):
+            return json.dumps({"type": "event_msg", "payload": {"type": "token_count",
+                               "rate_limits": {"primary": {"used_percent": used,
+                                                          "window_minutes": 10080}}}}) + "\n"
+
+        def append_quota(*used):
+            with rollout.open("a") as stream:
+                stream.write("".join(quota(value) for value in used))
+
+        append_quota(10)
+        result = self.work_result("partial")
+        completion = (json.dumps({"type": "item.completed", "item": {
+            "type": "agent_message", "text": json.dumps(result)}}) +
+            '\n{"type":"turn.completed"}\n').encode()
+        exec_chunks = [b'{"type":"turn.started"}\n']
+        wrap_chunks = [completion, b""]
+        stopped_exec = [False]
+        finished_wrap = [False]
+        observed = []
+        proc = mock.Mock(pid=IMPOSSIBLE_PID)
+        proc.stdout.fileno.return_value = 99
+        proc.poll.side_effect = lambda: 0 if stopped_exec[0] else None
+        wrap = mock.Mock(pid=IMPOSSIBLE_PID)
+        wrap.stdout.fileno.return_value = 100
+        wrap.poll.side_effect = lambda: 0 if finished_wrap[0] else None
+        wrap.wait.return_value = 0
+        selector = mock.MagicMock()
+        selector.__enter__.return_value = selector
+        selector.select.side_effect = lambda timeout: (
+            [(SimpleNamespace(fileobj=proc.stdout), worker.selectors.EVENT_READ)] if exec_chunks else [])
+        wrap_selector = mock.MagicMock()
+        wrap_selector.__enter__.return_value = wrap_selector
+        wrap_selector.select.side_effect = lambda timeout: (
+            [(SimpleNamespace(fileobj=wrap.stdout), worker.selectors.EVENT_READ)] if wrap_chunks else [])
+
+        def read(fd, size):
+            if fd == 99:
+                observed.append("exec quota 16, no completion")
+                append_quota(10, 16)
+                return exec_chunks.pop(0)
+            self.assertEqual(fd, 100)
+            chunk = wrap_chunks.pop(0)
+            if chunk:
+                observed.append("wrap-up quotas 16, 18")
+                self.assertTrue(stopped_exec[0])
+                self.assertEqual(st["weekly_used_percent"], 7)
+                append_quota(16, 18)
+            else:
+                finished_wrap[0] = True
+            return chunk
+
+        def terminate(process):
+            if process is proc:
+                stopped_exec[0] = True
+                observed.append("late quota 17 after exec stopped")
+                append_quota(17)
+
+        with mock.patch.object(worker, "prepare_home"), \
+                mock.patch.object(worker, "terminate", side_effect=terminate), \
+                mock.patch.object(worker.subprocess, "Popen", side_effect=[proc, wrap]) as popen, \
+                mock.patch.object(worker.selectors, "DefaultSelector", side_effect=[selector, wrap_selector]), \
+                mock.patch.object(worker.os, "read", side_effect=read), \
+                mock.patch.object(worker.fcntl, "ioctl", return_value=bytes(4)), \
+                mock.patch.object(worker, "rollout_path", return_value=rollout):
+            worker.run_turn(st, {"enabled": False, "accounts": [account]}, "work", None,
+                            False, lambda: False, lambda seconds: None)
+        self.assertEqual(observed, ["exec quota 16, no completion", "late quota 17 after exec stopped",
+                                    "wrap-up quotas 16, 18"])
+        self.assertEqual(popen.call_count, 2)
+        self.assertIn("resume", popen.call_args_list[1].args[0])
+        self.assertEqual(st["outcome"], "budget_exhausted")
+        self.assertEqual(st["result"], result)
+        self.assertEqual(st["weekly_used_percent"], 8)
+        rows = self.phase_telemetry_journal()
+        self.assertEqual([(row["phase"], row["weekly_used_before"], row["weekly_used_after"])
+                          for row in rows], [("work", 10, 17), ("wrapup", 17, 18)])
+        self.assertEqual([worker.weekly_delta(row["usage"][0]) for row in rows], [7, 1])
+        report = json.loads(self.cli("report", "--slug", slug, "--json"))
+        self.assertEqual(report["tasks"][0]["weekly_used_percent"], st["weekly_used_percent"])
+
     def test_final_weekly_budget_drains_completion_before_counting_fix_once(self):
         worker = self.worker()
         slug = "weekly-completion-order"
@@ -7622,11 +7742,13 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         replies = [self.work_result(), self.review_result(),
                    self.work_result(), self.review_result(False)]
         runs = []
+        weekly = 10
         for index, reply in enumerate(replies, 1):
             runs.append({"mode": "complete", "reply": reply,
                          "token_usage_before": self.telemetry_usage(0, 0, 0, 0),
                          "token_usage_after": self.telemetry_usage(index * 10, 0, 2, 1),
-                         "weekly_used_before": 10, "weekly_used_after": 10 + index})
+                         "weekly_used_before": weekly, "weekly_used_after": weekly + index})
+            weekly += index
         self.account(self.home, "A", self.reset, runs=runs)
         self.start("report-reused-slug", "--review")
         self.wait("report-reused-slug")

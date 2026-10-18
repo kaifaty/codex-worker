@@ -1067,13 +1067,24 @@ class PhaseTelemetry:
         self.rotation_start = len(st.get("rotations", []))
         self.check = None
 
+    def weekly_start(self, account, first, before=None):
+        start = (first or {}).get("weekly")
+        if start is None:
+            return (before or {}).get("weekly")
+        boundary = self.st.get("weekly_usage_boundaries", {}).get(account)
+        for entry in reversed(self.usage):
+            if entry["account"] == account and entry.get("weekly_used_after") is not None:
+                boundary = entry["weekly_used_after"]
+                break
+        # An opening sample may lag the previous phase's final notification.
+        # Never charge the already accounted portion of this account again.
+        return max(start, boundary) if boundary is not None else start
+
     def add_usage(self, account, thread, before, path, offset):
         if not thread:
             return
         first, last = rollout_usage(path, offset)
-        weekly_before = (first or {}).get("weekly")
-        if weekly_before is None:
-            weekly_before = (before or {}).get("weekly")
+        weekly_before = self.weekly_start(account, first, before)
         last = last or before
         tokens = {}
         for key in TOKEN_FIELDS:
@@ -1097,6 +1108,9 @@ class PhaseTelemetry:
         spent = self.st.get("weekly_used_percent", 0)
         for entry in self.usage:
             spent += weekly_delta(entry)
+            after = entry.get("weekly_used_after")
+            if type(after) in (int, float) and 0 <= after <= 100:
+                self.st.setdefault("weekly_usage_boundaries", {})[entry["account"]] = after
         self.st["weekly_used_percent"] = spent
         try:
             st = self.st
@@ -2114,7 +2128,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
                                 if control.weekly is not None and not turn_completed:
                                     if weekly_before is None:
                                         first, _ = rollout_usage(path, usage_offset)
-                                        weekly_before = (first or {}).get("weekly")
+                                        weekly_before = (telemetry.weekly_start(account["name"], first)
+                                                         if telemetry else (first or {}).get("weekly"))
                                     used = weekly_used(limits)
                                     spent = (st.get("weekly_used_percent", 0)
                                              + (telemetry.weekly_spent() if telemetry else 0)
