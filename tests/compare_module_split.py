@@ -40,6 +40,10 @@ def _is_worker_path(path):
 
 
 def sources_at_revision(root, revision):
+    # A fetch may move a symbolic ref between reads; pin the whole base tree.
+    revision = _git(
+        root, "rev-parse", "--verify", revision + "^{commit}",
+    ).decode("ascii").strip()
     listing = _git(root, "ls-tree", "-r", "--name-only", "-z", revision,
                    "--", ENTRYPOINT, PACKAGE)
     paths = sorted(path.decode("utf-8") for path in listing.split(b"\0")

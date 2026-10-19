@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 
 # Isolated Python omits the script directory from its import path.
@@ -147,6 +148,54 @@ class CompareModuleSplitTests(unittest.TestCase):
         self.assert_categories(result, moved=1, same=1)
         command = self.run_tool(base)
         self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
+
+    def test_base_revision_is_pinned_before_tree_reads(self):
+        commit_a = self.commit_tree({
+            "codex_task.py": "FIRST = 1\n",
+            "codex_worker/config.py": "SECOND = 1\n",
+        })
+        commit_b = self.commit_tree({
+            "codex_task.py": "FIRST = 2\n",
+            "codex_worker/config.py": "SECOND = 2\n",
+        })
+        self.write_tree({
+            "codex_task.py": "FIRST = 1\n",
+            "codex_worker/config.py": "SECOND = 2\n",
+        })
+        for revision, changed_name in ((commit_a, "SECOND"), (commit_b, "FIRST")):
+            with self.subTest(revision=revision):
+                result = self.compare(revision)
+                self.assert_categories(result, same=1, changed=1)
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["categories"]["changed"][0]["names"],
+                                 [changed_name])
+
+        ref = "refs/remotes/origin/main"
+        actual_git = compare_module_split._git
+        for move_after in ("ls-tree", "show"):
+            with self.subTest(move_after=move_after):
+                self.git("update-ref", ref, commit_a)
+                moved = False
+
+                # Schedule the ref update between real Git reads so a mixed
+                # base cannot pass only because the subprocess race was missed.
+                def move_ref(root, *args):
+                    nonlocal moved
+                    output = actual_git(root, *args)
+                    if args[0] == move_after and not moved:
+                        self.git("update-ref", ref, commit_b)
+                        moved = True
+                    return output
+
+                with mock.patch.object(compare_module_split, "_git",
+                                       side_effect=move_ref):
+                    result = self.compare("origin/main")
+                self.assertTrue(moved)
+                self.assertEqual(self.git("rev-parse", ref), commit_b)
+                self.assert_categories(result, same=1, changed=1)
+                self.assertFalse(result["passed"])
+                self.assertEqual(result["categories"]["changed"][0]["names"],
+                                 ["SECOND"])
 
     def test_assignments_classes_and_docstrings_are_compared(self):
         source = ("A = B = 1\nC, D = (2, 3)\nE: int = 4\n"
