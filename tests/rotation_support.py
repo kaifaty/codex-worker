@@ -297,10 +297,29 @@ def execute():
              "This content was flagged for possible cybersecurity risk. Please try a different prompt.")}})
         return 1
 
+    def capacity_failure():
+        deadline = time.monotonic() + run.get("delay", 0)
+        while not stopped[0] and time.monotonic() < deadline:
+            time.sleep(0.02)
+        if stopped[0]:
+            return 130
+        if any(key in run for key in ("token_usage_after", "weekly_used_after")):
+            rollout_limits()
+        error = {"message": run.get("error",
+                 "Selected model is at capacity. Please try a different model.")}
+        trace({"command": "capacity-error", "thread": thread})
+        if run.get("event") == "error":
+            emit(dict(error, type="error"))
+        else:
+            emit({"type": "turn.failed", "error": error})
+        return 1
+
     if run["mode"] == "auth_error" and run.get("before_thread"):
         return auth_failure()
     if run["mode"] == "refused" and run.get("before_thread"):
         return refusal()
+    if run["mode"] == "capacity_error" and run.get("before_thread"):
+        return capacity_failure()
     if run.get("rollout_gate"):
         trace({"command": "rollout-waiting", "thread": thread})
         while not Path(run["rollout_gate"]).exists() and not stopped[0]:
@@ -370,6 +389,8 @@ def execute():
         return 1
     if run["mode"] == "auth_error":
         return auth_failure()
+    if run["mode"] == "capacity_error":
+        return capacity_failure()
     if "weekly_update_after" in run:
         deadline = time.monotonic() + run["weekly_update_after"]
         while not stopped[0] and time.monotonic() < deadline:

@@ -47,6 +47,15 @@ class PromptTests(unittest.TestCase):
             with self.subTest(language=language):
                 self.assertEqual(self.worker.auth_resume_prompt({"language": language}), text)
 
+    def test_capacity_resume_prompt_text_in_both_languages(self):
+        expected = {
+            "en": "The turn was interrupted because the model was at capacity. Continue from where you stopped.",
+            "ru": "Ход прервался из-за перегрузки модели. Продолжай с того места, где остановился.",
+        }
+        for language, text in expected.items():
+            with self.subTest(language=language):
+                self.assertEqual(self.worker.capacity_resume_prompt({"language": language}), text)
+
     def test_followup_prompt_text_in_both_languages(self):
         parts = {
             "en": ("## Continuation", "Messages from Claude and review, in order:",

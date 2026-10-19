@@ -58,3 +58,12 @@ and show the RPC response and refreshed limits.
 
 Authentication errors get one retry, then rotation. When `wait` says `needs login`, have the user run
 `login <account>`.
+
+When a `turn.failed` or `error` event contains `at capacity` (case-insensitive), the supervisor waits
+60 seconds and retries once on the same account. It resumes the existing thread with a short
+continuation prompt, or starts a new exec with the original prompt if no thread was created.
+This also works without configured accounts, and each review or fix turn gets its own retry.
+`stop` and signals interrupt the pause. Active time and weekly budgets span both attempts; the pause
+does not count as active exec time. A second capacity error fails the turn. `wait` shows
+`== retried: model at capacity`; telemetry and `report` record `capacity_retries` (0 for older rows).
+`CODEX_TASK_CAPACITY_RETRY_SECONDS` overrides the pause for tests.

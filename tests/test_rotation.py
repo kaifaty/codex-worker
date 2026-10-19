@@ -23,6 +23,7 @@ import rotation_reviews
 import rotation_lifecycle
 import rotation_reset_credits
 import rotation_accounts
+import rotation_capacity
 import rotation_telemetry
 import rotation_prompts
 import test_runner
@@ -31,12 +32,14 @@ import test_process_cleanup
 import test_rollout
 import test_options
 import test_state_fields
+import test_capacity_report
 from test_runner import RunnerTests
 from test_stress_selection import StressSelectionTests
 from test_process_cleanup import ProcessCleanupTests
 from test_rollout import RolloutTests
 from test_options import OptionRegistryTests
 from test_state_fields import StateFieldRegistryTests
+from test_capacity_report import CapacityReportTests
 from rotation_prompts import PromptTests
 
 
@@ -52,6 +55,7 @@ class RotationTests(
         rotation_lifecycle.LifecycleTests,
         rotation_reset_credits.ResetCreditTests,
         rotation_accounts.AccountAuthTests,
+        rotation_capacity.CapacityRetryTests,
         rotation_telemetry.TelemetryReportTests):
     pass
 
@@ -59,7 +63,7 @@ class RotationTests(
 # Source order is also the order used by the AST-based stress selection.
 TEST_MODULES = (tuple(sys.modules[cls.__module__] for cls in RotationTests.__bases__)
                 + (rotation_prompts, test_runner, test_stress_selection, test_process_cleanup,
-                   test_rollout, test_options, test_state_fields))
+                   test_rollout, test_options, test_state_fields, test_capacity_report))
 
 
 if __name__ == "__main__":
