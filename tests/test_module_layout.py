@@ -138,6 +138,9 @@ class _Reads(ast.NodeVisitor):
             name = "_" + self.class_name.lstrip("_") + name
         return name
 
+    def _bind(self, name, module=None):
+        self.module_imports[id(self.table)][self._name(name)] = module
+
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Load):
             name = self._name(node.id)
@@ -147,20 +150,27 @@ class _Reads(ast.NodeVisitor):
                             if table is self.table)
                 if not local:
                     self.class_comprehension_reads.setdefault(id(self.table), {}).setdefault(name, node.lineno)
+        elif isinstance(node.ctx, (ast.Store, ast.Del)):
+            name = self._name(node.id)
+            # Inlined iteration targets do not replace the enclosing binding.
+            if not any(name in targets for table, targets in self.attribute_comprehensions
+                       if table is self.table):
+                self._bind(node.id)
 
     def visit_Import(self, node):
         for alias in node.names:
+            name = alias.asname or alias.name.split(".")[0]
+            target = None
             if alias.name.split(".")[0] in {"codex_task", "codex_worker"}:
-                name = alias.asname or alias.name.split(".")[0]
                 target = alias.name if alias.asname else alias.name.split(".")[0]
-                self.module_imports[id(self.table)][self._name(name)] = target
+            self._bind(name, target)
 
     def visit_ImportFrom(self, node):
-        if ((node.level == 1 and node.module is None)
-                or (not node.level and node.module == "codex_worker")):
-            for alias in node.names:
-                name = self._name(alias.asname or alias.name)
-                self.module_imports[id(self.table)][name] = "codex_worker." + alias.name
+        own_module = ((node.level == 1 and node.module is None)
+                      or (not node.level and node.module == "codex_worker"))
+        for alias in node.names:
+            self._bind(alias.asname or alias.name,
+                       "codex_worker." + alias.name if own_module else None)
 
     def visit_Attribute(self, node):
         if isinstance(node.value, ast.Name):
@@ -171,12 +181,16 @@ class _Reads(ast.NodeVisitor):
                           and any(table is self.table for table, targets
                                   in self.attribute_comprehensions))
             if not local:
-                self.attributes.append((self.table, name, self._name(node.attr), node, skip_class))
+                # A later assignment must not erase checks on its RHS or on
+                # earlier reads. Outer scopes still resolve their final bindings.
+                bindings = dict(self.module_imports[id(self.table)])
+                self.attributes.append((self.table, name, self._name(node.attr), node, skip_class, bindings))
         self.generic_visit(node)
 
-    def imported_module(self, table, name, skip_class=False):
+    def imported_module(self, table, name, skip_class=False, bindings=None):
         """Resolve an alias using lexical bindings rather than its spelling."""
         if skip_class:
+            bindings = None
             table = self.parents[id(table)]
             while table is not None and table.get_type() == "class":
                 table = self.parents[id(table)]
@@ -186,10 +200,12 @@ class _Reads(ast.NodeVisitor):
             symbol = table.lookup(name)
         except KeyError:
             return None
-        if table.get_type() == "module" or symbol.is_global():
+        if table.get_type() == "module":
+            return (self.module_imports[id(table)] if bindings is None else bindings).get(name)
+        if symbol.is_global():
             return self.module_imports[id(self.tables[0])].get(name)
         if symbol.is_imported() or symbol.is_local():
-            return self.module_imports[id(table)].get(name)
+            return (self.module_imports[id(table)] if bindings is None else bindings).get(name)
         if symbol.is_free():
             parent = self.parents[id(table)]
             while parent is not None and parent.get_type() == "class":
@@ -206,6 +222,7 @@ class _Reads(ast.NodeVisitor):
         annotations += [args.vararg.annotation if args.vararg else None,
                         args.kwarg.annotation if args.kwarg else None, node.returns]
         self._annotation(node.lineno, annotations)
+        self._bind(node.name)
         self._visit_in(self._child("function", node.name, node.lineno), node.body)
 
     visit_AsyncFunctionDef = visit_FunctionDef
@@ -222,12 +239,49 @@ class _Reads(ast.NodeVisitor):
             self.class_scopes[(node.lineno, node.col_offset)] = id(table)
         self._visit_in(table, node.body)
         self.class_name = previous_class
+        self._bind(node.name)
+
+    def visit_Assign(self, node):
+        self.visit(node.value)
+        for target in node.targets:
+            self.visit(target)
+
+    def visit_NamedExpr(self, node):
+        self.visit(node.value)
+        self.visit(node.target)
+
+    def visit_AugAssign(self, node):
+        if isinstance(node.target, ast.Name):
+            self.visit(node.value)
+            self.visit(node.target)
+        else:
+            # Attribute/subscript targets are evaluated before the RHS.
+            self.visit(node.target)
+            self.visit(node.value)
 
     def visit_AnnAssign(self, node):
-        self.visit(node.target)
-        self._annotation(node.lineno, [node.annotation], shared=True)
         if node.value is not None:
             self.visit(node.value)
+            self.visit(node.target)
+        elif not isinstance(node.target, ast.Name):
+            self.visit(node.target)
+        self._annotation(node.lineno, [node.annotation], shared=True)
+
+    def visit_For(self, node):
+        self.visit(node.iter)
+        self.visit(node.target)
+        for statement in node.body + node.orelse:
+            self.visit(statement)
+
+    visit_AsyncFor = visit_For
+
+    def visit_ExceptHandler(self, node):
+        if node.type is not None:
+            self.visit(node.type)
+        if node.name:
+            self._bind(node.name)
+        for statement in node.body:
+            self.visit(statement)
 
     def visit_Lambda(self, node):
         for value in node.args.defaults + node.args.kw_defaults:
@@ -358,8 +412,8 @@ def check_layout(scripts):
                        % (name, other_path, other_line))
             else:
                 definitions[name] = (path, line)
-        for scope, name, attribute, node, skip_class in reads.attributes:
-            target = reads.imported_module(scope, name, skip_class)
+        for scope, name, attribute, node, skip_class, bindings in reads.attributes:
+            target = reads.imported_module(scope, name, skip_class, bindings)
             if target not in analyses:
                 continue  # Unknown own modules have an import diagnostic below.
             target_names = analyses[target][2].names
@@ -586,6 +640,61 @@ class ModuleLayoutTests(unittest.TestCase):
                                   "    return inner\n"),
             "codex_worker/b.py": "import math\nname = 1\nholder = {}\n",
         }), [])
+
+    def test_reassigned_module_aliases_are_values(self):
+        for statement in (
+            "from . import config",
+            "from codex_worker import config",
+            "import codex_worker.config as config",
+        ):
+            with self.subTest(statement=statement):
+                self.assertEqual(self.check_tree({
+                    "codex_worker/a.py": ("def read():\n    " + statement + "\n"
+                                          "    config = config.load()\n"
+                                          "    return config.get('name')\n"),
+                    "codex_worker/config.py": "def load():\n    return {'name': 1}\n",
+                }), [])
+        for source in (
+            "from . import config\nconfig = config.load()\nvalue = config.get('name')\n",
+            "def read():\n    from . import config\n    config: dict = config.load()\n    return config.get('name')\n",
+            "def read():\n    from . import config\n    config, = (config.load(),)\n    return config.get('name')\n",
+            "def read():\n    from . import config\n    value = (config := config.load())\n    return config.get('name')\n",
+            "def read():\n    from . import config\n    for config in (config.load(),):\n        return config.get('name')\n",
+            "def read():\n    from . import config\n    config = config.load()\n    def inner():\n        return config.get('name')\n    return inner()\n",
+            "def read():\n    from . import config\n    import os as config\n    return config.getcwd()\n",
+            "def read():\n    from . import config\n    def config():\n        return {}\n    return config.__name__\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.check_tree({
+                    "codex_worker/a.py": source,
+                    "codex_worker/config.py": "def load():\n    return {'name': 1}\n",
+                }), [])
+
+    def test_module_attributes_remain_checked_before_rebinding_and_after_import(self):
+        for source, line in (
+            ("def read():\n    from . import config\n    config = config.missing()\n    return config.get('name')\n", 3),
+            ("def read():\n    from . import config\n    value = config.missing\n    config = config.load()\n    return config.get('name')\n", 3),
+            ("def read():\n    from . import config\n    config = config.load()\n    from . import config\n    return config.missing\n", 5),
+            ("def read():\n    return config.missing\nfrom . import config\n", 2),
+            ("def read():\n    from . import config\n    config: dict\n    return config.missing\n", 4),
+            ("def read():\n    from . import config\n    for config in config.missing():\n        return config.get('name')\n", 3),
+            ("from . import config\nvalues = [config for config in ()]\nvalue = config.missing\n", 3),
+        ):
+            with self.subTest(source=source):
+                findings = self.check_tree({
+                    "codex_worker/a.py": source,
+                    "codex_worker/config.py": "def load():\n    return {'name': 1}\n",
+                })
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn("a.py:%s: module-attribute: config.missing" % line, findings[0])
+
+    def test_augmented_module_attribute_precedes_rhs_rebinding(self):
+        findings = self.check_tree({
+            "codex_worker/a.py": "from . import config\nconfig.name += (config := [])\n",
+            "codex_worker/config.py": "name = []\n",
+        })
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("a.py:2: module-attribute: config.name", findings[0])
 
     def test_unrelated_bindings_do_not_have_module_attributes(self):
         for source in (
