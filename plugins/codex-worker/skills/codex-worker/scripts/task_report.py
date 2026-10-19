@@ -123,6 +123,7 @@ def _read_rows(log_path, since, until, repo, slug):
 def _task(repo, slug, created):
     return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
+            "capacity_retries": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
             "auto_fix_stop": None, "ci": None,
             "max_task_weekly_percent": None, "budget_stop": None,
@@ -255,7 +256,7 @@ def _accumulate_rows(rows, identities):
     """Return tasks, account rows, and totals for rows and their task keys."""
     tasks = {}
     accounts = {}
-    totals = {"tokens": _empty_tokens(), "active_seconds": 0, "turns": 0,
+    totals = {"tokens": _empty_tokens(), "active_seconds": 0, "turns": 0, "capacity_retries": 0,
               "checks": Counter(), "reviews": Counter(), "findings_samples": 0}
     for row, identity in zip(rows, identities):
         phase = row["phase"]
@@ -270,6 +271,9 @@ def _accumulate_rows(rows, identities):
         seconds = _number(row.get("active_seconds")) or 0
         totals["active_seconds"] += seconds
         task["active_minutes"] += seconds / 60
+        retries = _round(row.get("capacity_retries"))
+        totals["capacity_retries"] += retries
+        task["capacity_retries"] += retries
         task["rounds"] = max(task["rounds"], _round(row.get("round")))
         _add_tokens(totals["tokens"], row.get("tokens"))
         _add_tokens(task["tokens"], row.get("tokens"))
@@ -369,6 +373,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         "since": _utc(since_at), "until": _utc(now), "filters": {"repo": repo, "slug": slug},
         "summary": {
             "tasks": len(task_rows), "turns": totals["turns"], "active_hours": totals["active_seconds"] / 3600,
+            "capacity_retries": totals["capacity_retries"],
             "tokens": _token_summary(totals["tokens"]),
             "weekly_used_percent": sum(task["weekly_used_percent"] for task in task_rows),
             "checks": {"total": checks["total"], "passed": checks["passed"],
@@ -407,6 +412,7 @@ def render_report(report):
     lines = [
         f"Task report: {report['since']} to {report['until']}",
         f"Tasks: {summary['tasks']}  Turns: {summary['turns']}  Active hours: {summary['active_hours']:.2f}",
+        f"Capacity retries: {summary['capacity_retries']}",
         f"Tokens: {tokens['total']:,.0f} (input {tokens['input']:,.0f}, output {tokens['output']:,.0f}, "
         f"reasoning {tokens['reasoning']:,.0f}, cached input {tokens['cached_input']:,.0f}; "
         f"cache share {_percent(tokens['cached_input_fraction'])})",
@@ -427,7 +433,7 @@ def render_report(report):
                          f"({account['tokens']['total']:,.0f} tokens, {account['turns']} turns)")
     else:
         lines.append("  none")
-    lines.extend(("", "Tasks by cost:", "slug  repo  started  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop  auto-fix stop"))
+    lines.extend(("", "Tasks by cost:", "slug  repo  started  turns  rounds  minutes  tokens  weekly %  last verdict  budget %  budget stop  auto-fix stop  capacity retries"))
     for task in report["tasks"]:
         budget = task["max_task_weekly_percent"]
         created = task["created"]
@@ -437,7 +443,7 @@ def render_report(report):
                      f"{task['tokens']['total']:,.0f}  {task['weekly_used_percent']:.2f}  "
                      f"{task['last_verdict'] or '-'}  "
                      + ("-" if budget is None else f"{budget:g}") + f"  {task['budget_stop'] or '-'}"
-                     + f"  {task['auto_fix_stop'] or '-'}")
+                     + f"  {task['auto_fix_stop'] or '-'}  {task['capacity_retries']}")
     if not report["tasks"]:
         lines.append("(no tasks)")
     return "\n".join(lines)

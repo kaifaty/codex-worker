@@ -68,6 +68,7 @@ WAIT_POLL_SECONDS = float(os.environ.get("CODEX_TASK_WAIT_POLL_SECONDS", "1"))
 CI_POLL_SECONDS = float(os.environ.get("CODEX_TASK_CI_POLL_SECONDS", "30"))
 ACCOUNT_TIMEOUT = 20
 ACCOUNT_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_ACCOUNT_RETRY_SECONDS", "300"))
+CAPACITY_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_CAPACITY_RETRY_SECONDS", "60"))
 MAX_ACCOUNT_RETRIES = 6
 SLEEP_STEP = float(os.environ.get("CODEX_TASK_SLEEP_STEP", "60"))
 RESET_MARGIN = float(os.environ.get("CODEX_TASK_RESET_MARGIN", "120"))
@@ -802,6 +803,7 @@ STATE_FIELDS = {
     "outcome": StateField("turn", spawn_reset=lambda st, turn: "running"),
     # Waiting budget is also restarted at automatic phase boundaries.
     "reset_wait_seconds": StateField("turn", spawn_reset=lambda st, turn: 0),
+    "capacity_retries": StateField("turn", spawn_reset=lambda st, turn: 0),
     "fix_rounds": StateField("turn", load_default=lambda st: 0,
                              spawn_reset=lambda st, turn: turn["fix_rounds"]),
     "rounds": StateField("turn", load_default=lambda st: [], spawn_reset=lambda st, turn: []),
@@ -1133,6 +1135,7 @@ def record_turn_result(st, stopped):
                "result_status": result.get("status"), "verdict": review.get("verdict"),
                "auto_fix_stop": st.get("auto_fix_stop"),
                "ci": st.get("ci"),
+               "capacity_retries": st.get("capacity_retries", 0),
                "max_task_weekly_percent": st.get("max_task_weekly_percent"),
                "budget_stop": budget_stop(st)}
         write_telemetry(st, row, stopped)
@@ -1156,6 +1159,7 @@ class PhaseTelemetry:
         self.angle = (st.get("review_angle") or "correctness") if self.kind == "review" else None
         self.review_start = len(st.get("reviews", []))
         self.rotation_start = len(st.get("rotations", []))
+        self.capacity_start = st.get("capacity_retries", 0)
         self.check = None
 
     def add_usage(self, account, thread, before, path, offset, weekly_spent=0):
@@ -1220,6 +1224,7 @@ class PhaseTelemetry:
                    "check_outcome": check.get("outcome"), "check_seconds": check.get("seconds"),
                    "rotations": sum("from" in entry and "to" in entry
                                     for entry in st.get("rotations", [])[self.rotation_start:]),
+                   "capacity_retries": st.get("capacity_retries", 0) - self.capacity_start,
                    "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
                    "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage,
                    "weekly_spent": st.get("weekly_used_percent", 0) - self.weekly_started}
@@ -1588,6 +1593,13 @@ def auth_resume_prompt(cfg=None):
     return "The turn was interrupted by an authentication error. Continue from where you stopped."
 
 
+def capacity_resume_prompt(cfg=None):
+    cfg = accounts_config() if cfg is None else cfg
+    if cfg.get("language", "en") == "ru":
+        return "Ход прервался из-за перегрузки модели. Продолжай с того места, где остановился."
+    return "The turn was interrupted because the model was at capacity. Continue from where you stopped."
+
+
 def limit_reason(info, cfg):
     limits = info.get("limits", {})
     for name in ("primary", "secondary"):
@@ -1614,6 +1626,11 @@ def auth_error(event):
     return bool(re.search(r"\b401\b", text)) or any(part in text for part in (
         "unauthorized", "access token could not be refreshed", "authentication session could not be refreshed",
         "oauth refresh token was rejected", "failed to refresh token"))
+
+
+def capacity_error(event):
+    return (event.get("type") in ("turn.failed", "error")
+            and "at capacity" in json.dumps(event, ensure_ascii=False).lower())
 
 
 def refusal_message(event):
@@ -2116,6 +2133,7 @@ class MonitorEvents:
     completed: bool = False
     reason: Optional[str] = None
     authentication_failed: bool = False
+    capacity_failed: bool = False
     refusal: Optional[str] = None
     final_message: str = ""
     exit_code: Optional[int] = None
@@ -2139,7 +2157,7 @@ def monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup,
     if last.exists():
         last.unlink()
     args = [codex_binary(), "exec"]
-    if reviewing and not wrapup:
+    if reviewing and not wrapup and not thread:
         # Some CLI versions reject --base together with custom instructions.
         if not review_fallback:
             args += ["review", "--base", st["base"]]
@@ -2211,6 +2229,8 @@ def monitor_event(st, account, event, stream, control, reviewing, wrapup, attemp
         stream.reason = "usage limit"
     if auth_error(event):
         stream.authentication_failed = True
+    if not stream.reason and not stream.authentication_failed and capacity_error(event):
+        stream.capacity_failed = True
     # `error` events also carry retries ("Reconnecting... 2/5") of turns that complete.
     if event.get("type") == "turn.failed":
         stream.failed = True
@@ -2314,7 +2334,7 @@ def monitor_event_stream(st, cfg, account, proc, log, stream, usage, control, st
                 return result
             if wrapup:
                 # A wrap-up gets one bounded attempt, without quota waits or retries.
-                if stream.authentication_failed or stream.reason:
+                if stream.authentication_failed or stream.reason or stream.capacity_failed:
                     return "failed", None
                 continue
             if usage.pending_weekly_spent is not None:
@@ -2333,6 +2353,8 @@ def monitor_event_stream(st, cfg, account, proc, log, stream, usage, control, st
             if stream.reason:
                 request = monitor_quota_decision(usage.current_info, cfg, stream.reason)
                 return resolve_monitor_quota(st, request, stopped, control, active_started, on_limit)
+            if stream.capacity_failed:
+                return "capacity", None
             if (cfg["enabled"] or control.weekly is not None) and stream.thread and proc.poll() is None:
                 request = poll_monitor_rollout(st, cfg, account, proc, stream, usage, control, record_limits)
                 if request.action != "continue":
@@ -2374,7 +2396,7 @@ def finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
 
 
 def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
-            control=None, wrapup=False, wrapup_thread=None, quota_snapshot=None):
+            control=None, wrapup=False, wrapup_thread=None, quota_snapshot=None, resume_thread=None):
     """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
     d = TASKS / st["slug"]
     prepare_home(account)
@@ -2382,7 +2404,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                                      else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
                                      cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
-    thread = wrapup_thread if wrapup else "" if reviewing else st.get("thread", "")
+    thread = (wrapup_thread if wrapup else resume_thread if resume_thread is not None
+              else "" if reviewing else st.get("thread", ""))
     stream = MonitorEvents(thread)
     last = d / ("review.md" if reviewing else "last.md")
     args, prompt = monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last)
@@ -2494,6 +2517,8 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     visited = set()
     rotations = 0
     rotation = None
+    capacity_retried = False
+    resume_thread = None
     if new_turn:
         st.update(auth_excluded=[], auth_excluded_ids=[], auth_transitions=0, auth_failures={})
         st.pop("reset_reconciled", None)
@@ -2554,15 +2579,17 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         st.pop("reset_reconciled", None)
         visited.add(account["name"])
         review_start = len(st.get("reviews", []))
-        result, decision = monitor(st, cfg, account, prompt, effort, stopped, on_limit, control=control,
-                                   quota_snapshot=quota_snapshot)
+        attempt_prompt = capacity_resume_prompt(cfg) if resume_thread else prompt
+        result, decision = monitor(st, cfg, account, attempt_prompt, effort, stopped, on_limit, control=control,
+                                   quota_snapshot=quota_snapshot, resume_thread=resume_thread)
         quota_snapshot = None
+        resume_thread = None
         phase = telemetry_phase(st)
-        weekly_exhausted = (result in ("auth", "limit", "failed", "completed")
+        weekly_exhausted = (result in ("auth", "limit", "capacity", "failed", "completed")
                             and control.weekly_exhausted(st.get("weekly_used_percent", 0)))
         if weekly_exhausted and result != "completed":
             result = "budget_exhausted"
-        if result in ("auth", "limit") and control.expired(time.monotonic()):
+        if result in ("auth", "limit", "capacity") and control.expired(time.monotonic()):
             result = "budget_exhausted"
         if result != "auth":
             st.setdefault("auth_failures", {})[account["name"]] = 0
@@ -2588,6 +2615,32 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             wrapup_turn(st, cfg, account, effort, stopped, reason,
                         review_entry=reviews[-1] if reviews else None)
             break
+        if result == "capacity":
+            if capacity_retried:
+                st["outcome"] = "failed"
+                break
+            capacity_retried = True
+            st["capacity_retries"] = st.get("capacity_retries", 0) + 1
+            save(st)
+            sleep_started = time.monotonic()
+            try:
+                until = sleep_started + CAPACITY_RETRY_SECONDS
+                while not stopped():
+                    left = until - time.monotonic()
+                    if left <= 0:
+                        break
+                    sleep(min(SLEEP_STEP, left))
+            finally:
+                if phase is not None:
+                    phase.sleep_seconds += max(0, time.monotonic() - sleep_started)
+            if stopped():
+                st["outcome"] = stop_outcome(st, stopped)
+                break
+            reviews = st.get("reviews", [])[review_start:]
+            thread = (reviews[-1]["thread"] if reviews else None) if reviewing else st.get("thread")
+            if thread:
+                resume_thread = thread
+            continue
         if result in ("completed", "failed", "refused") or not cfg["enabled"]:
             st["outcome"] = result
             break
@@ -3804,6 +3857,8 @@ def wait_turn_lines(st, slug):
     publication = st.get("publish")
     yield (f"== {slug}: turn {st.get('turns')} {'paused' if sleeping else 'finished'} after "
           f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
+    if st.get("capacity_retries", 0):
+        yield "== retried: model at capacity"
     if st.get("turn_stop"):
         yield "== turn stopped: " + turn_stop_message(st["turn_stop"])
     if st.get("outcome") == "interrupted":
