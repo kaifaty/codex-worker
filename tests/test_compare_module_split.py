@@ -96,6 +96,47 @@ class CompareModuleSplitTests(unittest.TestCase):
         allowed = self.run_tool(base, "--allow-changed", "save")
         self.assertEqual(allowed.returncode, 0, allowed.stderr + allowed.stdout)
 
+    def test_conditional_imports_are_reported_with_their_context(self):
+        base = self.commit_tree({
+            "codex_task.py": "def save():\n    return 1\n\ndef run():\n    return save()\n",
+        })
+        for glue in (
+            "if False:\n    from . import task_state\n",
+            "try:\n    from . import task_state\nexcept ImportError:\n    pass\n",
+        ):
+            with self.subTest(glue=glue):
+                self.write_tree({
+                    "codex_task.py": "",
+                    "codex_worker/task_state.py": "def save():\n    return 1\n",
+                    "codex_worker/commands.py": (
+                        glue + "\ndef run():\n    return task_state.save()\n"),
+                })
+                result = self.compare(base)
+                self.assert_categories(result, moved=2)
+                self.assertTrue(result["passed"])
+                self.assertEqual(len(result["glue"]["working"]), 1)
+                statement = result["glue"]["working"][0]
+                self.assertIn(glue.splitlines()[0], statement)
+                self.assertEqual(statement.count("from . import task_state"), 1)
+                if "except ImportError:" in glue:
+                    self.assertIn("except ImportError:", statement)
+                command = self.run_tool(base)
+                self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
+                self.assertIn("Glue (working):\n  " + statement, command.stdout)
+
+    def test_glue_excludes_imports_inside_functions_and_classes(self):
+        source = (
+            "def run():\n    import local_only\n\n"
+            "class Example:\n    import class_only\n\n"
+            "if __name__ == '__main__':\n    import main_only\n    run()\n")
+        _, glue = compare_module_split.collect_definitions({
+            compare_module_split.ENTRYPOINT: source,
+        })
+        self.assertEqual(len(glue), 1)
+        self.assertIn("import main_only", glue[0])
+        self.assertNotIn("local_only", glue[0])
+        self.assertNotIn("class_only", glue[0])
+
     def test_missing_definition_fails(self):
         base = self.commit_tree({"codex_task.py": "def save():\n    return 1\n"})
         self.write_tree({"codex_task.py": ""})

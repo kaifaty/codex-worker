@@ -185,7 +185,10 @@ def collect_definitions(sources):
     for path, tree in trees.items():
         normalizer = _NormalizeModules(_aliases(tree, modules), module_definitions)
         for node in tree.body:
-            if isinstance(node, (ast.Import, ast.ImportFrom)) or _is_main_guard(node):
+            # Report the same module-scope imports used for alias normalization.
+            # Keep their outer statement so conditional/exception context is
+            # visible, rather than presenting a guarded import as unconditional.
+            if _is_main_guard(node) or any(_module_imports(node)):
                 glue.append("%s:%s: %s" % (
                     path, node.lineno, ast.unparse(node).replace("\n", " ")))
                 continue
