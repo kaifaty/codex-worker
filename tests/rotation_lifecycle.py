@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import re
 import selectors
 import shlex
 import signal
@@ -341,6 +342,10 @@ worker.reap_notifications = reap
                 before = len(self.invocations())
                 self.start(slug, *options, "--fix-rounds", "2")
                 self.until(lambda: len(self.invocations()) == before + len(runs))
+                review_thread = self.invocations()[-1]["thread"]
+                # reviews is published only after the supervisor handles thread.started.
+                self.until(lambda: any(entry["thread"] == review_thread
+                                       for entry in self.state(slug)["reviews"]))
                 os.kill(self.state(slug)["pid"], signal.SIGTERM)
                 output = self.wait(slug)
                 state = self.state(slug)
@@ -364,6 +369,95 @@ worker.reap_notifications = reap
                 report = json.loads(self.cli("report", "--slug", slug, "--json"))
                 self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
                 self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
+
+    def test_external_signal_before_second_review_thread_started_matches_late_signal(self):
+        self.configure(language="en")
+        observed = []
+        for before_thread in (True, False):
+            with self.subTest(before_thread=before_thread):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                release = self.root / "second-angle-thread-release"
+                held = {"mode": "hold"}
+                if before_thread:
+                    # This existing fake gate returns on cancellation without ever
+                    # emitting thread.started; elapsed time cannot open the window.
+                    held["rollout_gate"] = str(release)
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "reply": self.work_result()},
+                    {"mode": "complete", "reply": self.review_result()}, held])
+                slug = "second-angle-signal-" + ("early" if before_thread else "late")
+                before = len(self.invocations())
+                self.start(slug, "--review-angles", "correctness,concurrency", "--fix-rounds", "2")
+                self.until(lambda: len(self.invocations()) == before + 3)
+                review_thread = self.invocations()[-1]["thread"]
+                if before_thread:
+                    self.until(lambda: any(event["command"] == "rollout-waiting"
+                                           and event["thread"] == review_thread for event in self.trace()))
+                    self.assertFalse(release.exists())
+                    self.assertNotIn(review_thread, [entry["thread"] for entry in self.state(slug)["reviews"]])
+                else:
+                    self.until(lambda: any(entry["thread"] == review_thread
+                                           for entry in self.state(slug)["reviews"]))
+                os.kill(self.state(slug)["pid"], signal.SIGTERM)
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "interrupted")
+                self.assertEqual(state["signal"]["name"], "SIGTERM")
+                self.assertFalse(state.get("rounds"), "interrupted reviews cannot start a fix round")
+                self.assertEqual(len(self.invocations()), before + 3)
+
+                expected_time = datetime.datetime.fromtimestamp(state["signal"]["at"]).strftime("%Y-%m-%d %H:%M")
+                self.assertIn("== interrupted externally by SIGTERM at " + expected_time, output)
+                self.assertRegex(output, r"== review angle concurrency by main \(\d+(?:\.\d+)? min\): "
+                                 r"interrupted \(result unknown\)")
+                self.assertIn("== auto-fix: 0 rounds,", output)
+                self.assertIn("; stop: interrupted", output)
+                result = state["review_result"]
+                self.assertEqual([(entry["angle"], entry["outcome"]) for entry in result["angles"]],
+                                 [("correctness", "completed"), ("concurrency", "interrupted")])
+                self.assertIsNone(result["angles"][-1]["result"])
+
+                rows = [row for row in self.telemetry_journal() if row["slug"] == slug]
+                self.assertEqual([(row["phase"], row["outcome"]) for row in rows],
+                                 [("work", "completed"), ("review", "completed"),
+                                  ("review", "interrupted"), ("turn", "interrupted")])
+                reviews = [row for row in rows if row["phase"] == "review"]
+                self.assertEqual([row["angle"] for row in reviews], ["correctness", "concurrency"])
+                self.assertEqual(reviews[-1]["thread"], None if before_thread else review_thread)
+                self.assertIsNone(reviews[-1]["verdict"])
+                self.assertIsNone(reviews[-1]["findings"])
+                events = self.home / "claude-tasks" / slug / "events.jsonl"
+                started_threads = [event["thread_id"] for event in map(json.loads, events.read_text().splitlines())
+                                   if event.get("type") == "thread.started"]
+                self.assertEqual(review_thread in started_threads, not before_thread)
+                report = json.loads(self.cli("report", "--slug", slug, "--json"))
+                self.assertEqual(report["summary"]["outcomes"], {"interrupted": 1})
+                self.assertEqual(report["summary"]["fix_rounds_to_clean"], {})
+                self.assertEqual(report["tasks"][0]["outcome"], "interrupted")
+                self.assertEqual(report["tasks"][0]["rounds"], 0)
+
+                # Compare every wait line and the semantic result/report fields.
+                # Durations, timestamps, thread IDs and usage legitimately differ.
+                observed.append({
+                    "wait": re.sub(r"\d+\.\d+ min", "<duration>", output.replace(slug, "<slug>")
+                                   .replace(expected_time, "<signal time>")),
+                    "review_result": dict(result, angles=[
+                        {key: value for key, value in entry.items() if key not in ("started", "finished")}
+                        for entry in result["angles"]]),
+                    "telemetry": [
+                        {key: row.get(key) for key in ("phase", "kind", "turn", "round", "angle", "account",
+                                                       "outcome", "result_status", "verdict", "findings",
+                                                       "auto_fix_stop")}
+                        for row in rows if row["phase"] in ("review", "turn")],
+                    "report_summary": {key: report["summary"][key] for key in (
+                        "tasks", "turns", "checks", "ci", "reviews", "fix_rounds_to_clean",
+                        "auto_fix_stops", "outcomes", "result_status")},
+                    "report_task": {key: report["tasks"][0][key] for key in (
+                        "outcome", "rounds", "turns", "last_verdict", "auto_fix_stop", "result_status")},
+                })
+        for observable in observed[0]:
+            with self.subTest(observable=observable):
+                self.assertEqual(observed[0][observable], observed[1][observable])
 
     def test_spawn_clears_previous_stop_request_before_external_signal(self):
         self.configure(language="en")
