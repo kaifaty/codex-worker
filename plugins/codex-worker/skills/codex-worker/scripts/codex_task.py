@@ -51,7 +51,7 @@ from collections import Counter, deque
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, NamedTuple, Optional
+from typing import Callable, Literal, NamedTuple, Optional
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 CODEX = os.environ.get("CODEX_TASK_CODEX")
@@ -757,24 +757,120 @@ def state_path(slug):
     return TASKS / slug / "state.json"
 
 
+STATE_DELETE = object()
+
+
+class StateField(NamedTuple):
+    """Root field lifetime and optional factories for load/spawn values.
+
+    task lasts until clean; history accumulates; cursor tracks the current
+    account/thread/phase; turn spans a user turn; attempt spans one exec;
+    runtime holds process and stop bookkeeping. Lifetimes document ownership;
+    only spawn_reset opts a field into the unconditional spawn reset.
+    """
+    lifetime: Literal["task", "history", "cursor", "turn", "attempt", "runtime"]
+    load_default: Optional[Callable[[dict], object]] = None
+    spawn_reset: object = None  # Factory (state, turn context), STATE_DELETE, or no reset.
+
+
+# Keep the historical insertion order for both load defaults and spawn values:
+# state.json remains a flat dict, including identical serialization bytes.
+# Factories allocate fresh mutable defaults for each state/turn.
+STATE_FIELDS = {
+    "account": StateField("cursor", load_default=lambda st: "main"),
+    "threads": StateField("history", load_default=lambda st: (
+        [{"account": st["account"], "thread": st["thread"], "started": st.get("created", 0)}]
+        if st.get("thread") else [])),
+    "rotations": StateField("history", load_default=lambda st: []),
+    "reviews": StateField("history", load_default=lambda st: []),
+    "checks": StateField("history", load_default=lambda st: []),
+    # Last work result survives standalone review; only work/scout spawn clears it.
+    "result": StateField("turn", load_default=lambda st: None),
+    "pending": StateField("turn", spawn_reset=lambda st, turn: turn["pending"]),
+    # Phase cursor, also used as the persistent scout marker.
+    "kind": StateField("cursor", spawn_reset=lambda st, turn: turn["kind"]),
+    "work_completed": StateField("turn", spawn_reset=lambda st, turn: False),
+    "review_start": StateField("turn", spawn_reset=lambda st, turn: len(st.get("reviews", []))),
+    "turn_started": StateField("turn", spawn_reset=lambda st, turn: time.time()),
+    "check_start": StateField("turn", spawn_reset=lambda st, turn: len(st.get("checks", []))),
+    "turns": StateField("history", spawn_reset=lambda st, turn: st.get("turns", 0) + 1),
+    "rotation_start": StateField("turn", spawn_reset=lambda st, turn: len(st["rotations"])),
+    "event_start": StateField("turn", spawn_reset=lambda st, turn: len(events(st))),
+    "exhausted": StateField("turn", spawn_reset=lambda st, turn: None),
+    "outcome": StateField("turn", spawn_reset=lambda st, turn: "running"),
+    # Waiting budget is also restarted at automatic phase boundaries.
+    "reset_wait_seconds": StateField("turn", spawn_reset=lambda st, turn: 0),
+    "fix_rounds": StateField("turn", load_default=lambda st: 0,
+                             spawn_reset=lambda st, turn: turn["fix_rounds"]),
+    "rounds": StateField("turn", load_default=lambda st: [], spawn_reset=lambda st, turn: []),
+    "guards": StateField("task", load_default=lambda st: []),
+    "base_check": StateField("task", load_default=lambda st: False),
+    "sandbox": StateField("task", load_default=lambda st: "off"),
+    "writable_dirs": StateField("task", load_default=lambda st: []),
+    "sleeping": StateField("turn", spawn_reset=STATE_DELETE),
+    "turn_finished": StateField("turn", spawn_reset=STATE_DELETE),
+    "error": StateField("turn", spawn_reset=STATE_DELETE),
+    "review_skipped": StateField("turn", spawn_reset=STATE_DELETE),
+    "auto_fix_stop": StateField("turn", spawn_reset=STATE_DELETE),
+    "auto_fix_escalations": StateField("turn", spawn_reset=STATE_DELETE),
+    "turn_stop": StateField("turn", spawn_reset=STATE_DELETE),
+    "wrapup": StateField("turn", spawn_reset=STATE_DELETE),
+    "review_result": StateField("turn", spawn_reset=STATE_DELETE),
+    # One review angle may span multiple exec attempts.
+    "review_angle": StateField("turn", spawn_reset=STATE_DELETE),
+    # Refusal belongs to the current phase, which may span multiple attempts.
+    "refusal": StateField("turn", spawn_reset=STATE_DELETE),
+    "stop_request": StateField("runtime", spawn_reset=STATE_DELETE),
+    "signal": StateField("runtime", spawn_reset=STATE_DELETE),
+    "ci": StateField("turn", spawn_reset=STATE_DELETE),
+    "slug": StateField("task"),
+    "repo": StateField("task"),
+    "worktree": StateField("task"),
+    "branch": StateField("task"),
+    "base": StateField("task"),
+    "effort": StateField("task"),
+    "thread": StateField("cursor"),
+    "check": StateField("task"),
+    "check_timeout": StateField("task"),
+    "ci_enabled": StateField("task"),
+    "ci_rounds": StateField("task"),
+    "ci_timeout_minutes": StateField("task"),
+    "max_task_weekly_percent": StateField("task"),
+    "weekly_used_percent": StateField("history"),
+    "created": StateField("task"),  # Immutable task birth metadata.
+    "pid": StateField("runtime"),
+    "codex_pid": StateField("runtime"),
+    "check_pid": StateField("runtime"),
+    "account_ids": StateField("task"),  # Task-wide identity cache, refreshed by probes.
+    # Auth retry bookkeeping is reset by _run_turn(new_turn=True), not spawn.
+    "auth_excluded": StateField("turn"),
+    "auth_excluded_ids": StateField("turn"),
+    "auth_failures": StateField("turn"),
+    "auth_transitions": StateField("turn"),
+    "needs_login": StateField("task"),  # Account health cache; cleared by a fresh successful probe.
+    "reset_reconciled": StateField("attempt"),  # Short-lived reset/probe coordination flag.
+    "weekly_marks": StateField("task"),  # High-water cache per account/weekly window.
+    "weekly_budget_warning": StateField("task"),  # Derived quota probe cache, recomputed as needed.
+    "check_paths": StateField("history"),  # Accumulating protected paths; explicit --no-check clears it.
+    "max_turn_minutes": StateField("turn"),  # say replaces this launch parameter, not spawn.
+    "review_angles": StateField("turn"),  # say/review replace this launch parameter, not spawn.
+    "publish": StateField("turn"),  # Last work receipt survives standalone review, like result.
+    # Preserve both known spawn lifetimes: https://github.com/kaifaty/codex-worker/issues/49
+    # Intentionally survives spawn until the next monitor.
+    "exec_event_start": StateField("attempt"),
+    # Intentionally survives spawn until the next review account selection (issue #49).
+    "review_account": StateField("cursor"),
+}
+
+
 def load(slug):
     p = state_path(slug)
     if not p.exists():
         die(f"no task {slug!r}")
     st = json.loads(p.read_text())
-    st.setdefault("account", "main")
-    st.setdefault("threads", ([{"account": st["account"], "thread": st["thread"], "started": st.get("created", 0)}]
-                              if st.get("thread") else []))
-    st.setdefault("rotations", [])
-    st.setdefault("reviews", [])
-    st.setdefault("checks", [])
-    st.setdefault("result", None)
-    st.setdefault("fix_rounds", 0)
-    st.setdefault("rounds", [])
-    st.setdefault("guards", [])
-    st.setdefault("base_check", False)
-    st.setdefault("sandbox", "off")
-    st.setdefault("writable_dirs", [])
+    for key, field in STATE_FIELDS.items():
+        if field.load_default is not None:
+            st.setdefault(key, field.load_default(st))
     return st
 
 
@@ -854,28 +950,15 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
         last = d / name
         if last.exists():
             last.unlink()
-    st.update(pending={"prompt": prompt, "effort": effort, "current_message": current_message,
-                       "review_after": review_after}, kind=kind, work_completed=False,
-              review_start=len(st.get("reviews", [])), turn_started=time.time(),
-              check_start=len(st.get("checks", [])),
-              turns=st.get("turns", 0) + 1, rotation_start=len(st["rotations"]),
-              event_start=len(events(st)), exhausted=None, outcome="running", reset_wait_seconds=0,
-              fix_rounds=fix_rounds, rounds=[])
-    st.pop("sleeping", None)
-    st.pop("turn_finished", None)
-    st.pop("error", None)
-    st.pop("review_skipped", None)
-    st.pop("auto_fix_stop", None)
-    st.pop("auto_fix_escalations", None)
-    st.pop("turn_stop", None)
-    st.pop("wrapup", None)
-    st.pop("review_result", None)
-    st.pop("review_angle", None)
-    st.pop("refusal", None)
-    st.pop("stop_request", None)
-    st.pop("signal", None)
-    st.pop("ci", None)
+    turn = {"pending": {"prompt": prompt, "effort": effort, "current_message": current_message,
+                        "review_after": review_after}, "kind": kind, "fix_rounds": fix_rounds}
+    st.update({key: field.spawn_reset(st, turn) for key, field in STATE_FIELDS.items()
+               if field.spawn_reset is not None and field.spawn_reset is not STATE_DELETE})
+    for key, field in STATE_FIELDS.items():
+        if field.spawn_reset is STATE_DELETE:
+            st.pop(key, None)
     if kind != "review":
+        # Standalone review preserves the last work result and publication receipt.
         st.pop("publish", None)
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
