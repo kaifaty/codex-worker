@@ -5,12 +5,14 @@ Run with /usr/bin/python3 -I tests/compare_rotation_assertions.py. The default
 base revision is origin/main. No tests are imported or executed.
 Assertion comparisons cover changed tests and existing helpers, retain every
 argument and ignore AST locations. --strip-module-hops also ignores package
-module hops at the known loaded-worker expressions during a module split.
+module hops at the known loaded-worker expressions during a module split,
+including Python scripts embedded in string literals.
 """
 
 import argparse
 import ast
 from collections import Counter
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -33,17 +35,45 @@ SCRIPTS = ROOT / "plugins/codex-worker/skills/codex-worker/scripts"
 class StripModuleHops(ast.NodeTransformer):
     def __init__(self, modules):
         self.modules = modules
+        self.stripped = False
 
     def visit_Attribute(self, node):
         worker_hop = (node.attr in self.modules
                       and ast.dump(node.value, include_attributes=False) in WORKER_ASTS)
         self.generic_visit(node)
         if worker_hop:
+            self.stripped = True
             replacement = node.value
             if isinstance(replacement, (ast.Name, ast.Attribute)):
                 replacement.ctx = node.ctx
             return ast.copy_location(replacement, node)
         return node
+
+
+def normalize_embedded_scripts(before, after, modules):
+    """Normalize paired literals only when either contains a worker module hop."""
+    if (isinstance(before, ast.Constant) and isinstance(after, ast.Constant)
+            and isinstance(before.value, str) and isinstance(after.value, str)):
+        if before.value == after.value:
+            return
+        try:
+            scripts = [ast.parse(node.value) for node in (before, after)]
+        except (SyntaxError, ValueError):
+            return
+        normalizers = [StripModuleHops(modules), StripModuleHops(modules)]
+        scripts = [normalizer.visit(script)
+                   for normalizer, script in zip(normalizers, scripts)]
+        if any(normalizer.stripped for normalizer in normalizers):
+            # Tag the dump so a plain string cannot alias normalized Python.
+            for node, script in zip((before, after), scripts):
+                node.value = ("embedded Python", ast.dump(script, include_attributes=False))
+        return
+    if isinstance(before, ast.AST) and type(before) is type(after):
+        for field in before._fields:
+            normalize_embedded_scripts(getattr(before, field), getattr(after, field), modules)
+    elif isinstance(before, list) and isinstance(after, list):
+        for original, current in zip(before, after):
+            normalize_embedded_scripts(original, current, modules)
 
 
 def git_show(spec):
@@ -109,6 +139,8 @@ def collect_definitions(sources, modules=()):
                     "body": ast.dump(body, include_attributes=False),
                     "assertions": assertion_calls(node),
                 }
+                if modules:
+                    definition["node"] = node
                 if node.name.startswith("test_"):
                     if node.name in tests:
                         raise ValueError("duplicate test name: " + node.name)
@@ -137,12 +169,27 @@ def counter_items(counter):
             for value, count in sorted(counter.items())]
 
 
-def changed_definitions(before, after, require_assertions=False):
+def changed_definitions(before, after, require_assertions=False, modules=()):
     changed = []
     for name in sorted(before.keys() & after.keys()):
         original, current = before[name], after[name]
         if original["body"] == current["body"]:
             continue
+        if modules:
+            original_node, current_node = (copy.deepcopy(definition["node"])
+                                           for definition in (original, current))
+            # The base literal may still use worker.save(), so normalize both
+            # counterparts when the rewritten literal has worker.task_state.save().
+            normalize_embedded_scripts(original_node, current_node, modules)
+            original, current = (
+                dict(definition,
+                     body=ast.dump(ast.Module(body=node.body, type_ignores=[]),
+                                   include_attributes=False),
+                     assertions=assertion_calls(node))
+                for definition, node in ((original, original_node), (current, current_node))
+            )
+            if original["body"] == current["body"]:
+                continue
         if (require_assertions
                 and not original["assertions"] and not current["assertions"]):
             continue
@@ -165,9 +212,9 @@ def compare(revision, strip_module_hops=False):
                if strip_module_hops else set())
     before, before_helpers = collect_definitions(sources_at_revision(revision), modules)
     after, after_helpers = collect_definitions(working_sources(), modules)
-    changed = changed_definitions(before, after)
+    changed = changed_definitions(before, after, modules=modules)
     changed_helpers = changed_definitions(
-        before_helpers, after_helpers, require_assertions=True)
+        before_helpers, after_helpers, require_assertions=True, modules=modules)
     result = {
         "baseline": revision,
         "before_test_count": len(before),

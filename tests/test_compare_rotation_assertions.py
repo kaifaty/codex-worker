@@ -31,6 +31,25 @@ AFTER = BEFORE.replace("worker.save", "worker.task_state.save").replace(
     "worker().save", "worker().task_state.save").replace(
     "patch.object(worker,", "patch.object(worker.task_state,").replace(
     "patch.object(self.worker,", "patch.object(self.worker.task_state,")
+EMBEDDED_BEFORE = '''\
+class Example:
+    def helper(self):
+        self.assertEqual(run_script(
+            "worker.save(x)\\n"
+            "self.worker.save(x)\\n"
+            "self.worker().save(x)\\n"
+            "with mock.patch.object(worker, 'save'):\\n"
+            "    worker.save(x)\\n"), 0)
+
+    def test_embedded_script(self):
+        self.assertEqual(run_script(
+            "worker.save(x)\\n"
+            "print('finished')\\n"), 0)
+'''
+EMBEDDED_AFTER = EMBEDDED_BEFORE.replace(
+    "worker.save", "worker.task_state.save").replace(
+    "worker().save", "worker().task_state.save").replace(
+    "patch.object(worker,", "patch.object(worker.task_state,")
 
 
 class CompareRotationAssertionsTests(unittest.TestCase):
@@ -71,6 +90,15 @@ class CompareRotationAssertionsTests(unittest.TestCase):
         self.assertIn(result.returncode, (0, 1), result.stderr)
         return result.returncode, json.loads(result.stdout)
 
+    def set_sources(self, before, after):
+        self.source.write_text(before, encoding="utf-8")
+        self.git("add", str(self.source.relative_to(self.root)))
+        self.git("-c", "user.name=Comparator Test", "-c", "user.email=test@example.com",
+                 "-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--no-gpg-sign",
+                 "-m", "Embedded script baseline")
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.source.write_text(after, encoding="utf-8")
+
     def test_module_hops_leave_test_and_helper_bodies_identical(self):
         code, result = self.compare()
         self.assertEqual(code, 0)
@@ -107,6 +135,53 @@ class CompareRotationAssertionsTests(unittest.TestCase):
                 self.source.write_text(AFTER.replace(original, replacement), encoding="utf-8")
                 _, result = self.compare()
                 self.assertEqual(len(result["changed_tests"]), 1)
+
+    def test_embedded_scripts_leave_test_and_helper_bodies_identical(self):
+        self.set_sources(EMBEDDED_BEFORE, EMBEDDED_AFTER)
+        code, result = self.compare()
+        self.assertEqual(code, 0)
+        self.assertEqual(result["changed_tests"], [])
+        self.assertEqual(result["changed_helpers"], [])
+
+    def test_embedded_scripts_without_flag_preserve_raw_changes(self):
+        self.set_sources(EMBEDDED_BEFORE, EMBEDDED_AFTER)
+        code, result = self.compare(strip=False)
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["changed_tests"]), 1)
+        self.assertEqual(len(result["changed_helpers"]), 1)
+
+    def test_changed_embedded_script_argument_remains_visible(self):
+        self.set_sources(EMBEDDED_BEFORE, EMBEDDED_AFTER.replace(
+            "worker.task_state.save(x)", "worker.task_state.save(y)"))
+        code, result = self.compare()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["changed_tests"]), 1)
+        self.assertEqual(len(result["changed_helpers"]), 1)
+        self.assertEqual(len(result["changed_tests"][0]["added_assertions"]), 1)
+
+    def test_unparseable_strings_preserve_module_hops(self):
+        before = '''\
+class Example:
+    def test_message(self):
+        self.assertEqual("Not Python: worker.save(x)!", "expected")
+'''
+        self.set_sources(before, before.replace("worker.save", "worker.task_state.save"))
+        code, result = self.compare()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["changed_tests"]), 1)
+        self.assertEqual(len(result["changed_tests"][0]["added_assertions"]), 1)
+
+    def test_parseable_strings_without_module_hops_preserve_raw_changes(self):
+        before = '''\
+class Example:
+    def test_message(self):
+        self.assertEqual("value = 1", "expected")
+'''
+        self.set_sources(before, before.replace("value = 1", "value=1"))
+        code, result = self.compare()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["changed_tests"]), 1)
+        self.assertEqual(len(result["changed_tests"][0]["added_assertions"]), 1)
 
 
 if __name__ == "__main__":
