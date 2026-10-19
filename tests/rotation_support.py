@@ -709,6 +709,7 @@ class RotationTestCase(unittest.TestCase):
     def reset_after_ready(self, command, reset, delay, after_exec=False):
         # Arm before the first exec publication, or the initial quota request
         # when no account can run, after expensive subprocess startup.
+        clock = self.worker().CLOCK if self.env.get("CODEX_TASK_CLOCK_FILE") else time
         gate = self.root / ("quota-ready-" + uuid.uuid4().hex)
         for home in (self.home, self.other):
             path = home / "fixture.json"
@@ -724,7 +725,7 @@ class RotationTestCase(unittest.TestCase):
                 while not stopped.is_set():
                     if any(event.get("command") == "quota-waiting" and event.get("gate") == str(gate)
                            for event in self.trace()):
-                        armed = time.time() + delay
+                        armed = clock.time() + delay
                         for home in (self.home, self.other):
                             path = home / "fixture.json"
                             value = json.loads(path.read_text())

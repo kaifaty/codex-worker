@@ -236,12 +236,16 @@ class NotificationTests(RotationTestCase):
                 {"mode": "usage_error", "limit_after": 0.05},
                 {"mode": "complete", "reply": self.review_result(False)}]
         self.account(self.other, "B", reset, runs=runs, auto_reset=True)
-        self.cli("review", slug, "--review-angles", "correctness,concurrency")
+        self.reset_after_ready(
+            lambda: self.cli("review", slug, "--review-angles", "correctness,concurrency"), reset, 3)
         self.wait(slug, timeout=10, through_sleep=True)
         state = self.state(slug)
         # An immediate logical sleep can finish before another CLI observes it.
-        self.assertTrue(any(entry["event"] == "sleep" for entry in state["rotations"]))
-        self.assertEqual(state["reviews"][-1]["angle"], "concurrency")
+        sleeping = [entry for entry in state["rotations"] if entry.get("event") == "sleep"]
+        self.assertTrue(sleeping)
+        paused_review = next(entry for entry in reversed(state["reviews"])
+                             if entry["started"] <= sleeping[-1]["at"])
+        self.assertEqual(paused_review["angle"], "concurrency")
         for name in ("paused", "woke", "review_done"):
             event = self.notification(slug, name)
             self.assertEqual(event["account"], "second")

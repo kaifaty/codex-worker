@@ -2336,7 +2336,7 @@ def resolve_monitor_quota(st, request, stopped, control, active_started, on_limi
 
 def poll_monitor_rollout(st, cfg, account, proc, stream, usage, control, record_limits):
     """Read a changed rollout sample; return its quota action or queue a weekly stop."""
-    now = CLOCK.monotonic()
+    now = time.monotonic()
     if usage.path is None and now >= usage.next_search:
         usage.path = rollout_path(account["home"], stream.thread)
         usage.next_search = now + ROLLOUT_SEARCH_SECONDS
@@ -2473,7 +2473,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         weekly_seeded = sample.seeded
         return sample.delta
 
-    next_search = CLOCK.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
+    next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
     usage = MonitorRollout(path, previous_size, previous_size, next_search)
     st["exec_event_start"] = len(events(st))
     save(st)
