@@ -1,10 +1,12 @@
 """Workspace, pull request and CI tests."""
+import io
 import json
 import os
 import shlex
 import shutil
 import signal
 import subprocess
+import traceback
 from pathlib import Path
 from unittest import mock
 
@@ -62,6 +64,17 @@ class WorkspaceTests(RotationTestCase):
                    "-" * 70, "AssertionError: %s failure %03d" % (job, index)]
                   for index in range(count)]
         return "\n\n".join("\n".join(block) for block in blocks), blocks
+
+    def ci_adjacent_tracebacks_fixture(self, count=60):
+        buffer, blocks = io.StringIO(), []
+        for index in range(count):
+            start = buffer.tell()
+            try:
+                raise ValueError("fixture traceback %03d" % index)
+            except ValueError:
+                traceback.print_exc(file=buffer)
+            blocks.append(buffer.getvalue()[start:].splitlines())
+        return buffer.getvalue(), blocks
 
     def test_workspace_settings_are_normalized_saved_and_inherited_by_say_and_review(self):
         user_home = self.root / "user-home"
@@ -1440,6 +1453,84 @@ class WorkspaceTests(RotationTestCase):
                 self.assertEqual(selected[-1], "… %d more failure lines omitted" %
                                  (len(failure_lines) - len(retained)))
                 self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_adjacent_real_tracebacks_keep_complete_first_blocks(self):
+        log, blocks = self.ci_adjacent_tracebacks_fixture()
+        failure_lines = [line for block in blocks for line in block]
+        self.assertEqual(log.splitlines(), failure_lines)
+        self.assertFalse(any(not line for line in failure_lines))
+        self.assertGreater(len(failure_lines), 150)
+        for prefix in ("", "tests\tRun tests\t2026-10-19T12:00:00.0000000Z "):
+            with self.subTest(prefix=bool(prefix)):
+                prefixed_blocks = [[prefix + line for line in block] for block in blocks]
+                prefixed_lines = [line for block in prefixed_blocks for line in block]
+                retained, retained_blocks = [], 0
+                for block in prefixed_blocks:
+                    if len(retained) + len(block) > 149:
+                        break
+                    retained.extend(block)
+                    retained_blocks += 1
+                st, ci, calls, waits = self.run_ci_wait_fixture(
+                    [[self.ci_check("fail")]], jobs={"123": "\n".join(prefixed_lines)})
+                tail = ci["checks"][0]["tail"]
+                selected = tail.splitlines()
+                self.assertGreater(retained_blocks, 0)
+                self.assertLess(retained_blocks, len(blocks))
+                self.assertEqual(selected[:-1], prefixed_lines[:len(retained)])
+                self.assertEqual(selected[:-1], retained)
+                self.assertEqual(selected[-2], prefixed_blocks[retained_blocks - 1][-1])
+                self.assertEqual(sum(line == prefix + "Traceback (most recent call last):"
+                                     for line in retained), retained_blocks)
+                self.assertEqual(sum(line.startswith(prefix + "ValueError: fixture traceback ")
+                                     for line in retained), retained_blocks)
+                self.assertEqual(selected[-1], "… %d more failure lines omitted" %
+                                 (len(prefixed_lines) - len(retained)))
+                self.assertLessEqual(len(selected), 150)
+                worker = self.worker()
+                self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+                self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_unittest_header_stays_with_its_first_real_traceback(self):
+        _, tracebacks = self.ci_adjacent_tracebacks_fixture()
+        for marker in ("FAIL:", "ERROR:"):
+            header = ["=" * 70, marker + " test_unittest (tests.ExampleTests)", "-" * 70]
+            before, length = 0, 0
+            while length + len(tracebacks[before]) + len(header) <= 149:
+                length += len(tracebacks[before])
+                before += 1
+            for position in (0, before):
+                with self.subTest(marker=marker, position=position):
+                    blocks = (tracebacks[:position] + [header + tracebacks[position]] +
+                              tracebacks[position + 1:])
+                    failure_lines = [line for block in blocks for line in block]
+                    retained = []
+                    for block in blocks:
+                        if len(retained) + len(block) > 149:
+                            break
+                        retained.extend(block)
+                    st, ci, calls, waits = self.run_ci_wait_fixture(
+                        [[self.ci_check("fail")]], jobs={"123": "\n".join(failure_lines)})
+                    tail = ci["checks"][0]["tail"]
+                    selected = tail.splitlines()
+                    self.assertGreater(len(retained), 0)
+                    self.assertEqual(selected[:-1], retained)
+                    self.assertEqual(selected[-1], "… %d more failure lines omitted" %
+                                     (len(failure_lines) - len(retained)))
+                    if position:
+                        self.assertFalse(any(line in selected for line in header))
+                    else:
+                        self.assertEqual(selected[:len(header + tracebacks[0])],
+                                         header + tracebacks[0])
+                    self.assertTrue(selected[-2].startswith("ValueError: fixture traceback "))
+                    self.assertEqual(selected[:-1].count("Traceback (most recent call last):"),
+                                     sum(line.startswith("ValueError: fixture traceback ")
+                                         for line in selected[:-1]))
+                    self.assertLessEqual(len(selected), 150)
+                    worker = self.worker()
+                    self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+                    self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                    self.assertEqual(waits, [])
 
     def test_ci_failure_logs_two_failed_jobs_each_keep_their_first_blocks(self):
         checks = [self.ci_check("fail", name="job " + job, job=job) for job in ("123", "456")]

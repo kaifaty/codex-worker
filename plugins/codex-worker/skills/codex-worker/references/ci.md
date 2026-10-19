@@ -16,6 +16,8 @@ Actions excerpts select failure blocks around unittest `FAIL:` / `ERROR:`, Pytho
 nearby separator/source lines and following context up to a blank line or the next block, plus test
 summaries such as `Ran N tests`, `FAILED (...)`, and `N failed`, in original log order. GitHub's job,
 step and timestamp prefixes do not affect matching; selected lines retain those prefixes.
+Consecutive Python tracebacks form separate blocks even without blank lines between them; a unittest
+failure header stays with its first traceback.
 
 The same excerpt appears in `wait` and the CI repair prompt, stored under the existing `tail` state
 key. Excerpts are capped at 150 lines per failed check and 400 total, including any omission notice.

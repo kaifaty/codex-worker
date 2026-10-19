@@ -3230,6 +3230,7 @@ def ci_failure_excerpt(text, limit):
     progress = re.compile(r"\.\.\.\s+(?:ok|FAIL|ERROR|skipped\b.*)$"
                           r"|\bPASSED(?:\s+\[\s*\d+%\])?\s*$")
     new_block = re.compile(r"^\s*(?:FAIL:|ERROR:|FAILED\b)|\bError:|##\[error\]")
+    traceback_header = re.compile(r"^\s*Traceback \(most recent call last\)")
     summaries = {index for index, line in enumerate(payloads) if summary.search(line)}
     matches = [index for index, line in enumerate(payloads) if failure.search(line)]
     if not matches:
@@ -3253,12 +3254,18 @@ def ci_failure_excerpt(text, limit):
             if re.fullmatch(r"[-=_]{3,}", line):
                 break
         end = index + 1
+        seen_traceback = bool(traceback_header.match(payloads[index]))
         while end < len(lines):
             line = payloads[end].strip()
+            starts_traceback = bool(traceback_header.match(line))
             if (not line or end in summaries or progress.search(line) or new_block.search(line)
+                    or (seen_traceback and starts_traceback)
                     or line.startswith(("===", "___"))
                     or ("AssertionError" in payloads[index] and "AssertionError" in line)):
                 break
+            # Keep a unittest header with its first traceback; subsequent tracebacks
+            # start independent blocks even when print_exc() emits no blank separator.
+            seen_traceback = seen_traceback or starts_traceback
             end += 1
         blocks.append((start, end))
 
