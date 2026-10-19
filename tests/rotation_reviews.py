@@ -549,6 +549,10 @@ class ReviewFixTests(RotationTestCase):
             self.until(ready.exists)
             self.assertEqual(json.loads(ready.read_text())["ppid"], supervisor)
             self.assertEqual(len(self.invocations()), executions)
+            with self.subTest(observable="running status"):
+                status = self.cli("status", slug)
+                self.assertIn("running", status)
+                self.assertIn("account ?", status)
             os.kill(supervisor, signal.SIGTERM)
             self.until(lambda: "name=SIGTERM" in log.read_text())
         finally:

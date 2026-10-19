@@ -2854,12 +2854,12 @@ def merge_reviews(angles):
 
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
     st["review_account"] = None
-    angles = selected_review_angles(st, cfg) if angles is None else angles
     records = []
     result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
     st.pop("review_result", None)
     save(st)
+    angles = selected_review_angles(st, cfg) if angles is None else angles
     try:
         for angle in angles or [None]:
             st["review_account"] = None
