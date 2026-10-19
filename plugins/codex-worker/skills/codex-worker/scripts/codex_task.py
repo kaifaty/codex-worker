@@ -313,6 +313,8 @@ def reap_notifications():
 
 def current_turn_account(st):
     if st.get("kind") == "review":
+        if "review_account" in st and st["review_account"] is None:
+            return None
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         return st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
     return st["account"]
@@ -855,10 +857,9 @@ STATE_FIELDS = {
     "max_turn_minutes": StateField("turn"),  # say replaces this launch parameter, not spawn.
     "review_angles": StateField("turn"),  # say/review replace this launch parameter, not spawn.
     "publish": StateField("turn"),  # Last work receipt survives standalone review, like result.
-    # Preserve both known spawn lifetimes: https://github.com/kaifaty/codex-worker/issues/49
-    # Intentionally survives spawn until the next monitor.
-    "exec_event_start": StateField("attempt"),
-    # Intentionally survives spawn until the next review account selection (issue #49).
+    # New user turns discard the exec cursor; automatic phases retain the last attempt.
+    "exec_event_start": StateField("attempt", spawn_reset=STATE_DELETE),
+    # review_turn marks the account unselected (None) before phase/angle early exits.
     "review_account": StateField("cursor"),
 }
 
@@ -2852,14 +2853,16 @@ def merge_reviews(angles):
 
 
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
-    angles = selected_review_angles(st, cfg) if angles is None else angles
+    st["review_account"] = None
     records = []
     result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
     st.pop("review_result", None)
     save(st)
+    angles = selected_review_angles(st, cfg) if angles is None else angles
     try:
         for angle in angles or [None]:
+            st["review_account"] = None
             if stopped():
                 st["outcome"] = stop_outcome(st, stopped)
                 break
@@ -2874,6 +2877,8 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             outcome = stop_outcome(st, stopped) or st["outcome"]
             result = reviews[-1].get("result") if reviews else None
             if reviews:
+                if st.get("review_account") is None:
+                    st["review_account"] = reviews[-1]["account"]
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
                       "account": current_turn_account(st),
@@ -3864,9 +3869,9 @@ def describe(st, detail):
     scouting = st.get("kind") == "scout"
     account, thread = st["account"], st.get("thread", "")
     if reviewing:
-        account, thread = st.get("review_account", "?"), ""
+        account, thread = st.get("review_account") or "?", ""
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
-        if reviews:
+        if reviews and ("review_account" not in st or st["review_account"] is not None):
             account, thread = reviews[-1]["account"], reviews[-1]["thread"]
     location = st["worktree"] if scouting else st["branch"]
     label = "  scout" if scouting else ("  review" if reviewing else "")

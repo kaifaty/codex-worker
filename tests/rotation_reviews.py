@@ -1,6 +1,9 @@
 """Review angles and automatic fix cycle tests."""
 import json
+import os
 import shlex
+import shutil
+import signal
 import subprocess
 from pathlib import Path
 
@@ -463,6 +466,115 @@ class ReviewFixTests(RotationTestCase):
         self.assertIn((task_dir / "review.md").read_text().strip(), output)
         self.assertNotIn("Результат A", output)
         self.assertIn("== commits on ", output)
+
+    def test_unstarted_review_does_not_reuse_previous_review_account(self):
+        self.configure(wait_for_reset=False)
+        self.configure_notify(events=["turn_finished"])
+        self.start("review-unstarted-account")
+        self.wait("review-unstarted-account")
+        self.notification("review-unstarted-account", "turn_finished")
+        self.account(self.home, "A", self.reset, used=99)
+        self.account(self.other, "B", self.reset + 3600, runs=[{
+            "mode": "complete", "reply": self.review_result(False)}])
+
+        self.cli("review", "review-unstarted-account")
+        self.wait("review-unstarted-account")
+        self.until(lambda: len(self.notifications("review-unstarted-account")) == 2)
+        self.assertIn("account second", self.cli("status", "review-unstarted-account"))
+        self.assertEqual(self.notifications("review-unstarted-account")[-1]["account"], "second")
+        self.assertEqual(len(self.review_invocations()), 1)
+        executions = len(self.invocations())
+        self.account(self.other, "B", self.reset + 3600, used=99)
+
+        self.cli("review", "review-unstarted-account")
+        output = self.wait("review-unstarted-account")
+        self.until(lambda: len(self.notifications("review-unstarted-account")) == 3)
+        self.assertIn("== all accounts at limit; earliest reset", output)
+        self.assertNotIn("== review by", output)
+        self.assertEqual(len(self.invocations()), executions)
+        finished = self.notifications("review-unstarted-account")[-1]
+        self.assertEqual(finished["outcome"], "exhausted")
+        with self.subTest(observable="status"):
+            self.assertIn("account ?", self.cli("status", "review-unstarted-account"))
+        with self.subTest(observable="turn_finished"):
+            self.assertIsNone(finished["account"])
+        with self.subTest(observable="telemetry"):
+            rows = [row for row in self.telemetry_journal()
+                    if row["slug"] == "review-unstarted-account" and row["phase"] == "turn"]
+            self.assertEqual(len(rows), 3)
+            self.assertIsNone(rows[-1]["account"])
+
+    def test_interrupted_review_angle_selection_does_not_reuse_previous_review_account(self):
+        self.configure()
+        self.configure_notify(events=["turn_finished"])
+        slug = "review-angle-selection-signal"
+        self.start(slug)
+        self.wait(slug)
+        self.notification(slug, "turn_finished")
+        self.account(self.home, "A", self.reset, used=99)
+        self.account(self.other, "B", self.reset + 3600, runs=[{
+            "mode": "complete", "reply": self.review_result(False)}])
+        self.cli("review", slug)
+        self.wait(slug)
+        self.until(lambda: len(self.notifications(slug)) == 2)
+        self.assertIn("account second", self.cli("status", slug))
+        self.assertEqual(self.notifications(slug)[-1]["account"], "second")
+        self.assertEqual(len(self.review_invocations()), 1)
+        executions = len(self.invocations())
+
+        # Hold automatic angle selection before run_turn can choose an account.
+        # Release only after the supervisor has acknowledged the external signal.
+        real_git = shutil.which("git", path=self.env["PATH"])
+        self.assertIsNotNone(real_git)
+        ready = self.root / "angle-selection-ready.json"
+        release = self.root / "angle-selection-release"
+        wrapper = self.root / "git"
+        wrapper.write_text(
+            "#!" + PYTHON + "\n"
+            "import json, os, sys, time\n"
+            "from pathlib import Path\n"
+            "if 'config' in sys.argv and '--get-regexp' in sys.argv:\n"
+            "    ready = Path(" + repr(str(ready)) + ")\n"
+            "    temporary = ready.with_suffix('.tmp')\n"
+            "    temporary.write_text(json.dumps({'ppid': os.getppid()}))\n"
+            "    temporary.replace(ready)\n"
+            "    while not Path(" + repr(str(release)) + ").exists():\n"
+            "        time.sleep(0.02)\n"
+            "os.execv(" + repr(real_git) + ", [" + repr(real_git) + "] + sys.argv[1:])\n")
+        wrapper.chmod(0o700)
+        launch = self.cli("review", slug, "--review-angles", "auto")
+        supervisor = int(launch.strip().rsplit(", pid ", 1)[1])
+        log = self.home / "claude-tasks" / slug / "stderr.log"
+        try:
+            self.until(ready.exists)
+            self.assertEqual(json.loads(ready.read_text())["ppid"], supervisor)
+            self.assertEqual(len(self.invocations()), executions)
+            with self.subTest(observable="running status"):
+                status = self.cli("status", slug)
+                self.assertIn("running", status)
+                self.assertIn("account ?", status)
+            os.kill(supervisor, signal.SIGTERM)
+            self.until(lambda: "name=SIGTERM" in log.read_text())
+        finally:
+            release.touch()
+
+        output = self.wait(slug)
+        self.until(lambda: len(self.notifications(slug)) == 3)
+        self.assertIn("interrupted externally by SIGTERM", output)
+        self.assertNotIn("== review by", output)
+        self.assertEqual(len(self.invocations()), executions)
+        finished = self.notifications(slug)[-1]
+        self.assertEqual(finished["outcome"], "interrupted")
+        with self.subTest(observable="status"):
+            self.assertIn("account ?", self.cli("status", slug))
+        with self.subTest(observable="turn_finished"):
+            self.assertIsNone(finished["account"])
+        with self.subTest(observable="telemetry"):
+            rows = [row for row in self.telemetry_journal()
+                    if row["slug"] == slug and row["phase"] == "turn"]
+            self.assertEqual(len(rows), 3)
+            self.assertEqual(rows[-1]["outcome"], "interrupted")
+            self.assertIsNone(rows[-1]["account"])
 
     def test_start_review_runs_in_same_supervisor_and_say_resumes_working_thread(self):
         self.configure()
