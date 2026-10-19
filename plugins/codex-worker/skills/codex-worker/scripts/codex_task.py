@@ -57,20 +57,10 @@ sys.dont_write_bytecode = True
 while os.path.dirname(os.path.abspath(__file__)) in sys.path:
     sys.path.remove(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from codex_worker import clock, procs, result_schema, config, sandboxing, notifications, accounts, credit_resets, threads, budgets, task_state
+from codex_worker import clock, procs, result_schema, config, sandboxing, notifications, accounts, credit_resets, threads, budgets, task_state, telemetry_log, publishing, checking, account_rotation, prompts, turn_monitor
 
 
 HELP_TEXT = __doc__
-TELEMETRY_PHASES = []
-REVIEW_ANGLES = {
-    "correctness": "Focus on behavior and acceptance criteria (Done when), including regressions and unmet requirements.",
-    "concurrency": "Focus on races, processes, signals, files and state shared by parallel commands. Check repeated runs and recovery after interruption.",
-    "security": "Focus on secrets, shell and path injection, untrusted input, permissions and sandbox boundaries.",
-    "tests": "Focus on ineffective or weakened tests, uncovered brief requirements, and mocks replacing the code under test.",
-}
-AUTO_REVIEW_ANGLES = ["correctness", "concurrency", "tests"]
-
-
 def main_repo(path):
     """The main checkout of the repository `path` belongs to (including worktrees)."""
     common = Path(procs.sh(config.GIT + ["rev-parse", "--path-format=absolute", "--git-common-dir"], cwd=path))
@@ -103,1207 +93,8 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
     return proc
 
 
-def telemetry_error(st, exc):
-    try:
-        with (config.TASKS / st["slug"] / "stderr.log").open("a", encoding="utf-8") as errors:
-            errors.write(f"telemetry unavailable: {exc}\n")
-    except OSError:
-        pass
-
-
-def telemetry_phase(st):
-    return next((phase for phase in reversed(TELEMETRY_PHASES) if phase.st is st and not phase.finished), None)
-
-
-def write_telemetry(st, row, stopped):
-    try:
-        payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-        with (config.CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
-            deadline = time.monotonic() + 2
-            while True:
-                try:
-                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    remaining = deadline - time.monotonic()
-                    if stopped() or remaining <= 0:
-                        raise
-                    time.sleep(min(0.05, remaining))
-            if stream.seek(0, os.SEEK_END):
-                stream.seek(-1, os.SEEK_END)
-                if stream.read(1) != b"\n":
-                    payload = b"\n" + payload
-            remaining = memoryview(payload)
-            while remaining:
-                written = stream.write(remaining)
-                if not written:
-                    raise OSError("short telemetry write")
-                remaining = remaining[written:]
-    except Exception as exc:
-        telemetry_error(st, exc)
-
-
-def record_turn_result(st, stopped):
-    """Persist the supervisor's final result separately from measured stages."""
-    try:
-        reviews = st.get("reviews", [])[st.get("review_start", 0):]
-        review = st.get("review_result") or ((reviews[-1].get("result") or {}) if reviews else {})
-        result = st.get("result") or {}
-        row = {"v": 1, "at": clock.CLOCK.time(), "slug": st["slug"], "repo": Path(st["repo"]).name,
-               "created": st.get("created"), "kind": st.get("kind", "work"), "phase": "turn",
-               "turn": st.get("turns", 0), "round": len(st.get("rounds", [])),
-               "account": notifications.current_turn_account(st), "started": st.get("turn_started"),
-               "finished": st.get("turn_finished"), "outcome": st.get("outcome"),
-               "result_status": result.get("status"), "verdict": review.get("verdict"),
-               "auto_fix_stop": st.get("auto_fix_stop"),
-               "ci": st.get("ci"),
-               "capacity_retries": st.get("capacity_retries", 0),
-               "max_task_weekly_percent": st.get("max_task_weekly_percent"),
-               "budget_stop": budgets.budget_stop(st)}
-        write_telemetry(st, row, stopped)
-    except Exception as exc:
-        telemetry_error(st, exc)
-
-
-class PhaseTelemetry:
-    """Supervisor-only, best-effort accounting. Never persist prompts or output."""
-
-    def __init__(self, st, phase, stopped=lambda: False):
-        self.st, self.phase = st, phase
-        self.stopped = stopped
-        self.started, self.clock = clock.CLOCK.time(), clock.CLOCK.monotonic()
-        self.sleep_seconds = 0.0
-        self.weekly_started = st.get("weekly_used_percent", 0)
-        self.finished = False
-        self.usage = []
-        self.kind = st.get("kind", "work")
-        self.round = len(st.get("rounds", []))
-        self.angle = (st.get("review_angle") or "correctness") if self.kind == "review" else None
-        self.review_start = len(st.get("reviews", []))
-        self.rotation_start = len(st.get("rotations", []))
-        self.capacity_start = st.get("capacity_retries", 0)
-        self.check = None
-
-    def add_usage(self, account, thread, before, path, offset, weekly_spent=0):
-        if not thread:
-            return
-        first, last = threads.rollout_usage(path, offset)
-        weekly_before = (first or before or {}).get("weekly")
-        last = last or before
-        tokens = {}
-        for key in config.TOKEN_FIELDS:
-            start = (before or {}).get("tokens", {}).get(key)
-            if start is None:
-                start = (first or {}).get("tokens", {}).get(key)
-            end = (last or {}).get("tokens", {}).get(key)
-            if end is None:
-                end = (before or {}).get("tokens", {}).get(key)
-            tokens[key] = (end - start if type(start) in (int, float) and type(end) in (int, float)
-                           and end >= start else None)
-        self.usage.append({"account": account, "thread": thread, "tokens": tokens,
-                           "weekly_used_before": weekly_before,
-                           "weekly_used_after": ((last or {}).get("weekly")
-                                                 if (last or {}).get("weekly") is not None else weekly_before),
-                           "weekly_spent": weekly_spent})
-
-    def finish(self, outcome=None, result=None):
-        if self.finished:
-            return
-        self.finished = True
-        try:
-            st = self.st
-            reviewing = self.kind == "review"
-            reviews = st.get("reviews", [])[self.review_start:]
-            if result is None:
-                result = (reviews[-1].get("result") if reviews else None) if reviewing else st.get("result")
-            if self.phase == "wrapup":
-                result = st.get("wrapup", {}).get("result")
-            elif self.phase in ("check", "base_check"):
-                result = None
-            result = result or {}
-            decisions = result.get("findings", []) if not reviewing else []
-            tokens = {key: (sum(entry["tokens"][key] for entry in self.usage if entry["tokens"][key] is not None)
-                            if any(entry["tokens"][key] is not None for entry in self.usage)
-                            else None) for key in config.TOKEN_FIELDS}
-            last = self.usage[-1] if self.usage else {}
-            finished = clock.CLOCK.time()
-            check = self.check or {}
-            row = {"v": 1, "at": finished, "slug": st["slug"], "repo": Path(st["repo"]).name,
-                   "created": st.get("created"),
-                   "kind": self.kind, "phase": self.phase, "turn": st.get("turns", 0),
-                   "round": self.round, "angle": self.angle,
-                   "account": last.get("account", st.get("review_account") if reviewing else st.get("account")),
-                   "thread": last.get("thread", (reviews[-1].get("thread") if reviews else None)
-                                      if reviewing else st.get("thread")),
-                   "started": self.started, "finished": finished,
-                   "active_seconds": round(max(0, clock.CLOCK.monotonic() - self.clock - self.sleep_seconds), 3),
-                   "sleep_seconds": round(self.sleep_seconds, 3),
-                   "outcome": outcome or st.get("outcome"), "result_status": result.get("status"),
-                   "verdict": result.get("verdict"),
-                   "findings": len(result["findings"]) if "findings" in result else None,
-                   "decisions": {key: sum(item.get("decision") == key for item in decisions)
-                                 for key in ("fixed", "rejected")},
-                   "check_outcome": check.get("outcome"), "check_seconds": check.get("seconds"),
-                   "rotations": sum("from" in entry and "to" in entry
-                                    for entry in st.get("rotations", [])[self.rotation_start:]),
-                   "capacity_retries": st.get("capacity_retries", 0) - self.capacity_start,
-                   "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
-                   "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage,
-                   "weekly_spent": st.get("weekly_used_percent", 0) - self.weekly_started}
-            write_telemetry(st, row, self.stopped)
-        except Exception as exc:
-            telemetry_error(self.st, exc)
-
-@contextmanager
-def record_phase(st, phase, stopped):
-    entry = PhaseTelemetry(st, phase, stopped)
-    TELEMETRY_PHASES.append(entry)
-    try:
-        yield entry
-    except (Exception, SystemExit):
-        entry.finish(outcome=task_state.stop_outcome(st, stopped) or "failed")
-        raise
-    finally:
-        entry.finish(outcome=task_state.stop_outcome(st, stopped))
-        TELEMETRY_PHASES.pop()
-
-
-def scout_prompt(question, cfg=None):
-    cfg = config.accounts_config() if cfg is None else cfg
-    if cfg.get("language", "en") == "ru":
-        rules = ("Ты разведчик: изучи код и ответь на вопрос Claude.\n"
-                 "Файлы не меняй, ничего не коммить и не пушь.\n"
-                 "Ответ — примерно до 300 слов, если вопрос не просит иного; без вступления.\n"
-                 "Каждый факт подкрепи ссылкой файл:строка. "
-                 "Отдельно отметь, что проверено, а что предположение.\n"
-                 "Назови тесты, которые покрывают эту область. Скажи, чего не смотрел.")
-    else:
-        rules = ("You are a scout: investigate the code and answer Claude's question.\n"
-                 "Do not change files, commit, or push.\n"
-                 "Keep the answer to about 300 words unless the question asks otherwise; no introduction.\n"
-                 "Cite file:line for every fact. Separate verified findings from assumptions.\n"
-                 "Name the tests covering this area. State what you did not inspect.")
-    return question.rstrip() + "\n\n" + rules
-
-
-def check_paths(st):
-    """Read saved and existing relative paths from top-level check tokens."""
-    paths = set(st.get("check_paths", []))
-    root = Path(st["worktree"])
-    try:
-        lexer = shlex.shlex(st.get("check") or "", posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        tokens = list(lexer)
-    except ValueError:
-        tokens = []
-    candidates = []
-    for token in tokens:
-        candidates.append(token)
-        if "=" in token:
-            name, value = token.split("=", 1)
-            if token.startswith("--") or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", name):
-                candidates.append(value)
-    for candidate in candidates:
-        if not candidate or Path(candidate).is_absolute():
-            continue
-        path = Path(os.path.abspath(root / candidate))
-        try:
-            relative = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-        try:
-            exists = path.exists()
-        except OSError:
-            # Shell arguments can be code or long strings rather than filenames.
-            continue
-        if exists:
-            paths.add(relative)
-    return sorted(paths)
-
-
-def guarded_path(path, st, paths):
-    parts = path.split("/")
-    return (any(part in ("tests", "test", "__tests__", "spec") for part in parts[:-1])
-            or any(fnmatch.fnmatchcase(parts[-1], pattern)
-                   for pattern in ("test_*", "*_test.*", "*.test.*", "*.spec.*"))
-            or path == ".gitlab-ci.yml"
-            or path.startswith((".github/workflows/", ".forgejo/workflows/"))
-            or any(item == "." or path == item or path.startswith(item + "/") for item in paths)
-            or any(fnmatch.fnmatchcase(path, pattern.removeprefix("./")) for pattern in st.get("guards", [])))
-
-
-DISABLED_TEST = re.compile(
-    r"@unittest\.(?:skip\w*|expectedFailure)\b|\bself\.skipTest\s*\("
-    r"|\bpytest\.mark\.(?:skip|skipif|xfail)\b|\bpytest\.skip\s*\("
-    r"|\.(?:skip|only)\s*\(|\b(?:xit|xdescribe)\s*\("
-    r"|@(?:Disabled|Ignore)\b|\bt\.Skip\s*\(", re.I)
-
-
-def guarded_changes(st):
-    """Combine diff layers, matching moved skip markers within each layer."""
-    if st.get("kind") == "scout" or sandboxing.workspace_filter_driver(st) is not None:
-        return []
-    root = st["worktree"]
-    paths = check_paths(st)
-    changed = {}
-    args = config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
-    for revisions in ([st["base"], "HEAD"], ["--cached", "HEAD"], []):
-        removed_lines = Counter()
-        added_markers = []
-        stats = procs.sh(args + ["--numstat", "-z"] + revisions + ["--"], cwd=root, check=False)
-        deleted = set(procs.sh(args + ["--name-only", "-z", "--diff-filter=D"] + revisions + ["--"],
-                         cwd=root, check=False).split("\0"))
-        for entry in stats.split("\0"):
-            if not entry:
-                continue
-            added, removed, path = entry.split("\t", 2)
-            if not guarded_path(path, st, paths):
-                continue
-            item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
-                                             "deleted": False, "disabled": [], "moved": 0})
-            item["added"] += int(added) if added != "-" else 0
-            item["removed"] += int(removed) if removed != "-" else 0
-            item["deleted"] |= path in deleted
-            # Preserve non-UTF-8 bytes for matching; replacing them here can
-            # make different skip conditions look like an unchanged move.
-            patch = procs.sh(args + ["--unified=0"] + revisions + ["--", path],
-                       cwd=root, check=False, errors="surrogateescape")
-            line_number = 0
-            in_hunk = False
-            for line in patch.splitlines():
-                hunk = re.match(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@", line)
-                if hunk:
-                    line_number = int(hunk[1])
-                    in_hunk = True
-                elif in_hunk and line.startswith("+"):
-                    if DISABLED_TEST.search(line[1:]):
-                        marker = {"line": line_number, "text": line[1:].strip()}
-                        added_markers.append((path, marker))
-                    line_number += 1
-                elif in_hunk and line.startswith("-"):
-                    removed_lines[line[1:].strip()] += 1
-                elif in_hunk and line.startswith(" "):
-                    line_number += 1
-        if not revisions:
-            # Untracked additions belong to the index-to-working-tree layer.
-            untracked = procs.sh(config.GIT + ["ls-files", "--others", "--exclude-standard", "-z"], cwd=root, check=False)
-            for path in filter(None, untracked.split("\0")):
-                if not guarded_path(path, st, paths):
-                    continue
-                file = Path(root) / path
-                try:
-                    content = os.readlink(file) if file.is_symlink() else file.read_text(encoding="utf-8", errors="surrogateescape")
-                except OSError:
-                    continue
-                lines = content.splitlines()
-                item = changed.setdefault(path, {"path": path, "added": 0, "removed": 0,
-                                                 "deleted": False, "disabled": [], "moved": 0})
-                item["added"] += len(lines)
-                added_markers.extend((path, {"line": n, "text": line.strip()})
-                                     for n, line in enumerate(lines, 1) if DISABLED_TEST.search(line))
-        # Match across files only after collecting every deletion in this layer.
-        # A deletion cannot hide a marker added in another layer.
-        for path, marker in added_markers:
-            item = changed[path]
-            if removed_lines[marker["text"]]:
-                removed_lines[marker["text"]] -= 1
-                item["moved"] += 1
-            else:
-                # Replacement is only for display, after lossless matching.
-                marker["text"] = (marker["text"].encode("utf-8", errors="surrogateescape")
-                                  .decode("utf-8", errors="replace"))
-                if marker not in item["disabled"]:
-                    item["disabled"].append(marker)
-    return [changed[path] for path in sorted(changed)]
-
-
-def guarded_lines(changes):
-    if not changes:
-        return []
-    lines = ["== guarded files changed: " + ", ".join(
-        f"{item['path']} (+{item['added']} −{item['removed']})" for item in changes)]
-    deleted = [item["path"] for item in changes if item["deleted"]]
-    if deleted:
-        lines.append("== guarded files deleted: " + ", ".join(deleted))
-    disabled = [f"{item['path']}:{marker['line']} {marker['text']}"
-                for item in changes for marker in item["disabled"]]
-    if disabled:
-        lines.append("== guarded tests disabled: " + "; ".join(disabled))
-    moved = sum(item["moved"] for item in changes)
-    if moved:
-        lines.append(f"== guarded skip markers moved: {moved}")
-    return lines
-
-
-def review_prompt(st, cfg=None):
-    cfg = config.accounts_config() if cfg is None else cfg
-    brief = config.TASKS / st["slug"] / "brief.md"
-    ru = cfg.get("language", "en") == "ru"
-    context = ""
-    if st.get("rounds"):
-        context += (("Начиная со второго ревью ищи регрессии, внесённые исправлениями, и невыполненные "
-                     "пункты «Готово, когда». Новые граничные случаи вне брифа отмечай только как P3.\n") if ru else
-                    ("From the second review onward, look for regressions introduced by the fixes and unmet "
-                     "acceptance criteria (Done when). Report new edge cases outside the brief only as P3.\n"))
-    guarded = guarded_lines(guarded_changes(st))
-    if guarded:
-        context += "\n".join(guarded) + "\n"
-        context += (("Прочитай эти охраняемые файлы целиком и проверь, не ослаблены ли проверки: "
-                     "убранные утверждения, пропуски, расширенные допуски, моки вместо проверяемого кода.\n") if ru else
-                    ("Read these guarded files in full and check for weakened checks: removed assertions, "
-                     "skips, widened tolerances, or mocks replacing the code under test.\n"))
-    checks = st.get("checks", [])
-    if (checks and st.get("check") == checks[-1]["cmd"] and checks[-1]["outcome"] == "passed"):
-        check = checks[-1]
-        evidence = f"`{check['cmd']}`: passed (exit {check['exit']}, {check['seconds']:.0f} s).\n"
-        context += (("Сохранённая проверка уже прошла: " + evidence +
-                     "Не перезапускай весь набор проверок. Запускай только точечные проверки, "
-                     "чтобы подтвердить конкретную находку.\n") if ru else
-                    ("The saved check already passed: " + evidence +
-                     "Do not rerun the full test suite. Run only targeted checks to confirm a specific finding.\n"))
-        if check.get("base_check"):
-            base = check["base_check"]
-            if base["outcome"] == "skipped":
-                context += f"Base tests: skipped ({base['reason']}).\n"
-            else:
-                context += (f"Base tests: {base['outcome']} (exit {base['exit']}, {base['seconds']:.0f} s).\n"
-                            + base.get("tail", "") + "\n")
-            context += (("Это сигнал для ревью; причиной может быть законная смена поведения.\n") if ru else
-                        ("This is review evidence; a legitimate behavior change may explain a failure.\n"))
-    rejected = []
-    for entry in st.get("rounds", []):
-        findings = {item["id"]: item for item in (entry.get("review") or {}).get("findings", [])}
-        for decision in entry.get("decisions", []):
-            finding = findings.get(decision["id"])
-            if decision["decision"] == "rejected" and finding is not None:
-                rejected.append(f"{finding['id']} [{finding['severity']}] {finding['file']}:{finding['line']} "
-                                f"— {finding['title']}\n{finding['detail']}\nverify: {finding['verify']}\n"
-                                + ("Причина отклонения: " if ru else "Rejection reason: ") + decision["note"])
-    if rejected:
-        context += (("Исполнитель отклонил следующие находки. Не поднимай их снова, если причина верна; "
-                     "если поднимаешь — объясни, чем она неверна.\n") if ru else
-                    ("The worker rejected these findings. Do not raise them again if the reason is valid; "
-                     "if you raise one again, explain why its rejection reason is wrong.\n"))
-        context += "\n\n".join(rejected) + "\n"
-    if ru:
-        return (f"Проведи ревью изменений задачи: git diff {shlex.quote(st['base'])}.\n"
-                f"Бриф задачи — в файле {brief}. Прочитай его и сверяйся с разделом «Готово, когда».\n"
-                "Ищи только реальные дефекты: неверное поведение, невыполненные пункты брифа, "
-                "сломанные или фиктивные проверки, опасные побочные эффекты, гонки.\n"
-                "Для каждого дефекта укажи файл:строка, что не так и как это проверить. "
-                "Без замечаний по стилю.\n"
-                + context +
-                "Файлы не меняй, ничего не коммить. Ответь JSON по схеме ревью: verdict clean, если "
-                "дефектов нет, иначе defects. Находки нумеруй F1, F2 и далее; severity P1/P2/P3, "
-                "file, line, title, detail и verify. При clean findings пуст; summary — краткий итог.")
-    return (f"Review the task changes: git diff {shlex.quote(st['base'])}.\n"
-            f"Read the task brief at {brief} and check its acceptance criteria.\n"
-            "Look only for real defects: incorrect behavior, unmet brief requirements, "
-            "broken or ineffective checks, dangerous side effects, and races.\n"
-            "For each defect, give file:line, explain what is wrong and how to verify it. "
-            "Do not comment on style.\n"
-            + context +
-            "Do not change files or create commits. Return JSON matching the review schema: verdict clean "
-            "when there are no defects, otherwise defects. Number findings F1, F2, etc.; include severity "
-            "P1/P2/P3, file, line, title, detail and verify. For clean, findings is empty; summary is a short recap.")
-
-
-def check_tail(st, filename="check.log"):
-    path = config.TASKS / st["slug"] / filename
-    if not path.exists():
-        return ""
-    with path.open(encoding="utf-8", errors="replace") as output:
-        return "".join(deque(output, maxlen=40)).rstrip()
-
-
-def fix_prompt(st, review, check, cfg):
-    ru = cfg.get("language", "en") == "ru"
-    if check is not None:
-        prompt = (("Исправь сбой сохранённой проверки после предыдущего исправления.\n" if ru else
-                   "Fix the saved check failure after the previous fix.\n") +
-                  f"`{check['cmd']}`: {check['outcome']}, exit {check['exit']}\ncheck.log (40):\n" +
-                  check.get("tail", check_tail(st)))
-    else:
-        prompt = "Проверь находки ревью по коду:\n" if ru else "Check these review findings against the code:\n"
-        for finding in review["findings"]:
-            prompt += (f"\n{finding['id']} [{finding['severity']}] {finding['file']}:{finding['line']} "
-                       f"— {finding['title']}\n{finding['detail']}\nverify: {finding['verify']}\n")
-    prompt += (("\n\nПроверь каждую находку по коду. Настоящие дефекты исправь, где разумно — с тестом. "
-                "Неверные отклони с причиной в одну строку. Если находка требует непропорциональной "
-                "сложности ради случая вне «Готово, когда», отклони её с причиной out of scope "
-                "и вынеси в remaining. Закоммить и запушь изменения. "
-                "Верни итог по схеме работы; в findings укажи для каждой находки id, "
-                "decision fixed или rejected и note с пояснением. Если находок нет, findings пуст.\n") if ru else
-               ("\n\nVerify every finding against the code. Fix real defects, adding a test where reasonable. "
-                "Reject incorrect findings with a one-line reason. If a finding requires disproportionate "
-                "complexity for a case outside the acceptance criteria (Done when), reject it with the reason "
-                "out of scope and list it in remaining. Commit and push the changes. "
-                "Return the work result schema; in findings give each finding's id, decision fixed or rejected, "
-                "and an explanatory note. When there are no findings, use an empty findings array.\n"))
-    return prompt
-
-
-def reset_resume_prompt(cfg=None):
-    cfg = config.accounts_config() if cfg is None else cfg
-    if cfg.get("language", "en") == "ru":
-        return "Лимит подписки сбросился. Продолжай с того места, где остановился."
-    return "The subscription limit has reset. Continue from where you stopped."
-
-
-def auth_resume_prompt(cfg=None):
-    cfg = config.accounts_config() if cfg is None else cfg
-    if cfg.get("language", "en") == "ru":
-        return "Ход прервался из-за ошибки входа. Продолжай с того места, где остановился."
-    return "The turn was interrupted by an authentication error. Continue from where you stopped."
-
-
-def capacity_resume_prompt(cfg=None):
-    cfg = config.accounts_config() if cfg is None else cfg
-    if cfg.get("language", "en") == "ru":
-        return "Ход прервался из-за перегрузки модели. Продолжай с того места, где остановился."
-    return "The turn was interrupted because the model was at capacity. Continue from where you stopped."
-
-
-def limit_reason(info, cfg):
-    limits = info.get("limits", {})
-    for name in ("primary", "secondary"):
-        w = limits.get(name, {})
-        if w.get("used", 0) >= cfg["switch_at"]:
-            label = "weekly" if w.get("minutes", 0) >= 10080 else name
-            return f"{label} limit {w['used']:g}%"
-    return limits.get("reached") or "usage limit"
-
-
-def limit_error(event):
-    if event.get("type") not in ("turn.failed", "error"):
-        return False
-    text = json.dumps(event, ensure_ascii=False).lower()
-    return "usage limit" in text or any(s in text for s in (
-        "rate_limit_reached", "workspace_owner_usage_limit_reached", "workspace_member_usage_limit_reached",
-        "workspace_owner_credits_depleted", "workspace_member_credits_depleted"))
-
-
-def auth_error(event):
-    if event.get("type") not in ("turn.failed", "error"):
-        return False
-    text = json.dumps(event, ensure_ascii=False).lower()
-    return bool(re.search(r"\b401\b", text)) or any(part in text for part in (
-        "unauthorized", "access token could not be refreshed", "authentication session could not be refreshed",
-        "oauth refresh token was rejected", "failed to refresh token"))
-
-
-def capacity_error(event):
-    return (event.get("type") in ("turn.failed", "error")
-            and "at capacity" in json.dumps(event, ensure_ascii=False).lower())
-
-
-def refusal_message(event):
-    """Policy refusals are terminal model outcomes, not account failures."""
-    if event.get("type") != "turn.failed":
-        return None
-    error = event.get("error")
-    message = (error.get("message") if isinstance(error, dict) else error) or event.get("message")
-    if isinstance(message, str) and "cybersecurity risk" in message.lower():
-        return message
-    return None
-
-
-def earliest_reset(infos, cfg):
-    resets = [(accounts.reset_time(i, cfg), i["name"]) for i in infos if i.get("logged_in") and not i.get("duplicate")]
-    resets = [(stamp, name) for stamp, name in resets if stamp is not None]
-    return min(resets) if resets else (None, None)
-
-
-def record_exhausted(st, infos, cfg, reason):
-    stamp, name = earliest_reset(infos, cfg)
-    st.pop("sleeping", None)
-    st["exhausted"] = {"at": clock.CLOCK.time(), "reset": stamp, "account": name, "reason": reason}
-    st["outcome"] = "exhausted"
-    task_state.save(st)
-    notifications.notify(st, cfg, "paused", f"paused: {reason}", until=stamp)
-
-
-def try_reset_credit(st, infos, cfg, stopped):
-    """Return fresh quotas after a reset or concurrent quota recovery; never retry here."""
-    stamp, _ = earliest_reset(infos, cfg)
-    if (not cfg.get("use_reset_credits", False) or stamp is None
-            or stamp - clock.CLOCK.time() <= cfg.get("reset_credit_min_hours", 12) * 3600
-            or accounts.available(infos, cfg)):
-        return None
-    eligible = [i for i in infos if i.get("logged_in") and not i.get("duplicate")]
-    with credit_resets.reset_journal(stopped) as (entries, _):
-        pending = [(entry.get("credit") or {"id": entry["creditId"]}, info)
-                   for info in eligible for entry in credit_resets.pending_resets(entries, info)]
-    choices = pending or [(credit, info) for info in eligible
-               for credit in credit_resets.reset_credits(info)]
-    if not choices or stopped():
-        return None
-    credit, info = min(choices, key=lambda pair: pair[0].get("expiresAt")
-                       if pair[0].get("expiresAt") is not None else float("inf"))
-    event = {"event": "reset_credit", "at": clock.CLOCK.time(), "account": info["name"],
-             "credit_id": credit["id"], "expires_at": credit.get("expiresAt")}
-    try:
-        # A concurrent unknown attempt takes priority over the candidate selected above.
-        action = credit_resets.reset_credit_action(info, credit["id"], st["slug"], stopped, confirmed=True,
-                                     quota_cfg=cfg, credit_id_is_hint=True)
-        if action["outcome"] == "available":
-            return [action["info"] if i["name"] == info["name"] else i for i in infos]
-    except (OSError, ValueError, KeyError, RuntimeError) as exc:
-        event.update(outcome="error", error=str(exc))
-    else:
-        event.update(outcome=action["outcome"], credit_id=action["credit"]["id"],
-                     expires_at=action["credit"].get("expiresAt"))
-    st["rotations"].append(event)
-    task_state.save(st)
-    if event["outcome"] in ("success", "consumed (inferred)") and not stopped():
-        notifications.notify(st, cfg, "reset_credit_used", f"used a free limit reset on {info['name']}",
-               account=info["name"])
-        return task_snapshots(st, cfg, stopped)
-    return None
-
-
-def refresh_login_state(st, infos, new_turn=False):
-    """Only a fresh probe at the beginning of a turn can clear a login flag."""
-    names = list(st.get("needs_login", []))
-    identities = st.setdefault("account_ids", {})
-    for info in infos:
-        if info.get("account_id"):
-            identities[info["name"]] = info["account_id"]
-        if new_turn and info.get("logged_in") is True and info["name"] in names:
-            names.remove(info["name"])
-        elif info.get("logged_in") is False and info["name"] not in names:
-            names.append(info["name"])
-            st["rotations"].append({"event": "needs_login", "at": clock.CLOCK.time(), "account": info["name"]})
-            notifications.notify(st, None, "needs_login", f"{info['name']} needs login", account=info["name"])
-    if names != st.get("needs_login", []):
-        st["needs_login"] = names
-        task_state.save(st)
-    return [i for i in infos if i["name"] not in st.get("auth_excluded", [])
-            and i.get("duplicate") not in st.get("auth_excluded", [])
-            and (i.get("account_id") or identities.get(i["name"])) not in st.get("auth_excluded_ids", [])]
-
-
-def exclude_auth_account(st, account, info):
-    name = account["name"]
-    if name not in st["auth_excluded"]:
-        st["auth_excluded"].append(name)
-    ident = info.get("account_id") or st.get("account_ids", {}).get(name)
-    if ident and ident not in st["auth_excluded_ids"]:
-        st["auth_excluded_ids"].append(ident)
-    names = st.setdefault("needs_login", [])
-    if name not in names:
-        names.append(name)
-        st["rotations"].append({"event": "needs_login", "at": clock.CLOCK.time(), "account": name})
-        notifications.notify(st, None, "needs_login", f"{name} needs login", account=name)
-    task_state.save(st)
-
-
-def task_snapshots(st, cfg, stopped, new_turn=False):
-    infos = accounts.snapshots(cfg, stopped, prepare=True)
-    if cfg.get("use_reset_credits", False):
-        for info in infos:
-            if (stopped() or not info.get("logged_in") or info.get("duplicate")
-                    or info["name"] in st.get("auth_excluded", [])
-                    or info.get("account_id") in st.get("auth_excluded_ids", [])):
-                continue
-            action = credit_resets.reset_credit_action(info, slug=st["slug"], cancelled=stopped,
-                                         confirmed=True, pending_only=True, allow_consume=False)
-            if action is None:
-                continue
-            info.update(action["info"])
-            if action["outcome"] == "consumed (inferred)":
-                st["reset_reconciled"] = True
-                credit = action["credit"]
-                st["rotations"].append({"event": "reset_credit", "at": clock.CLOCK.time(), "account": info["name"],
-                                        "credit_id": credit["id"], "expires_at": credit.get("expiresAt"),
-                                        "outcome": action["outcome"]})
-                task_state.save(st)
-                notifications.notify(st, cfg, "reset_credit_used", f"used a free limit reset on {info['name']}",
-                       account=info["name"])
-    return refresh_login_state(st, infos, new_turn)
-
-
-def no_logged_in_accounts(st, infos):
-    if any(i.get("logged_in") is not False for i in infos):
-        return False
-    names = st.get("needs_login", []) or [i["name"] for i in infos]
-    st.update(outcome="failed", error="No usable logged-in accounts remain; " +
-              "; ".join("run login " + name for name in names))
-    st.pop("sleeping", None)
-    task_state.save(st)
-    return True
-
-
-def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
-    """Wait without an exec, re-reading quotas after each wall-clock deadline."""
-    infos = refresh_login_state(st, infos)
-    if no_logged_in_accounts(st, infos):
-        return None
-    sleep = sleep or clock.CLOCK.sleep
-    probe_retries = 0
-    wait_started = clock.CLOCK.time()
-    already_waited = st.get("reset_wait_seconds", 0)
-    deadline = wait_started + config.MAX_RESET_WAIT_SECONDS - already_waited
-
-    def cancelled():
-        return stopped() or clock.CLOCK.time() >= deadline
-
-    def update_waited():
-        st["reset_wait_seconds"] = already_waited + max(0, clock.CLOCK.time() - wait_started)
-
-    while not stopped():
-        update_waited()
-        remaining = deadline - clock.CLOCK.time()
-        if remaining <= 0:
-            record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
-            return None
-        unknown = [i for i in infos if i.get("logged_in") is None]
-        probing = bool(unknown) and probe_retries < config.MAX_ACCOUNT_RETRIES
-        if unknown and not probing and not any(i.get("logged_in") is True for i in infos):
-            errors = "; ".join(f"{i['name']}: {i.get('error', 'RPC unavailable')}" for i in unknown)
-            st.update(outcome="failed", error=f"Account status is unknown after {config.MAX_ACCOUNT_RETRIES} retries: {errors}")
-            st.pop("sleeping", None)
-            task_state.save(st)
-            return None
-        if not cfg["wait_for_reset"] and not probing:
-            record_exhausted(st, infos, cfg, reason)
-            return None
-        # At most one consume attempt before this sleep, even if the result is unknown
-        # or the refreshed quota still says exhausted.
-        reconciled = st.pop("reset_reconciled", False)
-        refreshed = None if unknown or reconciled else try_reset_credit(st, infos, cfg, cancelled)
-        st.pop("reset_reconciled", None)
-        if refreshed is not None:
-            infos = refresh_login_state(st, refreshed)
-        update_waited()
-        if cancelled():
-            if not stopped():
-                record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
-            return None
-        if refreshed is not None:
-            current = next((i for i in infos if i["name"] == st["account"]), {})
-            if st.get("kind") != "review" and st.get("thread") and current.get("logged_in") and not accounts.exhausted(current, cfg):
-                return current
-            chosen = accounts.available(infos, cfg)
-            if chosen:
-                return chosen
-            unknown = [i for i in infos if i.get("logged_in") is None]
-            probing = bool(unknown) and probe_retries < config.MAX_ACCOUNT_RETRIES
-        if no_logged_in_accounts(st, infos):
-            return None
-        started = clock.CLOCK.time()
-        stamp, name = earliest_reset(infos, cfg)
-        # A delayed reset may still have its old timestamp. Avoid a tight RPC loop.
-        until = stamp + config.RESET_MARGIN if stamp is not None else started + config.RESET_RETRY_SECONDS
-        if until <= started:
-            until = started + config.SLEEP_STEP
-        if probing:
-            until = min(until, started + config.ACCOUNT_RETRY_SECONDS) if stamp is not None else started + config.ACCOUNT_RETRY_SECONDS
-        until = min(until, deadline)
-        sleeping = {"until": until, "account": name, "reason": reason}
-        if probing:
-            sleeping.update(probe=True, probe_attempt=probe_retries + 1, reason="account status unknown (RPC error)")
-        st.update(outcome="sleeping", sleeping=sleeping, exhausted=None)
-        st["rotations"].append(dict(sleeping, at=started, event="sleep"))
-        task_state.save(st)
-        notifications.notify(st, cfg, "paused", f"paused until {config.local_time(until)}: {sleeping['reason']}", until=until)
-        phase = telemetry_phase(st)
-        sleep_started = clock.CLOCK.monotonic() if phase is not None else None
-        try:
-            while not stopped():
-                left = until - clock.CLOCK.time()
-                if left <= 0:
-                    break
-                sleep(min(config.SLEEP_STEP, left))
-        finally:
-            if phase is not None:
-                phase.sleep_seconds += max(0, clock.CLOCK.monotonic() - sleep_started)
-            update_waited()
-        if stopped():
-            return None
-        if st["reset_wait_seconds"] >= config.MAX_RESET_WAIT_SECONDS:
-            record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
-            return None
-        st.pop("sleeping", None)
-        st["outcome"] = "running"
-        st["rotations"].append(dict(sleeping, at=clock.CLOCK.time(), event="wake"))
-        task_state.save(st)
-        notifications.notify(st, cfg, "woke", "woke to recheck account limits")
-        infos = task_snapshots(st, cfg, cancelled)
-        if probing:
-            probe_retries += 1
-        if not any(i.get("logged_in") is None for i in infos):
-            probe_retries = 0
-        update_waited()
-        if stopped():
-            return None
-        if st["reset_wait_seconds"] >= config.MAX_RESET_WAIT_SECONDS:
-            record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
-            return None
-        if no_logged_in_accounts(st, infos):
-            return None
-        current = next((i for i in infos if i["name"] == st["account"]), {})
-        if st.get("kind") != "review" and st.get("thread") and current.get("logged_in") and not accounts.exhausted(current, cfg):
-            return current
-        chosen = accounts.available(infos, cfg)
-        if chosen:
-            return chosen
-    return None
-
-
-class TurnControl:
-    """Limits belong to a phase, surviving exec retries but excluding account waits."""
-
-    def __init__(self, minutes, repeat_limit, weekly=None):
-        self.minutes = minutes
-        self.weekly = weekly
-        self.seconds = None if minutes is None else minutes * config.MINUTE_SECONDS
-        self.elapsed = 0.0
-        self.repeat_limit = repeat_limit
-        self.failures = {}
-        self.reason = None
-
-    def expired(self, started):
-        if self.seconds is None:
-            return False
-        usage = budgets.monitor_time_usage(self.elapsed, self.seconds, self.minutes, started, clock.CLOCK.monotonic())
-        if usage.reason is not None:
-            self.reason = usage.reason
-            return True
-        return False
-
-    def weekly_exhausted(self, spent):
-        if self.weekly is not None and spent >= self.weekly:
-            self.reason = {"outcome": "budget_exhausted", "weekly": self.weekly, "spent": spent}
-            return True
-        return False
-
-    def repeated(self, event):
-        item = event.get("item") or {}
-        if event.get("type") != "item.completed" or item.get("type") != "command_execution":
-            return False
-        command, code = item.get("command"), item.get("exit_code")
-        if not isinstance(command, str) or type(code) is not int:
-            return False
-        if code == 0:
-            self.failures.pop(command, None)
-            return False
-        output = item.get("aggregated_output", "")
-        if not isinstance(output, str):
-            return False
-        digest = hashlib.sha256(output.encode("utf-8")[-2048:]).hexdigest()
-        signature = (code, digest)
-        previous, count = self.failures.get(command, (None, 0))
-        count = count + 1 if signature == previous else 1
-        self.failures[command] = (signature, count)
-        if count >= self.repeat_limit:
-            self.reason = {"outcome": "stuck", "command": command, "exit_code": code,
-                           "output_sha256": digest, "count": count}
-            return True
-        return False
-
-
-def turn_stop_message(reason):
-    if reason["outcome"] == "budget_exhausted":
-        if "weekly" in reason:
-            return f"weekly budget {reason['weekly']:g}% exhausted (spent {reason['spent']:g}%)"
-        return f"time budget {reason['minutes']:g} min exhausted"
-    return f"repeated failure ×{reason['count']}: {reason['command']}"
-
-
-def wrapup_prompt(st, reason, cfg):
-    ru = cfg.get("language", "en") == "ru"
-    reviewing = st.get("kind") == "review"
-    if reason["outcome"] == "budget_exhausted":
-        if "weekly" in reason:
-            prompt = ("Бюджет задачи на недельный лимит исчерпан. " if ru else
-                      "The task's weekly limit budget is exhausted. ")
-        else:
-            prompt = ("Время хода вышло. " if ru else "The turn's time budget has expired. ")
-        if st.get("kind") not in ("review", "scout"):
-            prompt += ("Закоммить то, что работает, и запушь. " if ru else
-                       "Commit what works and push it. ")
-        if not reviewing:
-            prompt += ("Коротко подведи итог со status partial и списком оставшегося в remaining. " if ru else
-                       "Give a short final result with status partial and a list of remaining work in remaining. ")
-    else:
-        prompt = ((f"Команда {reason['command']!r} упала одинаково {reason['count']} раз "
-                   f"(exit_code {reason['exit_code']}, SHA-256 хвоста вывода {reason['output_sha256']}). "
-                   "Остановись. Приложи числа и что пробовал. ") if ru else
-                  (f"Command {reason['command']!r} failed identically {reason['count']} times "
-                   f"(exit_code {reason['exit_code']}, output tail SHA-256 {reason['output_sha256']}). "
-                   "Stop. Report numerical evidence and what you tried. "))
-        if not reviewing:
-            prompt += "Короткий итог со status blocked. " if ru else "Give a short final result with status blocked. "
-    prompt += ("На сворачивание не больше 10 минут; не продолжай реализацию и не запускай ревью. " if ru else
-               "You have at most 10 minutes to wrap up; do not continue implementation or start a review. ")
-    if st.get("kind") in ("review", "scout"):
-        prompt += ("Режим только чтения: не меняй файлы, не коммить и не пушь. " if ru else
-                   "Stay read-only: do not change files, commit or push. ")
-    if reviewing:
-        prompt += (("Ответь JSON по схеме ревью: в findings верни находки, найденные к этому моменту; "
-                    "verdict defects, если находки есть, иначе clean. В summary отметь, что ревью не завершено.") if ru else
-                   ("Return JSON matching the review schema: include findings found so far in findings; "
-                    "use verdict defects if any findings exist, otherwise clean. In summary state that the review is incomplete."))
-    elif st.get("kind") != "scout":
-        prompt += "Ответь JSON по схеме работы." if ru else "Return JSON matching the work result schema."
-    return prompt
-
-
-class MonitorQuotaDecision(NamedTuple):
-    action: Literal["continue", "limit", "failed"]
-    info: Optional[dict] = None
-    reason: Optional[str] = None
-    allow_credits: bool = False
-
-
-def monitor_quota_decision(info, cfg, reason=None) -> MonitorQuotaDecision:
-    """Choose a quota action from a limit sample/settings, without RPCs or writes."""
-    if reason:
-        return MonitorQuotaDecision("limit" if cfg["enabled"] else "failed", info, reason)
-    if cfg["enabled"] and accounts.exhausted(info, cfg):
-        return MonitorQuotaDecision("limit", info, limit_reason(info, cfg), True)
-    return MonitorQuotaDecision("continue")
-
-
-@dataclass
-class MonitorEvents:
-    """State derived from exec stdout, including an unfinished JSON line."""
-    thread: str
-    review_entry: Optional[dict] = None
-    buffer: bytes = b""
-    eof: bool = False
-    failed: bool = False
-    completed: bool = False
-    reason: Optional[str] = None
-    authentication_failed: bool = False
-    capacity_failed: bool = False
-    refusal: Optional[str] = None
-    final_message: str = ""
-    exit_code: Optional[int] = None
-
-
-@dataclass
-class MonitorRollout:
-    """Rollout polling cursor and the stdout prefix queued at a weekly stop."""
-    path: Optional[Path]
-    previous_size: int
-    usage_offset: int
-    next_search: float
-    next_poll: float = 0.0
-    pending_weekly_spent: Optional[float] = None
-    pending_weekly_bytes: int = 0
-    current_info: Optional[dict] = None
-
-
-def monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last):
-    """Prepare exec arguments/schema and return the effective prompt for fallback."""
-    if last.exists():
-        last.unlink()
-    args = [config.codex_binary(), "exec"]
-    if reviewing and not wrapup and not thread:
-        # Some CLI versions reject --base together with custom instructions.
-        if not review_fallback:
-            args += ["review", "--base", st["base"]]
-        args += ["--json", "-o", str(last)]
-    elif thread:
-        args += ["resume", thread, "--json", "-o", str(last)]
-    else:
-        args += ["--json", "-C", st["worktree"], "-o", str(last)]
-    if st.get("kind") == "scout":
-        args += ["-c", 'sandbox_mode="read-only"']
-    else:
-        args += sandboxing.sandbox_args(st)
-        if st.get("sandbox") == "workspace":
-            rules = sandboxing.sandbox_rules(cfg, reviewing=reviewing)
-            if not prompt.endswith(rules):
-                prompt += "\n\n" + rules
-    if st.get("kind") != "scout":
-        schema = last.parent / ("review-schema.json" if reviewing else "result-schema.json")
-        schema.write_text(json.dumps(result_schema.REVIEW_SCHEMA if reviewing else result_schema.RESULT_SCHEMA, indent=2), encoding="utf-8")
-        args += ["--output-schema", str(schema)]
-    return args + threads.effort_args(effort) + [prompt], prompt
-
-
-@contextmanager
-def monitor_process(st, account, args, errors):
-    """Own one exec process group; terminate it before the caller's final accounting."""
-    proc = subprocess.Popen(args, cwd=st["worktree"], env=accounts.account_env(account), stdin=subprocess.DEVNULL,
-                            stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
-    try:
-        yield proc
-    finally:
-        procs.terminate(proc)
-
-
-def monitor_thread_started(st, account, stream, reviewing, wrapup, attempt_started):
-    """Apply thread.started to task/event state before saving the new thread."""
-    thread = stream.thread
-    if reviewing and not wrapup:
-        stream.review_entry = {"account": account["name"], "thread": thread,
-                               "started": attempt_started, "finished": None, "result": None,
-                               "round": len(st.get("rounds", [])),
-                               "angle": st.get("review_angle") or "correctness"}
-        st.setdefault("reviews", []).append(stream.review_entry)
-    elif not reviewing:
-        st["thread"] = thread
-    if not reviewing and not any(t["account"] == account["name"] and t["thread"] == thread for t in st["threads"]):
-        st["threads"].append({"account": account["name"], "thread": thread, "started": clock.CLOCK.time()})
-    if (st["rotations"] and not st["rotations"][-1].get("event")
-            and not st["rotations"][-1]["thread"]):
-        st["rotations"][-1]["thread"] = thread
-    task_state.save(st)
-
-
-def monitor_event(st, account, event, stream, control, reviewing, wrapup, attempt_started):
-    """Apply one decoded event in wire order; return an immediate stop, if any."""
-    if event.get("type") == "thread.started":
-        stream.thread = event["thread_id"]
-        monitor_thread_started(st, account, stream, reviewing, wrapup, attempt_started)
-    if (event.get("type") == "item.completed"
-            and (event.get("item") or {}).get("type") == "agent_message"):
-        stream.final_message = event["item"].get("text", "")
-    stream.refusal = refusal_message(event)
-    if stream.refusal is not None:
-        st["refusal"] = stream.refusal
-        return "refused", None
-    if control.repeated(event):
-        return "stuck", None
-    if limit_error(event):
-        stream.reason = "usage limit"
-    if auth_error(event):
-        stream.authentication_failed = True
-    if not stream.reason and not stream.authentication_failed and capacity_error(event):
-        stream.capacity_failed = True
-    # `error` events also carry retries ("Reconnecting... 2/5") of turns that complete.
-    if event.get("type") == "turn.failed":
-        stream.failed = True
-    if event.get("type") == "turn.completed":
-        stream.completed = True
-    return None
-
-
-def read_monitor_events(st, account, ready, sel, log, stream, usage, control,
-                        reviewing, wrapup, attempt_started):
-    """Append ready bytes verbatim, then decode complete lines without reordering."""
-    for key, _ in ready:
-        size = min(65536, usage.pending_weekly_bytes) if usage.pending_weekly_spent is not None else 65536
-        chunk = os.read(key.fileobj.fileno(), size)
-        if usage.pending_weekly_spent is not None:
-            usage.pending_weekly_bytes -= len(chunk)
-        if not chunk:
-            sel.unregister(key.fileobj)
-            stream.eof = True
-        else:
-            log.write(chunk)
-            stream.buffer += chunk
-            while b"\n" in stream.buffer:
-                line, stream.buffer = stream.buffer.split(b"\n", 1)
-                try:
-                    event = json.loads(line)
-                except ValueError:
-                    continue
-                result = monitor_event(st, account, event, stream, control, reviewing, wrapup, attempt_started)
-                if result is not None:
-                    return result
-    return None
-
-
-def resolve_monitor_quota(st, request, stopped, control, active_started, on_limit):
-    """Run quota effects while exec is alive, preserving stop/deadline priority."""
-    if request.action == "failed":
-        return "failed", None
-    # Quota RPCs and reset-journal locks run while exec is still alive.
-    def cancelled():
-        return stopped() or control.expired(active_started)
-
-    try:
-        decision = on_limit(request.info, request.reason, request.allow_credits, cancelled)
-    except RuntimeError:
-        if not cancelled():
-            raise
-        decision = None
-    if stopped():
-        return task_state.stop_outcome(st, stopped), None
-    if control.expired(active_started):
-        return "budget_exhausted", None
-    return ("limit", decision) if decision is not None or not request.allow_credits else None
-
-
-def poll_monitor_rollout(st, cfg, account, proc, stream, usage, control, record_limits):
-    """Read a changed rollout sample; return its quota action or queue a weekly stop."""
-    now = time.monotonic()
-    if usage.path is None and now >= usage.next_search:
-        usage.path = threads.rollout_path(account["home"], stream.thread)
-        usage.next_search = now + config.ROLLOUT_SEARCH_SECONDS
-    if usage.path is None or now < usage.next_poll:
-        return MonitorQuotaDecision("continue")
-    usage.next_poll = now + config.RATE_POLL_SECONDS
-    size = usage.path.stat().st_size
-    if size == usage.previous_size:
-        return MonitorQuotaDecision("continue")
-    limits = threads.rollout_limits(usage.path, record_limits, usage.usage_offset)
-    usage.previous_size = size
-    if limits is None:
-        return MonitorQuotaDecision("continue")
-    # A completed model turn needs no wrap-up while the CLI exits.
-    # The supervisor checks its final usage after monitor returns.
-    if control.weekly is not None and not stream.completed:
-        spent = st.get("weekly_used_percent", 0)
-        if spent >= control.weekly:
-            usage.pending_weekly_spent = spent
-            queued = fcntl.ioctl(proc.stdout.fileno(), termios.FIONREAD, bytes(4))
-            usage.pending_weekly_bytes = int.from_bytes(queued, sys.byteorder)
-            return MonitorQuotaDecision("continue")
-    usage.current_info = dict(account, logged_in=True, limits=limits)
-    return monitor_quota_decision(usage.current_info, cfg)
-
-
-def monitor_event_stream(st, cfg, account, proc, log, stream, usage, control, stopped,
-                         on_limit, record_limits, reviewing, wrapup, attempt_started, active_started):
-    """Supervise exec/stdout and return the original (outcome, quota payload) pair."""
-    with selectors.DefaultSelector() as sel:
-        sel.register(proc.stdout, selectors.EVENT_READ)
-        while not stream.eof or proc.poll() is None:
-            if stopped():
-                procs.terminate(proc)
-                return task_state.stop_outcome(st, stopped), None
-            if control.expired(active_started):
-                return "budget_exhausted", None
-            ready = ([] if usage.pending_weekly_spent is not None and usage.pending_weekly_bytes == 0
-                     else sel.select(0 if usage.pending_weekly_spent is not None else 0.2))
-            result = read_monitor_events(st, account, ready, sel, log, stream, usage, control,
-                                         reviewing, wrapup, attempt_started)
-            if result is not None:
-                return result
-            if wrapup:
-                # A wrap-up gets one bounded attempt, without quota waits or retries.
-                if stream.authentication_failed or stream.reason or stream.capacity_failed:
-                    return "failed", None
-                continue
-            if usage.pending_weekly_spent is not None:
-                # Rollout and stdout are separate streams. A completion
-                # sent before the quota sample can still be queued here.
-                # Drain that queued prefix (including partial JSON),
-                # without waiting for or following subsequent output.
-                if not stream.completed:
-                    if ready and usage.pending_weekly_bytes > 0 and not stream.eof:
-                        continue
-                    if control.weekly_exhausted(usage.pending_weekly_spent):
-                        return "budget_exhausted", None
-                usage.pending_weekly_spent = None
-            if stream.authentication_failed:
-                return ("auth" if cfg["enabled"] else "failed"), None
-            if stream.reason:
-                request = monitor_quota_decision(usage.current_info, cfg, stream.reason)
-                return resolve_monitor_quota(st, request, stopped, control, active_started, on_limit)
-            if stream.capacity_failed:
-                return "capacity", None
-            if (cfg["enabled"] or control.weekly is not None) and stream.thread and proc.poll() is None:
-                request = poll_monitor_rollout(st, cfg, account, proc, stream, usage, control, record_limits)
-                if request.action != "continue":
-                    result = resolve_monitor_quota(st, request, stopped, control, active_started, on_limit)
-                    if result is not None:
-                        return result
-        stream.exit_code = proc.wait()
-    return ("completed" if stream.exit_code == 0 and not stream.failed else "failed"), None
-
-
-def finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
-                   record_limits, telemetry, usage_before, weekly_started):
-    """Close stdout, finalize results, account final rollout/telemetry, then save."""
-    proc.stdout.close()
-    st.pop("codex_pid", None)
-    message = last.read_text(encoding="utf-8").strip() if last.exists() else stream.final_message
-    if wrapup:
-        st["wrapup"]["result"] = None if stream.refusal else result_schema.parse_result(message, reviewing=reviewing)
-        if stream.refusal:
-            st["wrapup"]["refusal"] = stream.refusal
-    elif stream.review_entry is not None:
-        stream.review_entry["finished"] = clock.CLOCK.time()
-        stream.review_entry["result"] = None if stream.refusal else result_schema.parse_result(message, reviewing=True)
-        if stream.refusal:
-            stream.review_entry.update(outcome="refused", refusal=stream.refusal)
-    elif not reviewing and st.get("kind") != "scout":
-        st["result"] = None if stream.refusal else result_schema.parse_result(message)
-    try:
-        final_path = usage.path or threads.rollout_path(account["home"], stream.thread)
-        if final_path is not None:
-            threads.rollout_limits(final_path, record_limits, usage.usage_offset)
-        if telemetry is not None:
-            telemetry.add_usage(account["name"], stream.thread, usage_before,
-                                final_path, usage.usage_offset,
-                                st.get("weekly_used_percent", 0) - weekly_started)
-    except Exception as exc:
-        telemetry_error(st, exc)
-    task_state.save(st)
-
-
-def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
-            control=None, wrapup=False, wrapup_thread=None, quota_snapshot=None, resume_thread=None):
-    """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
-    d = config.TASKS / st["slug"]
-    accounts.prepare_home(account)
-    reviewing = st.get("kind") == "review"
-    control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
-                                     else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
-                                     cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
-    thread = (wrapup_thread if wrapup else resume_thread if resume_thread is not None
-              else "" if reviewing else st.get("thread", ""))
-    stream = MonitorEvents(thread)
-    last = d / ("review.md" if reviewing else "last.md")
-    args, prompt = monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last)
-    path = threads.rollout_path(account["home"], thread) if thread else None
-    previous_size = path.stat().st_size if path else 0
-    telemetry = telemetry_phase(st)
-    usage_before = threads.rollout_usage(path)[1] if telemetry is not None else None
-    weekly_started = st.get("weekly_used_percent", 0)
-    weekly_seeded = budgets.weekly_used(quota_snapshot or {}) is not None
-    if weekly_seeded:
-        st.update(budgets.monitor_weekly_usage(st, account["name"], quota_snapshot, False).updates)
-
-    def record_limits(limits):
-        nonlocal weekly_seeded
-        sample = budgets.monitor_weekly_usage(st, account["name"], limits, weekly_seeded)
-        st.update(sample.updates)
-        weekly_seeded = sample.seeded
-        return sample.delta
-
-    next_search = time.monotonic() + config.ROLLOUT_SEARCH_SECONDS if thread else 0.0
-    usage = MonitorRollout(path, previous_size, previous_size, next_search)
-    st["exec_event_start"] = len(threads.events(st))
-    task_state.save(st)
-    with (d / "events.jsonl").open("ab", buffering=0) as log, (d / "stderr.log").open("a") as errors:
-        if stopped():
-            return task_state.stop_outcome(st, stopped), None
-        error_start = errors.tell()
-        attempt_started = clock.CLOCK.time()
-        active_started = clock.CLOCK.monotonic()
-        proc = None
-        try:
-            with monitor_process(st, account, args, errors) as proc:
-                st["codex_pid"] = proc.pid
-                task_state.save(st)
-                result = monitor_event_stream(st, cfg, account, proc, log, stream, usage, control, stopped,
-                                              on_limit, record_limits, reviewing, wrapup, attempt_started, active_started)
-        finally:
-            if proc is not None:
-                control.elapsed = budgets.monitor_time_usage(control.elapsed, control.seconds, control.minutes,
-                                                     active_started, clock.CLOCK.monotonic()).elapsed
-                finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
-                               record_limits, telemetry, usage_before, weekly_started)
-    if reviewing and not review_fallback and not stream.thread and stream.exit_code == 2:
-        with (d / "stderr.log").open("rb") as errors:
-            errors.seek(error_start)
-            error = errors.read().decode("utf-8", errors="replace")
-        if all(part in error for part in ("cannot be used with", "--base", "PROMPT")):
-            return monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=True,
-                           control=control, quota_snapshot=quota_snapshot)
-    return result
-
-
 def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
-    with record_phase(st, "wrapup", stopped) as phase:
+    with telemetry_log.record_phase(st, "wrapup", stopped) as phase:
         _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry)
         phase.finish(outcome=task_state.stop_outcome(st, stopped) or st["wrapup"]["outcome"])
 
@@ -1315,7 +106,7 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     st["review_skipped"] = reason["outcome"]
     st["wrapup"] = {"outcome": "not_run", "result": None}
     task_state.save(st)
-    notifications.notify(st, cfg, reason["outcome"], turn_stop_message(reason), account=account["name"], **reason)
+    notifications.notify(st, cfg, reason["outcome"], turn_monitor.turn_stop_message(reason), account=account["name"], **reason)
     thread = ((review_entry or {}).get("thread") if st.get("kind") == "review"
               else st.get("thread"))
     if not thread or stopped():
@@ -1323,8 +114,8 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     if st.get("kind") not in ("review", "scout"):
         st["result"] = None
     try:
-        result, _ = monitor(st, cfg, account, wrapup_prompt(st, reason, cfg), effort, stopped,
-                            lambda *args: None, control=TurnControl(10, cfg.get("repeat_limit", 3)),
+        result, _ = turn_monitor.monitor(st, cfg, account, prompts.wrapup_prompt(st, reason, cfg), effort, stopped,
+                            lambda *args: None, control=turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3)),
                             wrapup=True, wrapup_thread=thread)
         st["wrapup"]["outcome"] = result
     except (Exception, SystemExit) as exc:
@@ -1347,7 +138,7 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
 def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     kind = st.get("kind", "work")
     phase = "fix" if kind == "work" and st.get("rounds") else kind
-    with record_phase(st, phase, stopped):
+    with telemetry_log.record_phase(st, phase, stopped):
         return _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn)
 
 
@@ -1357,7 +148,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     reviewing = st.get("kind") == "review"
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
-    control = TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
+    control = turn_monitor.TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
     visited = set()
     rotations = 0
     rotation = None
@@ -1369,7 +160,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     account = accounts.account_named(cfg, st["account"])
     quota_snapshot = None
     if cfg["enabled"]:
-        infos = task_snapshots(st, cfg, stopped, new_turn=new_turn)
+        infos = account_rotation.task_snapshots(st, cfg, stopped, new_turn=new_turn)
         budgets.warn_weekly_headroom(st, cfg, infos)
         current = next((i for i in infos if i["name"] == st["account"]), {})
         same_account = {i["name"] for i in infos if current.get("account_id")
@@ -1382,13 +173,13 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         if stopped():
             return
         if not chosen:
-            chosen = wait_for_account(st, infos, cfg, "all accounts unavailable", stopped, sleep)
+            chosen = account_rotation.wait_for_account(st, infos, cfg, "all accounts unavailable", stopped, sleep)
             if not chosen:
                 return
         if resuming and chosen["name"] != st["account"]:
             prompt = threads.handoff(st, current_message=current_message, cfg=cfg)
             st["rotations"].append({"at": clock.CLOCK.time(), "from": st["account"], "to": chosen["name"],
-                                    "reason": limit_reason(current, cfg), "thread": ""})
+                                    "reason": account_rotation.limit_reason(current, cfg), "thread": ""})
             rotation = st["rotations"][-1]
             rotations += 1
             visited.add(st["account"])
@@ -1405,7 +196,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
     def on_limit(local, reason, allow_credits, cancelled):
-        infos = task_snapshots(st, cfg, cancelled)
+        infos = account_rotation.task_snapshots(st, cfg, cancelled)
         current = next((i for i in infos if i["name"] == account["name"]), {})
         if local and accounts.exhausted(local, cfg):
             # The RPC may lag the local rollout; keep its fresh credit balance.
@@ -1423,12 +214,12 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         st.pop("reset_reconciled", None)
         visited.add(account["name"])
         review_start = len(st.get("reviews", []))
-        attempt_prompt = capacity_resume_prompt(cfg) if resume_thread else prompt
-        result, decision = monitor(st, cfg, account, attempt_prompt, effort, stopped, on_limit, control=control,
+        attempt_prompt = prompts.capacity_resume_prompt(cfg) if resume_thread else prompt
+        result, decision = turn_monitor.monitor(st, cfg, account, attempt_prompt, effort, stopped, on_limit, control=control,
                                    quota_snapshot=quota_snapshot, resume_thread=resume_thread)
         quota_snapshot = None
         resume_thread = None
-        phase = telemetry_phase(st)
+        phase = telemetry_log.telemetry_phase(st)
         weekly_exhausted = (result in ("auth", "limit", "capacity", "failed", "completed")
                             and control.weekly_exhausted(st.get("weekly_used_percent", 0)))
         if weekly_exhausted and result != "completed":
@@ -1446,14 +237,14 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             st["outcome"] = result
             if phase is not None:
                 phase.finish(outcome=result)
-            publish_work(st, stopped)
-            publish_pr(st, stopped)
+            publishing.publish_work(st, stopped)
+            publishing.publish_pr(st, stopped)
             budgets.stop_at_weekly_budget(st)
             break
         if result in ("budget_exhausted", "stuck"):
             reason = dict(control.reason, active_seconds=round(control.elapsed, 3))
             reviews = st.get("reviews", [])[review_start:]
-            phase = telemetry_phase(st)
+            phase = telemetry_log.telemetry_phase(st)
             if phase is not None:
                 phase.finish(outcome=result)
             wrapup_turn(st, cfg, account, effort, stopped, reason,
@@ -1491,7 +282,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         if result == "auth":
             failures = st.setdefault("auth_failures", {})
             failures[account["name"]] = failures.get(account["name"], 0) + 1
-            infos = task_snapshots(st, cfg, stopped)
+            infos = account_rotation.task_snapshots(st, cfg, stopped)
             if stopped():
                 break
             current = next((i for i in infos if i["name"] == account["name"]), {})
@@ -1499,12 +290,12 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             if not capped and failures[account["name"]] == 1 and current.get("logged_in") and not accounts.exhausted(current, cfg):
                 quota_snapshot = current.get("limits")
                 if not reviewing and st.get("thread"):
-                    prompt = auth_resume_prompt(cfg)
+                    prompt = prompts.auth_resume_prompt(cfg)
                 task_state.save(st)
                 continue
             if failures[account["name"]] >= 2 or current.get("logged_in") is False:
-                exclude_auth_account(st, account, current)
-                infos = refresh_login_state(st, infos)
+                account_rotation.exclude_auth_account(st, account, current)
+                infos = account_rotation.refresh_login_state(st, infos)
             if not infos or capped:
                 names = st.get("needs_login", []) or [a["name"] for a in cfg["accounts"]]
                 st.update(outcome="failed", error="all accounts fail with auth errors; " +
@@ -1515,7 +306,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                         "chosen": accounts.available(infos, cfg, {account["name"]})}
         chosen = decision["chosen"]
         if not chosen:
-            chosen = wait_for_account(st, decision["infos"], cfg, decision["reason"], stopped, sleep)
+            chosen = account_rotation.wait_for_account(st, decision["infos"], cfg, decision["reason"], stopped, sleep)
             if not chosen:
                 break
             # Fresh quota snapshots start a new rotation cycle, including past accounts.
@@ -1524,7 +315,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         quota_snapshot = chosen.get("limits")
         if chosen["name"] == account["name"]:
             if not reviewing and st.get("thread"):
-                prompt = reset_resume_prompt(cfg)
+                prompt = prompts.reset_resume_prompt(cfg)
             task_state.save(st)
             continue
         if not reviewing:
@@ -1543,144 +334,6 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         task_state.save(st)
         notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
-
-
-def execute_check(st, stopped, cwd, filename):
-    """Run the saved check after work, owning and reaping its process group."""
-    if stopped():
-        return None
-    started = time.monotonic()
-    measured_started = clock.CLOCK.monotonic()
-    proc = None
-    outcome = "failed"
-    code = None
-    with (config.TASKS / st["slug"] / filename).open("wb") as log:
-        try:
-            args = ["/bin/sh", "-c", st["check"]]
-            env = None
-            if st.get("sandbox") == "workspace":
-                args = [config.codex_binary(), "sandbox"] + sandboxing.sandbox_args(st) + ["--"] + args
-                env = accounts.account_env({"home": str(config.CODEX_HOME)})
-            proc = subprocess.Popen(args, cwd=cwd, env=env,
-                                    stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
-            st["check_pid"] = proc.pid
-            task_state.save(st)
-            deadline = started + st.get("check_timeout", 1800)
-            while proc.poll() is None:
-                if stopped():
-                    outcome = task_state.stop_outcome(st, stopped)
-                    break
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    outcome = "timeout"
-                    break
-                time.sleep(min(0.1, remaining))
-            else:
-                outcome = "passed" if proc.returncode == 0 else "failed"
-        except OSError as exc:
-            log.write(f"check launch failed: {exc}\n".encode("utf-8", errors="replace"))
-        finally:
-            if proc is not None:
-                procs.signal_group(proc, signal.SIGKILL)
-                code = proc.wait()
-            st.pop("check_pid", None)
-    if stopped():
-        outcome = task_state.stop_outcome(st, stopped)
-        st["outcome"] = outcome
-    result = {"cmd": st["check"], "exit": code, "seconds": round(clock.CLOCK.monotonic() - measured_started, 3),
-              "at": clock.CLOCK.time(), "outcome": outcome}
-    if outcome in ("failed", "timeout"):
-        result["tail"] = check_tail(st, filename)
-    return result
-
-
-def run_check(st, stopped):
-    if stopped():
-        return None
-    with record_phase(st, "check", stopped) as phase:
-        result = _run_check(st, stopped)
-        phase.check = result
-        phase.finish(outcome=task_state.stop_outcome(st, stopped) or (result or {}).get("outcome"))
-        return result
-
-
-def _run_check(st, stopped):
-    result = execute_check(st, stopped, st["worktree"], "check.log")
-    if result is None:
-        return None
-    st.setdefault("checks", []).append(result)
-    task_state.save(st)
-    return result
-
-
-def run_base_check(st, stopped):
-    with record_phase(st, "base_check", stopped) as phase:
-        result = _run_base_check(st, stopped)
-        phase.check = result
-        phase.finish(outcome=task_state.stop_outcome(st, stopped) or (result or {}).get("outcome"))
-        return result
-
-
-def _run_base_check(st, stopped):
-    """Check task HEAD with the base's guarded files, leaving the task untouched."""
-    driver = sandboxing.workspace_filter_driver(st)
-    if driver is not None:
-        return {"outcome": "skipped", "reason": f"filter driver {driver} is configured; commit this turn manually"}
-    if st["worktree"] in st["check"]:
-        return {"outcome": "skipped", "reason": "check command uses the task worktree's absolute path"}
-    started = clock.CLOCK.monotonic()
-    log = config.TASKS / st["slug"] / "base-check.log"
-    log.write_text("", encoding="utf-8")
-    result = None
-    paths = check_paths(st)
-    try:
-        with tempfile.TemporaryDirectory(prefix="base-check-", dir=str(config.TASKS / st["slug"])) as directory:
-            worktree = Path(directory) / "worktree"
-            try:
-                subprocess.run(config.GIT + ["worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
-                               cwd=st["worktree"], check=True, capture_output=True)
-                guarded = set()
-                for revision in (st["base"], "HEAD"):
-                    files = procs.sh(config.GIT + ["ls-tree", "-r", "--name-only", "-z", revision],
-                               cwd=worktree)
-                    guarded.update(path for path in files.split("\0") if path and guarded_path(path, st, paths))
-                if guarded:
-                    subprocess.run(config.GIT + ["--literal-pathspecs", "restore", "--source=" + st["base"],
-                                    "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
-                                   input="\0".join(sorted(guarded)) + "\0", text=True,
-                                   cwd=worktree, check=True, capture_output=True)
-                execution = execute_check(st, stopped, worktree, "base-check.log")
-                if execution is not None:
-                    result = {key: execution[key] for key in ("outcome", "exit", "seconds")}
-            finally:
-                if (worktree / ".git").exists():
-                    subprocess.run(config.GIT + ["worktree", "remove", "--force", str(worktree)],
-                                   cwd=st["worktree"], check=True, capture_output=True)
-    except (OSError, subprocess.CalledProcessError, SystemExit) as exc:
-        detail = exc.stderr if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-        if isinstance(detail, bytes):
-            detail = detail.decode("utf-8", errors="replace")
-        with log.open("a", encoding="utf-8") as output:
-            output.write("\nbase check setup/cleanup failed: " + (detail or str(exc)) + "\n")
-        result = None
-    if result is None:
-        result = {"outcome": "failed", "exit": None, "seconds": round(clock.CLOCK.monotonic() - started, 3)}
-    result["tail"] = check_tail(st, "base-check.log")
-    return result
-
-
-def saved_check(st, cfg, stopped, review_after=True):
-    check = run_check(st, stopped) if st.get("check") and not stopped() else None
-    if check and check["outcome"] == "passed" and st.get("base_check") and not stopped():
-        check["base_check"] = run_base_check(st, stopped)
-        task_state.save(st)
-    if check and check["outcome"] in ("failed", "timeout"):
-        if review_after and not st.get("review_skipped"):
-            st["review_skipped"] = "check " + check["outcome"]
-        task_state.save(st)
-        notifications.notify(st, cfg, "check_failed", f"check {check['outcome']} on {st['account']}",
-               outcome=check["outcome"])
-    return check
 
 
 def selected_review_angles(st, cfg):
@@ -1724,7 +377,7 @@ def selected_review_angles(st, cfg):
                 tail = chunk[-1:]
         if not binary:
             lines += count + int(bool(tail) and tail != b"\n")
-    return list(AUTO_REVIEW_ANGLES) if lines >= cfg["review_angles_min_lines"] else []
+    return list(prompts.AUTO_REVIEW_ANGLES) if lines >= cfg["review_angles_min_lines"] else []
 
 
 def merge_reviews(angles):
@@ -1769,7 +422,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             start = len(st.get("reviews", []))
             started = clock.CLOCK.time()
             st.update(review_angle=angle, outcome="running")
-            focused = prompt + f"\n\nReview angle: {angle}. {REVIEW_ANGLES[angle]}" if angle else prompt
+            focused = prompt + f"\n\nReview angle: {angle}. {prompts.REVIEW_ANGLES[angle]}" if angle else prompt
             run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
             reviews = st.get("reviews", [])[start:]
             outcome = task_state.stop_outcome(st, stopped) or st["outcome"]
@@ -1810,150 +463,14 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
     return result
 
 
-def completed_work_turn(st):
-    return (st.get("kind") == "work" and
-            (st.get("outcome") == "completed" or
-             (st.get("outcome") in ("budget_exhausted", "stuck") and
-              st.get("wrapup", {}).get("outcome") == "completed")))
-
-
-def publish_work(st, stopped):
-    """Publish a completed workspace turn outside the worker's write boundary."""
-    if st.get("sandbox") != "workspace" or not completed_work_turn(st) or stopped():
-        return
-    receipt = {"at": clock.CLOCK.time(), "sha": "", "pushed": False, "pr": "", "action": "skipped", "error": ""}
-
-    def run(args):
-        return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
-                              text=True, errors="replace").stdout.strip()
-
-    stage = "commit"
-    try:
-        driver = sandboxing.unsafe_filter_driver(st["worktree"])
-        if driver is not None:
-            raise RuntimeError(f"filter driver {driver} is configured; the supervisor does not run filters "
-                               "on worker-written files — commit this turn manually")
-        if not run(config.GIT + ["status", "--porcelain"]):
-            return
-        message = ((st.get("result") or {}).get("commit_message") or "").strip()
-        message = message or f"{st['slug']}: turn {st['turns']}"
-        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="commit-",
-                                         dir=str(config.TASKS / st["slug"])) as file:
-            file.write(message + "\n")
-            file.flush()
-            if stopped():
-                return
-            run(config.GIT + ["add", "-A"])
-            if stopped():
-                return
-            run(config.GIT + ["commit", "-F", file.name])
-        receipt["sha"] = run(config.GIT + ["rev-parse", "HEAD"])
-        stage = "push"
-        run(config.GIT + ["push", "-u", "origin", st["branch"]])
-        receipt["pushed"] = True
-    except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
-        detail = (exc.stderr or exc.stdout or str(exc)) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
-        receipt["error"] = stage + ": " + detail.strip()
-    st["publish"] = receipt
-    task_state.save(st)
-
-
-def publish_pr(st, stopped):
-    """The supervisor is the only PR writer, in every work mode."""
-    if not completed_work_turn(st) or stopped():
-        return
-    receipt = st.setdefault("publish", {"at": clock.CLOCK.time(), "sha": "", "pushed": False,
-                                        "pr": "", "action": "skipped", "error": ""})
-    receipt.update(at=clock.CLOCK.time(), action="skipped", pr="")
-
-    def run(args):
-        return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
-                              text=True, errors="replace").stdout.strip()
-
-    def detail(exc):
-        return ((exc.stderr or exc.stdout or str(exc))
-                if isinstance(exc, subprocess.CalledProcessError) else str(exc)).strip()
-
-    def skip(reason):
-        receipt["error"] = receipt["error"] + "; " + reason if receipt["error"] else reason
-
-    stage = "not pushed"
-    try:
-        # Remote-tracking refs can be stale: verify the actual origin branch.
-        try:
-            head = run(config.GIT + ["rev-parse", "HEAD"])
-            remote = run(config.GIT + ["ls-remote", "--heads", "origin", "refs/heads/" + st["branch"]])
-            receipt["pushed"] = bool(remote and remote.split()[0] == head)
-        except (OSError, subprocess.CalledProcessError) as exc:
-            receipt["pushed"] = False
-            skip("not pushed: " + detail(exc))
-            return
-        if not receipt["pushed"]:
-            skip("not pushed")
-            return
-        gh = shutil.which("gh")
-        if not gh:
-            skip("gh unavailable")
-            return
-        stage = "origin remote"
-        remote_url = run(config.GIT + ["remote", "get-url", "origin"])
-        stage = "gh repo view"
-        repository = json.loads(run([gh, "repo", "view", remote_url, "--json", "nameWithOwner"]))["nameWithOwner"]
-        stage = "gh pr list"
-        prs = json.loads(run([gh, "pr", "list", "--head", st["branch"], "--state", "all",
-                             "--json", "url,state,headRepository,headRepositoryOwner", "--repo", remote_url]))
-        # --head also matches fork branches with the same name.
-        # gh can leave headRepository.nameWithOwner empty; the owner is separate.
-        prs = [item for item in prs if
-               ((item.get("headRepositoryOwner") or {}).get("login", "") + "/" +
-                (item.get("headRepository") or {}).get("name", "")).casefold() == repository.casefold()]
-        # Prefer the current open PR if this branch name has been reused.
-        pr = next((item for item in prs if item["state"] == "OPEN"), prs[0] if prs else None)
-        result = st.get("result") or {}
-        body = result.get("pr_body", "")
-        if pr:
-            receipt["pr"] = pr["url"]
-            if pr["state"] in ("CLOSED", "MERGED"):
-                skip("pr " + pr["state"].lower())
-                return
-            if not body:
-                receipt["action"] = "unchanged"
-                return
-        title = result.get("pr_title") or run(config.GIT + ["log", "-1", "--format=%s"])
-        if not pr:
-            body = body or result.get("summary", "")
-        with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="pr-",
-                                         dir=str(config.TASKS / st["slug"])) as file:
-            file.write(body)
-            file.flush()
-            if stopped():
-                skip("stopped")
-                return
-            if pr:
-                stage = "gh pr edit"
-                run([gh, "pr", "edit", receipt["pr"], "--title", title, "--body-file", file.name,
-                     "--repo", remote_url])
-                receipt["action"] = "updated"
-            else:
-                stage = "gh pr create"
-                receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].removeprefix("origin/"),
-                                     "--head", st["branch"], "--title", title, "--body-file", file.name,
-                                     "--repo", remote_url])
-                receipt["action"] = "created"
-    except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError) as exc:
-        skip(stage + ": " + detail(exc))
-    finally:
-        task_state.save(st)
-
-
 def work_turn(st, cfg, prompt, effort, current_message, stopped, sleep, work_paths=None, **turn_options):
     if work_paths is None and st.get("kind") != "scout":
-        work_paths = check_paths(st)
+        work_paths = checking.check_paths(st)
     run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, **turn_options)
-    publish_work(st, stopped)
-    publish_pr(st, stopped)
+    publishing.publish_work(st, stopped)
+    publishing.publish_pr(st, stopped)
     if work_paths is not None:
-        st["check_paths"] = sorted(set(work_paths) | set(check_paths(st)))
+        st["check_paths"] = sorted(set(work_paths) | set(checking.check_paths(st)))
 
 
 def fix_round_changes(st, before, after):
@@ -1961,11 +478,11 @@ def fix_round_changes(st, before, after):
     commits = procs.sh(config.GIT + ["rev-list", f"{before}..{after}"], cwd=st["worktree"]).splitlines()
     stats = procs.sh(config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                       "--numstat", "-z", before, after, "--"], cwd=st["worktree"], errors="replace")
-    paths = check_paths(st)
+    paths = checking.check_paths(st)
     code = {"added": 0, "removed": 0}
     for item in filter(None, stats.split("\0")):
         added, removed, path = item.split("\t", 2)
-        if not guarded_path(path, st, paths):
+        if not checking.guarded_path(path, st, paths):
             code["added"] += int(added) if added != "-" else 0
             code["removed"] += int(removed) if removed != "-" else 0
     return {"commits": commits, "code": code}
@@ -2026,7 +543,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         if len(st["rounds"]) >= st["fix_rounds"]:
             st["auto_fix_stop"] = "check " + failed_check["outcome"] if failed_check else "rounds_exhausted"
             return
-        message = fix_prompt(st, review, failed_check, cfg)
+        message = prompts.fix_prompt(st, review, failed_check, cfg)
         entry = {"review": None if failed_check else review, "decisions": [], "check": None}
         st["rounds"].append(entry)
         st.update(kind="work", result=None, outcome="running", reset_wait_seconds=0)
@@ -2034,7 +551,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         st.pop("publish", None)
         prompt = threads.followup_prompt(st, message, cfg, source="review")
         task_state.save(st)
-        work_paths = check_paths(st)
+        work_paths = checking.check_paths(st)
         before = procs.sh(config.GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         work_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False, work_paths=work_paths)
         after = procs.sh(config.GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
@@ -2043,7 +560,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         entry["decisions"] = result["findings"] if result is not None else []
         task_state.save(st)
         if not stopped() and st.get("outcome") in ("budget_exhausted", "stuck"):
-            entry["check"] = saved_check(st, cfg, stopped, review_after=False)
+            entry["check"] = checking.saved_check(st, cfg, stopped, review_after=False)
             if budgets.budget_stop(st) == "weekly":
                 st["auto_fix_stop"] = "budget"
             task_state.save(st)
@@ -2054,7 +571,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
             st["auto_fix_stop"] = "result " + (result["status"] if result else "unknown")
             st["review_skipped"] = st["auto_fix_stop"]
             return
-        check = saved_check(st, cfg, stopped)
+        check = checking.saved_check(st, cfg, stopped)
         entry["check"] = check
         task_state.save(st)
         if stopped():
@@ -2071,7 +588,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
             next_angles = ["correctness"]
             next_angles += [entry["angle"] for entry in review["angles"]
                             if entry["angle"] != "correctness" and (entry.get("result") or {}).get("findings")]
-        review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, sleep, angles=next_angles)
+        review = review_turn(st, cfg, prompts.review_prompt(st, cfg), effort, stopped, sleep, angles=next_angles)
         if st.get("outcome") == "refused":
             st["auto_fix_stop"] = "review refused"
             return
@@ -2381,7 +898,7 @@ def ci_cycle(st, cfg, effort, stopped, sleep):
         task_state.save(st)
         work_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False)
         if not stopped() and st.get("outcome") in ("completed", "budget_exhausted", "stuck"):
-            saved_check(st, cfg, stopped, review_after=False)
+            checking.saved_check(st, cfg, stopped, review_after=False)
         result = st.get("result") or {}
         if stopped() or st.get("outcome") != "completed" or result.get("status") != "done":
             ci["reason"] = ("stopped" if stopped() else result.get("status") or st.get("outcome", "unknown"))
@@ -2456,12 +973,12 @@ def cmd__run(a):
         if (st.get("kind") not in ("review", "scout")
                 and st.get("outcome") in ("completed", "budget_exhausted", "stuck")
                 and st.get("check") and not stopped()):
-            check = saved_check(st, cfg, stopped, pending.get("review_after"))
+            check = checking.saved_check(st, cfg, stopped, pending.get("review_after"))
         if (st.get("kind") != "scout" and st.get("outcome") == "completed" and pending.get("review_after") and not stopped()
                 and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")
                 and not budgets.stop_at_weekly_budget(st)):
             st["work_completed"] = True
-            review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, sleep)
+            review = review_turn(st, cfg, prompts.review_prompt(st, cfg), effort, stopped, sleep)
             if st.get("fix_rounds"):
                 auto_fix(st, cfg, review, effort, stopped, sleep)
         if working:
@@ -2475,7 +992,7 @@ def cmd__run(a):
         mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
         finalized = True
         try:
-            guarded_changed = len(guarded_changes(st)) if cfg is not None else 0
+            guarded_changed = len(checking.guarded_changes(st)) if cfg is not None else 0
             st["outcome"] = task_state.stop_outcome(st, stopped) or st["outcome"]
             if st.get("fix_rounds") and (st["outcome"] != "completed" or not st.get("auto_fix_stop")):
                 st["auto_fix_stop"] = ("budget" if budgets.budget_stop(st) == "weekly" else
@@ -2485,7 +1002,7 @@ def cmd__run(a):
             st.pop("sleeping", None)
             st.pop("pending", None)
             st["turn_finished"] = clock.CLOCK.time()
-            record_turn_result(st, stopped)
+            telemetry_log.record_turn_result(st, stopped)
             if cfg is not None:
                 account = notifications.current_turn_account(st)
                 message = f"turn {st['outcome']} on {account}"
@@ -2584,7 +1101,7 @@ def cmd_scout(a):
         procs.die(f"scout directory does not exist: {directory}")
     d = config.TASKS / a.slug
     d.mkdir(parents=True)
-    prompt = scout_prompt(question, cfg)
+    prompt = prompts.scout_prompt(question, cfg)
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "kind": "scout", "repo": str(directory), "worktree": str(directory), "branch": "",
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
@@ -2647,7 +1164,7 @@ def cmd_review(a):
     cfg = config.accounts_config()
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     st["review_angles"] = a.review_angles
-    spawn(st, review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
+    spawn(st, prompts.review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
     print(f"reviewing {a.slug}, pid {st['pid']}")
 
 
@@ -2707,7 +1224,7 @@ def wait_turn_lines(st, slug):
     if st.get("capacity_retries", 0):
         yield "== retried: model at capacity"
     if st.get("turn_stop"):
-        yield "== turn stopped: " + turn_stop_message(st["turn_stop"])
+        yield "== turn stopped: " + turn_monitor.turn_stop_message(st["turn_stop"])
     if st.get("outcome") == "interrupted":
         yield "== " + task_state.interruption_message(st)
     if st.get("outcome") == "refused" and st.get("kind") != "review":
@@ -2724,7 +1241,7 @@ def wait_turn_lines(st, slug):
             yield raw if st.get("kind") == "scout" else "\n".join(result_schema.result_lines(st.get("result"), raw))
             if publication and publication["pr"]:
                 yield "PR: " + publication["pr"]
-    yield from guarded_lines(guarded_changes(st))
+    yield from checking.guarded_lines(checking.guarded_changes(st))
 
 
 def wait_round_lines(st):
@@ -2755,7 +1272,7 @@ def wait_check_lines(st):
                 reason = "timeout, " if item["outcome"] == "timeout" else ""
                 yield f"== {name}: {label} ({reason}exit {item['exit']}, {item['seconds']:.0f} s)"
             if name != "base tests" and item["outcome"] in ("failed", "timeout"):
-                yield item.get("tail", check_tail(st))
+                yield item.get("tail", checking.check_tail(st))
             elif name == "base tests" and item.get("tail"):
                 yield item["tail"]
 
@@ -2816,7 +1333,7 @@ def wait_stop_lines(st):
         reason = st.get("auto_fix_stop", st.get("outcome", "unknown"))
         yield f"== auto-fix: {len(st.get('rounds', []))} rounds, findings {trajectory}; stop: {reason}"
     failed = [e for e in threads.events(st)[st.get("exec_event_start", st.get("event_start", 0)):]
-              if e.get("type") in ("turn.failed", "error") and refusal_message(e) is None]
+              if e.get("type") in ("turn.failed", "error") and account_rotation.refusal_message(e) is None]
     if failed:
         yield "== errors: " + json.dumps(failed[-1], ensure_ascii=False)[:500]
     if st.get("error"):
@@ -3081,7 +1598,7 @@ def review_angles(value):
     if value == "auto":
         return value
     angles = [angle.strip() for angle in value.split(",")]
-    unknown = [angle for angle in angles if angle not in REVIEW_ANGLES]
+    unknown = [angle for angle in angles if angle not in prompts.REVIEW_ANGLES]
     if unknown:
         raise argparse.ArgumentTypeError(f"unknown review angle: {','.join(unknown)!r}; "
                                          "choose correctness,concurrency,security,tests or auto")

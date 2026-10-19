@@ -17,14 +17,14 @@ Layer 3:
 Layer 4:
     task_state (implemented): task state fields, persistence, and locks.
 Layer 5:
-    telemetry_log (planned): journal rows and phase telemetry.
-    publishing (planned): completed turns and work or pull request publishing.
+    telemetry_log (implemented): journal rows and phase telemetry.
+    publishing (implemented): completed turns and work or pull request publishing.
 Layer 6:
-    checking (planned): guarded paths and check or base-check execution.
-    account_rotation (planned): account errors, waits, and login refresh.
+    checking (implemented): guarded paths and check or base-check execution.
+    account_rotation (implemented): account errors, waits, and login refresh.
 Layer 7:
-    prompts (planned): prompt builders and review angles.
-    turn_monitor (planned): turn control and monitoring.
+    prompts (implemented): prompt builders and review angles.
+    turn_monitor (implemented): turn control and monitoring.
 Layer 8:
     turns (planned): work turns, wrap-up turns, and turn execution.
 Layer 9:

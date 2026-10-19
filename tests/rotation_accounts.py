@@ -24,7 +24,7 @@ class AccountAuthTests(RotationTestCase):
                 self.assert_resumed_same_thread(executions[0], executions[1], self.home)
                 for execution in executions:
                     self.assert_output_schema(execution, slug)
-                self.assertEqual(executions[1]["prompt"], worker.auth_resume_prompt(worker.config.accounts_config()))
+                self.assertEqual(executions[1]["prompt"], worker.prompts.auth_resume_prompt(worker.config.accounts_config()))
                 self.assertIn("Recovered after authentication", output)
                 self.assertFalse(self.state(slug).get("needs_login"))
                 self.assertFalse(self.state(slug)["rotations"])
@@ -217,7 +217,7 @@ class AccountAuthTests(RotationTestCase):
             return "auth", None
 
         with mock.patch.object(worker.accounts, "snapshots", side_effect=snapshots), \
-                mock.patch.object(worker, "monitor", side_effect=monitor) as attempts, \
+                mock.patch.object(worker.turn_monitor, "monitor", side_effect=monitor) as attempts, \
                 mock.patch.object(worker.threads, "handoff", return_value="handoff with the original task"), \
                 mock.patch.object(worker.task_state, "save"):
             worker.run_turn(st, cfg, "original prompt", None, False, lambda: False, lambda seconds: None)
@@ -335,7 +335,7 @@ class AccountAuthTests(RotationTestCase):
                         mock.patch.object(worker.time, "sleep", side_effect=sleep), \
                         mock.patch.object(worker.task_state, "save"), \
                         mock.patch.object(worker.accounts, "snapshots", return_value=[ready]) as snapshots:
-                    chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
+                    chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
                 self.assertIs(chosen, ready)
                 self.assertEqual(sum(sleeps), duration)
                 self.assertTrue(all(0 < seconds <= 60 for seconds in sleeps))
@@ -365,7 +365,7 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.time, "sleep", side_effect=mac_sleep) as sleeper, \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", return_value=[other, current]):
-            chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
+            chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
         sleeper.assert_called_once_with(60)
         self.assertIs(chosen, current, "keep the existing thread when both subscriptions become available")
         self.assertEqual(st["rotations"][0]["until"], 1120)
@@ -394,7 +394,7 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.time, "sleep", side_effect=sleep), \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", return_value=[limited]) as snapshots:
-            chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
+            chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
         self.assertIsNone(chosen)
         self.assertEqual(sleeps, [60, 60])
         self.assertEqual(st["reset_wait_seconds"], 8 * 86400)
@@ -453,7 +453,7 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.time, "sleep", side_effect=sleep), \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", side_effect=snapshots):
-            chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
+            chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
         self.assertIsNone(chosen, "do not launch an executor once the wait budget has expired")
         self.assertEqual(st["reset_wait_seconds"], 8 * 86400)
         self.assertEqual(st["outcome"], "exhausted")
@@ -506,9 +506,9 @@ class AccountAuthTests(RotationTestCase):
                             lambda: stopped[0], on_limit)
                     if case == "error":
                         with self.assertRaisesRegex(RuntimeError, "unrelated quota failure"):
-                            worker.monitor(*args, control=worker.TurnControl(1, 3))
+                            worker.turn_monitor.monitor(*args, control=worker.turn_monitor.TurnControl(1, 3))
                     else:
-                        result = worker.monitor(*args, control=worker.TurnControl(1, 3))
+                        result = worker.turn_monitor.monitor(*args, control=worker.turn_monitor.TurnControl(1, 3))
                         outcome = {"stop": "stopped", "interrupt": "interrupted"}.get(case, "budget_exhausted")
                         self.assertEqual(result, (outcome, None))
                 terminate.assert_called_with(proc)
@@ -576,7 +576,7 @@ class AccountAuthTests(RotationTestCase):
                         mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
                         mock.patch.object(worker.threads, "rollout_path", side_effect=find_rollout), \
                         mock.patch.object(worker.threads, "rollout_limits", side_effect=read_limits):
-                    result = worker.monitor(st, {"enabled": True, "switch_at": 99},
+                    result = worker.turn_monitor.monitor(st, {"enabled": True, "switch_at": 99},
                                             {"name": "main", "home": str(self.home)}, "prompt", None,
                                             lambda: False, mock.Mock(side_effect=AssertionError("unexpected limit")))
                 self.assertEqual(result, ("completed", None))

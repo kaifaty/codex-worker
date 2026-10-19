@@ -38,7 +38,7 @@ class TimeBudgetTests(RotationTestCase):
         self.assert_output_schema(executions[1], "time-cap")
         worker = self.worker()
         self.assertEqual(executions[1]["prompt"],
-                         worker.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
+                         worker.prompts.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
         self.assertFalse(self.review_invocations())
         self.assertIn("== turn stopped: time budget 90 min exhausted", output)
         self.assertIn(result["summary"], output)
@@ -113,7 +113,7 @@ class TimeBudgetTests(RotationTestCase):
                     self.assertTrue(executions[1]["resume"])
                     self.assertEqual(executions[1]["thread"], executions[0]["thread"])
                     worker = self.worker()
-                    self.assertEqual(executions[1]["prompt"], worker.wrapup_prompt(
+                    self.assertEqual(executions[1]["prompt"], worker.prompts.wrapup_prompt(
                         state, state["turn_stop"], worker.config.accounts_config()))
                     self.assertIn("== turn stopped: time budget 2 min exhausted", output)
                     self.assertIn(result["summary"], output)
@@ -276,7 +276,7 @@ class TimeBudgetTests(RotationTestCase):
         prompt = executions[1]["prompt"]
         self.assertIn(command, prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
+        self.assertEqual(prompt, worker.prompts.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
         self.assertIn("== turn stopped: repeated failure ×3: " + command, output)
         self.assertIn(result["summary"], output)
         self.assertFalse(self.review_invocations())
@@ -322,7 +322,7 @@ class TimeBudgetTests(RotationTestCase):
         prompt = self.invocations()[-1]["prompt"]
         self.assertIn(command["command"], prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
+        self.assertEqual(prompt, worker.prompts.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
 
     def test_max_minutes_uses_config_default_and_say_override_for_one_turn(self):
         clock = self.enable_fake_clock()
@@ -469,9 +469,9 @@ class TimeBudgetTests(RotationTestCase):
             for reason in reasons:
                 with self.subTest(language=language, reason=reason["outcome"]):
                     cfg = {"language": language}
-                    work = worker.wrapup_prompt({"kind": "work"}, reason, cfg)
-                    review = worker.wrapup_prompt({"kind": "review"}, reason, cfg)
-                    self.assertEqual(worker.wrapup_prompt({}, reason, cfg), work)
+                    work = worker.prompts.wrapup_prompt({"kind": "work"}, reason, cfg)
+                    review = worker.prompts.wrapup_prompt({"kind": "review"}, reason, cfg)
+                    self.assertEqual(worker.prompts.wrapup_prompt({}, reason, cfg), work)
                     self.assertNotEqual(work, review)
                     if reason["outcome"] == "stuck":
                         for key in ("command", "count", "exit_code", "output_sha256"):

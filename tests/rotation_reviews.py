@@ -66,7 +66,7 @@ class ReviewFixTests(RotationTestCase):
             self.assertIn(str(self.home / "claude-tasks" / "angles-merge" / "brief.md"), entry["prompt"])
             self.assert_output_schema(entry, "angles-merge", review=True)
         state = self.state("angles-merge")
-        self.assertIn(self.worker().review_prompt(state, {"language": "en"}), executions[-1]["prompt"])
+        self.assertIn(self.worker().prompts.review_prompt(state, {"language": "en"}), executions[-1]["prompt"])
         self.assertEqual([entry["angle"] for entry in state["reviews"]],
                          ["correctness", "concurrency"])
         self.assertEqual([entry["thread"] for entry in executions[1:]],
@@ -453,7 +453,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(execution["home"], str(self.other))
         self.assertEqual(execution["output"], str(task_dir / "review.md"))
         self.assertIn(str(task_dir / "brief.md"), execution["prompt"])
-        self.assertEqual(execution["prompt"], self.worker().review_prompt(state, {"language": "ru"}))
+        self.assertEqual(execution["prompt"], self.worker().prompts.review_prompt(state, {"language": "ru"}))
         self.assertFalse(execution["resume"])
         self.assertNotEqual(execution["thread"], working["thread"])
         self.assertEqual((state["thread"], state["account"], state["threads"]),
@@ -662,7 +662,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertIn(decisions[1]["note"], final_review["prompt"])
         for event in (initial_review, final_review):
             self.assertIn(command, event["prompt"])
-        self.assertEqual(final_review["prompt"], worker.review_prompt(state, cfg))
+        self.assertEqual(final_review["prompt"], worker.prompts.review_prompt(state, cfg))
         self.assertFalse(final_review["resume"])
         self.assertEqual(len({work["thread"], initial_review["thread"], final_review["thread"]}), 3)
         for event in executions:
@@ -960,8 +960,8 @@ class ReviewFixTests(RotationTestCase):
                 state = self.state(slug)
                 worker = self.worker()
                 cfg = {"language": language}
-                self.assertEqual(second_review["prompt"], worker.review_prompt(state, cfg))
-                self.assertEqual(correction["prompt"], worker.fix_prompt(state, review, None, cfg))
+                self.assertEqual(second_review["prompt"], worker.prompts.review_prompt(state, cfg))
+                self.assertEqual(correction["prompt"], worker.prompts.fix_prompt(state, review, None, cfg))
                 self.assertIn(str(self.home / "claude-tasks" / slug / "brief.md"), initial_review["prompt"])
                 self.assertEqual(state["reviews"][0]["result"], review)
                 self.assertNotIn(decisions[1]["note"], initial_review["prompt"])

@@ -215,7 +215,7 @@ worker.signal.pthread_sigmask = sigmask
                 slug = "finalization-signal-" + point
                 observed = self.run_supervisor_fixture(slug, "point = " + repr(point) + r'''
 observed.update(events=[], fired=False, finished_launched=False)
-real_record = worker.record_turn_result
+real_record = worker.telemetry_log.record_turn_result
 real_notify = worker.notifications.notify
 real_popen = worker.subprocess.Popen
 real_reap = worker.notifications.reap_notifications
@@ -255,7 +255,7 @@ def reap():
     if point == "reap" and observed["finished_launched"] and not observed["fired"]:
         interrupt(observed["events"][-1])
     return result
-worker.record_turn_result = record
+worker.telemetry_log.record_turn_result = record
 worker.notifications.notify = notify
 worker.subprocess.Popen = popen
 worker.notifications.reap_notifications = reap
@@ -526,9 +526,9 @@ worker.notifications.reap_notifications = reap
                 mock.patch.object(worker.threading, "Event", return_value=cancellation), \
                 mock.patch.object(worker.config, "accounts_config", return_value={"enabled": False}), \
                 mock.patch.object(worker, "run_turn", side_effect=interrupt), \
-                mock.patch.object(worker, "record_turn_result"), \
+                mock.patch.object(worker.telemetry_log, "record_turn_result"), \
                 mock.patch.object(worker.notifications, "notify"), \
-                mock.patch.object(worker, "guarded_changes", return_value=[]):
+                mock.patch.object(worker.checking, "guarded_changes", return_value=[]):
             worker.cmd__run(SimpleNamespace(slug=slug))
         state = worker.task_state.load(slug)
         self.assertEqual(state["outcome"], "interrupted")
@@ -771,7 +771,7 @@ worker.notifications.reap_notifications = reap
         for execution in executions:
             self.assert_output_schema(execution, "reset-resume")
         worker = self.worker()
-        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.config.accounts_config()))
+        self.assertEqual(executions[1]["prompt"], worker.prompts.reset_resume_prompt(worker.config.accounts_config()))
         self.assertIn("Продолжение после сброса завершено", second)
         self.assertNotIn("auto-continue at", second)
         state = self.state("reset-resume")
@@ -1261,7 +1261,7 @@ worker.notifications.reap_notifications = reap
                 mock.patch.object(worker.time, "sleep", side_effect=sleep), \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", return_value=unknown) as snapshots:
-            chosen = worker.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: False)
+            chosen = worker.account_rotation.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: False)
         self.assertIsNone(chosen)
         self.assertEqual(snapshots.call_count, 6)
         self.assertEqual(sum(sleeps), 6 * 300)
@@ -1288,7 +1288,7 @@ worker.notifications.reap_notifications = reap
                 mock.patch.object(worker.time, "sleep", side_effect=sleep) as sleeper, \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots") as snapshots:
-            chosen = worker.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: stopped[0])
+            chosen = worker.account_rotation.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: stopped[0])
         self.assertIsNone(chosen)
         sleeper.assert_called_once_with(60)
         snapshots.assert_not_called()

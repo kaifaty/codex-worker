@@ -36,7 +36,7 @@ class PromptTests(unittest.TestCase):
         }
         for language, text in expected.items():
             with self.subTest(language=language):
-                self.assertEqual(self.worker.reset_resume_prompt({"language": language}), text)
+                self.assertEqual(self.worker.prompts.reset_resume_prompt({"language": language}), text)
 
     def test_auth_resume_prompt_text_in_both_languages(self):
         expected = {
@@ -45,7 +45,7 @@ class PromptTests(unittest.TestCase):
         }
         for language, text in expected.items():
             with self.subTest(language=language):
-                self.assertEqual(self.worker.auth_resume_prompt({"language": language}), text)
+                self.assertEqual(self.worker.prompts.auth_resume_prompt({"language": language}), text)
 
     def test_capacity_resume_prompt_text_in_both_languages(self):
         expected = {
@@ -54,7 +54,7 @@ class PromptTests(unittest.TestCase):
         }
         for language, text in expected.items():
             with self.subTest(language=language):
-                self.assertEqual(self.worker.capacity_resume_prompt({"language": language}), text)
+                self.assertEqual(self.worker.prompts.capacity_resume_prompt({"language": language}), text)
 
     def test_followup_prompt_text_in_both_languages(self):
         parts = {
@@ -104,7 +104,7 @@ class PromptTests(unittest.TestCase):
                           {"cmd": "python3 check.py", "outcome": "failed", "exit": 7},
                           {"cmd": "python3 check.py", "outcome": "failed", "exit": 7, "tail": "explicit check output"}):
                 with self.subTest(language=language, check=check):
-                    prompt = self.worker.fix_prompt(self.st, review, check, cfg)
+                    prompt = self.worker.prompts.fix_prompt(self.st, review, check, cfg)
                     self.assertIn(parts[language][0 if check is None else 1], prompt)
                     for part in parts[language][2:]:
                         self.assertIn(part, prompt)
@@ -185,7 +185,7 @@ class PromptTests(unittest.TestCase):
             for kind in ("work", "review", "scout"):
                 for reason_name, reason in reasons.items():
                     with self.subTest(language=language, kind=kind, reason=reason_name):
-                        prompt = self.worker.wrapup_prompt(dict(self.st, kind=kind), reason, {"language": language})
+                        prompt = self.worker.prompts.wrapup_prompt(dict(self.st, kind=kind), reason, {"language": language})
                         for part in (text[reason_name], text["deadline"], text["stop"]):
                             self.assertIn(part, prompt)
                         if reason_name == "stuck":
@@ -243,8 +243,8 @@ class PromptTests(unittest.TestCase):
         for language in ("en", "ru"):
             cfg = {"language": language}
             with self.subTest(language=language, context="none"):
-                with mock.patch.object(self.worker, "guarded_changes", return_value=[]):
-                    prompt = self.worker.review_prompt(self.st, cfg)
+                with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
+                    prompt = self.worker.prompts.review_prompt(self.st, cfg)
                 for part in parts[language][:17] + (str(self.task / "brief.md"),):
                     self.assertIn(part, prompt)
                 for part in ("severity", "file, line, title, detail", "verify", "findings", "summary"):
@@ -266,8 +266,8 @@ class PromptTests(unittest.TestCase):
                         "review": {"findings": [finding]},
                         "decisions": [{"id": "F1", "decision": "rejected", "note": "fixture reason"}],
                     }])
-                    with mock.patch.object(self.worker, "guarded_changes", return_value=guarded):
-                        prompt = self.worker.review_prompt(st, cfg)
+                    with mock.patch.object(self.worker.checking, "guarded_changes", return_value=guarded):
+                        prompt = self.worker.prompts.review_prompt(st, cfg)
                     for part in parts[language] + (str(self.task / "brief.md"), "tests/test_worker.py (+1 −2)",
                                                    "tests/test_worker.py:8 skip marker",
                                                    "`python3 check.py`: passed (exit 0, 1 s).",
@@ -300,7 +300,7 @@ class PromptTests(unittest.TestCase):
         }
         for language in ("en", "ru"):
             with self.subTest(language=language):
-                prompt = self.worker.scout_prompt("Where is configuration loaded?  \n", {"language": language})
+                prompt = self.worker.prompts.scout_prompt("Where is configuration loaded?  \n", {"language": language})
                 self.assertTrue(prompt.startswith("Where is configuration loaded?\n\n"))
                 for part in parts[language]:
                     self.assertIn(part, prompt)

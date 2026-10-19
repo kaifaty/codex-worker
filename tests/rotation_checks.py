@@ -50,7 +50,7 @@ class CheckGuardTests(RotationTestCase):
             self.assert_no_workspace_sandbox(event)
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn(command, prompt)
-        self.assertEqual(prompt, self.worker().review_prompt(state, {"language": "en"}))
+        self.assertEqual(prompt, self.worker().prompts.review_prompt(state, {"language": "en"}))
         self.assertLess(output.index("== check `"), output.index("== review by "))
 
     def test_guarded_changes_decode_latin1_patches_for_every_diff_layer(self):
@@ -72,7 +72,7 @@ class CheckGuardTests(RotationTestCase):
         path.write_bytes(changed.encode("latin-1"))
         for layer in ("working", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 self.assertEqual(len(changes), 1)
                 self.assertEqual((changes[0]["path"], changes[0]["added"], changes[0]["removed"]),
                                  ("tests/test_latin1.py", 2, 1))
@@ -110,16 +110,16 @@ class CheckGuardTests(RotationTestCase):
             self.assertEqual(result.stdout.strip(), "1 %d" % skipped)
         for layer in ("working", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 self.assertEqual(len(changes), 1)
                 self.assertEqual(changes[0]["moved"], 0)
                 self.assertEqual(len(changes[0]["disabled"]), 1)
                 self.assertEqual(changes[0]["disabled"][0]["line"], 4)
                 self.assertTrue(changes[0]["disabled"][0]["text"].startswith("@unittest.skipIf("))
-                output = "\n".join(worker.guarded_lines(changes))
+                output = "\n".join(worker.checking.guarded_lines(changes))
                 self.assertEqual(output.encode("utf-8").decode("utf-8"), output)
                 self.assertFalse(any(line.startswith("== guarded skip markers moved:")
-                                     for line in worker.guarded_lines(changes)))
+                                     for line in worker.checking.guarded_lines(changes)))
             if layer == "working":
                 self.git("add", "--", "tests/test_latin1.py")
             elif layer == "index":
@@ -143,12 +143,12 @@ class CheckGuardTests(RotationTestCase):
         source.rename(self.repo / "tests/test_a_latin1.py")
         for layer in ("working-untracked", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 self.assertEqual(len(changes), 2)
                 self.assertEqual(sum(len(item["disabled"]) for item in changes), 0)
                 self.assertEqual({item["path"]: item["moved"] for item in changes},
                                  {"tests/test_z_latin1.py": 0, "tests/test_a_latin1.py": 2})
-                self.assertEqual(worker.guarded_lines(changes)[-1], "== guarded skip markers moved: 2")
+                self.assertEqual(worker.checking.guarded_lines(changes)[-1], "== guarded skip markers moved: 2")
             if layer == "working-untracked":
                 self.git("add", "--all", "--", "tests")
             elif layer == "index":
@@ -170,11 +170,11 @@ class CheckGuardTests(RotationTestCase):
             (self.repo / ("tests/test_z_%s.py" % name)).unlink()
             (self.repo / ("tests/test_a_%s.py" % name)).write_bytes(
                 ("# coding: latin-1\nimport unittest\n" + contents.replace("'é'", "'ñ'")).encode("latin-1"))
-        changes = worker.guarded_changes(state)
+        changes = worker.checking.guarded_changes(state)
         by_path = {item["path"]: item for item in changes}
         self.assertEqual(sum(item["moved"] for item in changes), 0)
         self.assertEqual(sum(len(item["disabled"]) for item in changes), 2)
-        output = "\n".join(worker.guarded_lines(changes))
+        output = "\n".join(worker.checking.guarded_lines(changes))
         self.assertEqual(output.encode("utf-8").decode("utf-8"), output)
         self.assertNotIn("== guarded skip markers moved:", output)
         for name, (_, line_number) in cases.items():
@@ -199,7 +199,7 @@ class CheckGuardTests(RotationTestCase):
         (self.repo / "tests/test_a_moved.py").write_text(original.replace("    ", "        "))
         for layer in ("working-untracked", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 by_path = {item["path"]: item for item in changes}
                 self.assertEqual(set(by_path), {"tests/test_z_original.py", "tests/test_a_moved.py"})
                 self.assertTrue(by_path["tests/test_z_original.py"]["deleted"])
@@ -208,7 +208,7 @@ class CheckGuardTests(RotationTestCase):
                 for item in changes:
                     self.assertIs(type(item["moved"]), int)
                     self.assertEqual(item["disabled"], [])
-                lines = worker.guarded_lines(changes)
+                lines = worker.checking.guarded_lines(changes)
                 self.assertEqual(lines[-1], "== guarded skip markers moved: 2")
                 self.assertEqual(len(lines), 3)
                 self.assertFalse(any(line.startswith("== guarded tests disabled:") for line in lines))
@@ -228,12 +228,12 @@ class CheckGuardTests(RotationTestCase):
             original + "\n@unittest.skip('new')\ndef test_new():\n    assert True\n")
         for layer in ("working-untracked", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 moved = next(item for item in changes if item["path"] == "tests/test_a_moved.py")
                 self.assertEqual(moved["moved"], 1)
                 self.assertEqual(moved["disabled"], [{"line": 5, "text": "@unittest.skip('new')"}])
                 self.assertEqual(sum(len(item["disabled"]) for item in changes), 1)
-                self.assertEqual(worker.guarded_lines(changes)[-2:], [
+                self.assertEqual(worker.checking.guarded_lines(changes)[-2:], [
                     "== guarded tests disabled: tests/test_a_moved.py:5 @unittest.skip('new')",
                     "== guarded skip markers moved: 1"])
             if layer == "working-untracked":
@@ -249,11 +249,11 @@ class CheckGuardTests(RotationTestCase):
         (self.repo / "tests/test_a.py").write_text(original.replace("skip('a')", "skip('b')"))
         for layer in ("working", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 self.assertEqual(len(changes), 1)
                 self.assertEqual(changes[0]["moved"], 0)
                 self.assertEqual(changes[0]["disabled"], [{"line": 1, "text": "@unittest.skip('b')"}])
-                lines = worker.guarded_lines(changes)
+                lines = worker.checking.guarded_lines(changes)
                 self.assertEqual(lines[-1], "== guarded tests disabled: tests/test_a.py:1 @unittest.skip('b')")
                 self.assertFalse(any(line.startswith("== guarded skip markers moved:") for line in lines))
             if layer == "working":
@@ -271,12 +271,12 @@ class CheckGuardTests(RotationTestCase):
             original + "\ndef test_b():\n    marker = \"@unittest.skip('x')\"\n    assert marker\n")
         for layer in ("working-untracked", "index", "committed"):
             with self.subTest(layer=layer):
-                changes = worker.guarded_changes(state)
+                changes = worker.checking.guarded_changes(state)
                 moved = next(item for item in changes if item["path"] == "tests/test_a_moved.py")
                 self.assertEqual(moved["moved"], 1)
                 self.assertEqual(moved["disabled"], [{"line": 6, "text": "marker = \"@unittest.skip('x')\""}])
                 self.assertEqual(sum(len(item["disabled"]) for item in changes), 1)
-                self.assertEqual(worker.guarded_lines(changes)[-1], "== guarded skip markers moved: 1")
+                self.assertEqual(worker.checking.guarded_lines(changes)[-1], "== guarded skip markers moved: 1")
             if layer == "working-untracked":
                 self.git("add", "--all", "--", "tests")
             elif layer == "index":
@@ -303,7 +303,7 @@ class CheckGuardTests(RotationTestCase):
                 self.git("add", "--all", "--", "tests")
                 if layer == "committed":
                     self.git("commit", "--quiet", "-m", "Prepare cross-layer marker changes")
-        changes = worker.guarded_changes(state)
+        changes = worker.checking.guarded_changes(state)
         by_path = {item["path"]: item for item in changes}
         self.assertEqual(sum(item["moved"] for item in changes), 0)
         self.assertEqual(sum(len(item["disabled"]) for item in changes), 6)
@@ -313,7 +313,7 @@ class CheckGuardTests(RotationTestCase):
                 self.assertEqual(by_path[path]["disabled"], [
                     {"line": 1, "text": "@unittest.skip('%s-to-%s')" % (removed, added)}])
         self.assertFalse(any(line.startswith("== guarded skip markers moved:")
-                             for line in worker.guarded_lines(changes)))
+                             for line in worker.checking.guarded_lines(changes)))
 
     def test_latin1_guarded_patch_finishes_check_review_and_notification(self):
         self.configure(language="en")
@@ -369,12 +369,12 @@ class CheckGuardTests(RotationTestCase):
         self.assertEqual(guarded, ["== guarded files changed: tests/test_a.py (+2 −1)"])
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn("tests/test_a.py", prompt)
-        self.assertEqual(prompt, self.worker().review_prompt(
+        self.assertEqual(prompt, self.worker().prompts.review_prompt(
             self.state("guarded-counts"), {"language": "en"}))
         self.assertEqual(self.notification("guarded-counts", "turn_finished")["guarded_changed"], 1)
 
     def test_disabled_test_markers_ignore_prose_and_match_test_annotations(self):
-        pattern = self.worker().DISABLED_TEST
+        pattern = self.worker().checking.DISABLED_TEST
         for line in ("only P3 remains", "Contend only for the reset journal lock",
                      "skip the step", "skipped = True", "xfail = False"):
             with self.subTest(line=line):
@@ -436,7 +436,7 @@ class CheckGuardTests(RotationTestCase):
         self.commit_fixture(files)
         command = ('CHECK_SCRIPT=scripts/verify.sh EMPTY= sh "$CHECK_SCRIPT" '
                    '--config=config/check.toml scripts/check=literal.sh verify=literal.sh')
-        paths = self.worker().check_paths({"worktree": str(self.repo), "check": command})
+        paths = self.worker().checking.check_paths({"worktree": str(self.repo), "check": command})
         self.assertEqual(paths, sorted(files))
         self.assertNotIn(".", paths, "an empty assignment must not guard every repository file")
 
@@ -448,7 +448,7 @@ class CheckGuardTests(RotationTestCase):
                         "sh scripts/verify.sh 'unterminated"):
             with self.subTest(command=command):
                 state = {"worktree": str(self.repo), "check": command}
-                self.assertEqual(worker.check_paths(state), [])
+                self.assertEqual(worker.checking.check_paths(state), [])
                 self.assertNotIn("check_paths", state)
 
     def test_check_paths_separate_shell_punctuation_from_paths(self):
@@ -458,25 +458,25 @@ class CheckGuardTests(RotationTestCase):
                         "sh scripts/verify.sh|cat", "cat>scripts/verify.sh"):
             with self.subTest(command=command):
                 state = {"worktree": str(self.repo), "check": command}
-                self.assertEqual(worker.check_paths(state), ["scripts/verify.sh"])
+                self.assertEqual(worker.checking.check_paths(state), ["scripts/verify.sh"])
                 self.assertNotIn("check_paths", state)
 
     def test_check_paths_return_union_without_mutating_state(self):
         self.commit_fixture({"scripts/first.sh": "exit 0\n", "scripts/second.sh": "exit 0\n"})
         worker = self.worker()
         state = {"worktree": str(self.repo), "check": "sh scripts/first.sh"}
-        self.assertEqual(worker.check_paths(state), ["scripts/first.sh"])
+        self.assertEqual(worker.checking.check_paths(state), ["scripts/first.sh"])
         self.assertNotIn("check_paths", state)
         state["check_paths"] = ["scripts/first.sh"]
         state["check"] = "sh scripts/second.sh"
         snapshot = json.loads(json.dumps(state))
-        self.assertEqual(worker.check_paths(state), ["scripts/first.sh", "scripts/second.sh"])
+        self.assertEqual(worker.checking.check_paths(state), ["scripts/first.sh", "scripts/second.sh"])
         self.assertEqual(state, snapshot)
         (self.repo / "scripts/first.sh").unlink()
         (self.repo / "scripts/second.sh").unlink()
         state["check"] = "sh 'unterminated"
         snapshot = json.loads(json.dumps(state))
-        self.assertEqual(worker.check_paths(state), ["scripts/first.sh"])
+        self.assertEqual(worker.checking.check_paths(state), ["scripts/first.sh"])
         self.assertEqual(state, snapshot)
 
     def test_guarded_changes_review_prompt_and_status_do_not_write_state(self):
@@ -489,9 +489,9 @@ class CheckGuardTests(RotationTestCase):
                  "check": "sh scripts/verify.sh", "check_paths": []}
         snapshot = json.loads(json.dumps(state))
         with mock.patch.object(worker.task_state, "save") as save:
-            self.assertEqual([change["path"] for change in worker.guarded_changes(state)],
+            self.assertEqual([change["path"] for change in worker.checking.guarded_changes(state)],
                              ["scripts/verify.sh"])
-            self.assertIn("scripts/verify.sh", worker.review_prompt(state, {"language": "en"}))
+            self.assertIn("scripts/verify.sh", worker.prompts.review_prompt(state, {"language": "en"}))
             with mock.patch.object(worker.task_state, "load", return_value=state), \
                     mock.patch.object(worker.procs, "sh", return_value=""), \
                     mock.patch.object(worker.threads, "last_message", return_value=""), \
@@ -514,7 +514,7 @@ class CheckGuardTests(RotationTestCase):
         script.write_text("exit 0\n")
         new_pid = IMPOSSIBLE_PID
         original_popen = worker.subprocess.Popen
-        original_guarded_changes = worker.guarded_changes
+        original_guarded_changes = worker.checking.guarded_changes
         launches = []
 
         def popen(command, *args, **kwargs):
@@ -532,7 +532,7 @@ class CheckGuardTests(RotationTestCase):
         with mock.patch.object(worker.config, "accounts_config", return_value={"language": "en"}), \
                 mock.patch.object(worker.procs, "alive", side_effect=lambda pid: pid == new_pid), \
                 mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
-                mock.patch.object(worker, "guarded_changes", side_effect=describe_old_state), \
+                mock.patch.object(worker.checking, "guarded_changes", side_effect=describe_old_state), \
                 mock.patch.object(worker.task_state, "save", wraps=worker.task_state.save) as save, \
                 mock.patch("builtins.print") as printer:
             worker.cmd_wait(SimpleNamespace(slug=slug, timeout=0, through_sleep=False))
@@ -567,7 +567,7 @@ class CheckGuardTests(RotationTestCase):
         self.assertEqual(len(self.review_invocations()), 1)
         self.assertIn("scripts/verify.sh", self.review_invocations()[0]["prompt"])
         self.assertEqual(self.review_invocations()[0]["prompt"],
-                         self.worker().review_prompt(state, {"language": "en"}))
+                         self.worker().prompts.review_prompt(state, {"language": "en"}))
         self.assertLess(output.index("== base tests: FAILED"), output.index("== review by "))
         self.assertEqual(self.notification("guarded-assignment", "turn_finished")["guarded_changed"], 1)
         worktrees = self.git("worktree", "list", "--porcelain")
@@ -662,7 +662,7 @@ class CheckGuardTests(RotationTestCase):
         self.assertIn("== base tests: skipped (" + reason + ")", output)
         self.assertEqual(len(self.review_invocations()), 1)
         prompt = self.review_invocations()[0]["prompt"]
-        self.assertEqual(prompt, self.worker().review_prompt(state, {"language": "en"}))
+        self.assertEqual(prompt, self.worker().prompts.review_prompt(state, {"language": "en"}))
         self.assertIn(reason, prompt)
         self.assertNotIn("== review skipped:", output)
         self.assertFalse((self.home / "claude-tasks" / slug / "base-check.log").exists())
@@ -899,7 +899,7 @@ class CheckGuardTests(RotationTestCase):
         self.assertEqual(len(self.review_invocations()), 1)
         prompt = self.review_invocations()[0]["prompt"]
         self.assertIn("printf 'checked\\n' >> check-runs", prompt)
-        self.assertEqual(prompt, self.worker().review_prompt(state, {"language": "en"}))
+        self.assertEqual(prompt, self.worker().prompts.review_prompt(state, {"language": "en"}))
 
     def test_review_without_saved_check_has_no_passed_suite_instruction(self):
         self.configure(language="en")
@@ -909,5 +909,5 @@ class CheckGuardTests(RotationTestCase):
         self.start("review-no-check", "--review")
         self.wait("review-no-check")
         prompt = self.review_invocations()[0]["prompt"]
-        self.assertEqual(prompt, self.worker().review_prompt(
+        self.assertEqual(prompt, self.worker().prompts.review_prompt(
             self.state("review-no-check"), {"language": "en"}))
