@@ -9,6 +9,10 @@ import tempfile
 import time
 import unittest
 
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 

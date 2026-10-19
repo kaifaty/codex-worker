@@ -13,18 +13,6 @@ from types import SimpleNamespace
 from unittest import mock
 
 from rotation_support import IMPOSSIBLE_PID, PYTHON, SCRIPT, RotationTestCase
-from worker_loader import WORKER_BOOTSTRAP
-
-
-PARTIAL_WRITE_BOOTSTRAP = WORKER_BOOTSTRAP + """
-import json, resource, signal, sys
-worker = load_worker(name='partial_write_worker', script=sys.argv[1]).__dict__
-state = json.loads(sys.argv[2])
-(worker['TASKS'] / state['slug']).mkdir(parents=True)
-signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
-resource.setrlimit(resource.RLIMIT_FSIZE, (100, 100))
-worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
-"""
 
 
 class TelemetryReportTests(RotationTestCase):
@@ -134,7 +122,15 @@ class TelemetryReportTests(RotationTestCase):
         worker = self.worker()
         partial = {"slug": "telemetry-partial", "repo": str(self.repo), "account": "main",
                    "created": time.time()}
-        script = PARTIAL_WRITE_BOOTSTRAP
+        script = """
+import json, resource, runpy, signal, sys
+worker = runpy.run_path(sys.argv[1])
+state = json.loads(sys.argv[2])
+(worker['TASKS'] / state['slug']).mkdir(parents=True)
+signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
+resource.setrlimit(resource.RLIMIT_FSIZE, (100, 100))
+worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
+"""
         result = subprocess.run([PYTHON, "-I", "-c", script, str(SCRIPT), json.dumps(partial)],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)

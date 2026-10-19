@@ -1,8 +1,13 @@
 """Keep command synopses and flag documentation aligned with the option registry."""
 from pathlib import Path
 import re
+import sys
 import tempfile
 import unittest
+
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from worker_loader import load_worker
 

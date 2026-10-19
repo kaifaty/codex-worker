@@ -1,8 +1,13 @@
 """Count capacity retries without duplicating final supervisor totals."""
 import json
 from pathlib import Path
+import sys
 import tempfile
 import unittest
+
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from worker_loader import load_worker
 

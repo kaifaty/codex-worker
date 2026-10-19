@@ -1,8 +1,13 @@
 """Text contracts for generated prompts, exercised without CLI subprocesses."""
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
+
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from worker_loader import load_worker
 

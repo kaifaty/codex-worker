@@ -7,12 +7,17 @@ import selectors
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
+
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from rotation_support import IMPOSSIBLE_PID, PYTHON, SCRIPT, RotationTestCase
 from worker_loader import WORKER_BOOTSTRAP

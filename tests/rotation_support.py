@@ -14,6 +14,10 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from process_cleanup import cleanup_processes
 from worker_loader import WORKER_BOOTSTRAP, load_worker
 
