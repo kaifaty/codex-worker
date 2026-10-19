@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
+import warnings
 
 
 # Isolated Python omits the script directory from its import path.
@@ -70,6 +71,16 @@ class CompareCliHelpTests(unittest.TestCase):
                 contextlib.redirect_stdout(output):
             status = compare_cli_help.main(["--base", "HEAD"])
         return status, output.getvalue()
+
+    def test_archive_extraction_has_no_deprecation_warnings(self):
+        root, script = self.synthetic_repository()
+        destination = root / "archive"
+        destination.mkdir()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            compare_cli_help.archive_plugins(root, "HEAD", destination)
+        self.assertEqual((destination / compare_cli_help.SCRIPT).read_bytes(),
+                         script.read_bytes())
 
     def test_all_baseline_commands_run_with_an_isolated_home(self):
         root, _ = self.synthetic_repository()

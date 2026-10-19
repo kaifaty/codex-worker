@@ -35,7 +35,11 @@ def archive_plugins(root, revision, destination):
             if (destination not in target.resolve().parents
                     or not (member.isfile() or member.isdir())):
                 raise ValueError("unsupported archive entry: " + member.name)
-        tree.extractall(str(destination))
+        if hasattr(tarfile, "data_filter"):
+            tree.extractall(str(destination), filter="data")
+        else:
+            # Older Python 3.9 builds do not have extraction filters.
+            tree.extractall(str(destination))
 
 
 def help_environment(directory):
