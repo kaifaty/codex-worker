@@ -49,7 +49,9 @@ import time
 import uuid
 from collections import Counter, deque
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal, NamedTuple, Optional
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 CODEX = os.environ.get("CODEX_TASK_CODEX")
@@ -1875,6 +1877,18 @@ def warn_weekly_headroom(st, cfg, infos):
         st["weekly_budget_warning"] = warning
 
 
+class MonitorTimeUsage(NamedTuple):
+    elapsed: float
+    reason: Optional[dict]
+
+
+def monitor_time_usage(elapsed, seconds, minutes, started, now) -> MonitorTimeUsage:
+    """Calculate active time and a deadline reason from one clock sample."""
+    reason = ({"outcome": "budget_exhausted", "minutes": minutes}
+              if seconds is not None and elapsed + now - started >= seconds else None)
+    return MonitorTimeUsage(elapsed + max(0, now - started), reason)
+
+
 class TurnControl:
     """Limits belong to a phase, surviving exec retries but excluding account waits."""
 
@@ -1888,8 +1902,11 @@ class TurnControl:
         self.reason = None
 
     def expired(self, started):
-        if self.seconds is not None and self.elapsed + time.monotonic() - started >= self.seconds:
-            self.reason = {"outcome": "budget_exhausted", "minutes": self.minutes}
+        if self.seconds is None:
+            return False
+        usage = monitor_time_usage(self.elapsed, self.seconds, self.minutes, started, time.monotonic())
+        if usage.reason is not None:
+            self.reason = usage.reason
             return True
         return False
 
@@ -1971,18 +1988,70 @@ def wrapup_prompt(st, reason, cfg):
     return prompt
 
 
-def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
-            control=None, wrapup=False, wrapup_thread=None, quota_snapshot=None):
-    """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
-    d = TASKS / st["slug"]
-    prepare_home(account)
-    reviewing = st.get("kind") == "review"
-    control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
-                                     else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
-                                     cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
-    thread = wrapup_thread if wrapup else "" if reviewing else st.get("thread", "")
-    review_entry = None
-    last = d / ("review.md" if reviewing else "last.md")
+class MonitorWeeklyUsage(NamedTuple):
+    updates: dict
+    seeded: bool
+    delta: float
+
+
+def monitor_weekly_usage(st, account, limits, seeded) -> MonitorWeeklyUsage:
+    """Return weekly state changes without mutating the supplied task state."""
+    sample = {key: st[key] for key in ("weekly_marks", "weekly_used_percent") if key in st}
+    if "weekly_marks" in sample:
+        sample["weekly_marks"] = {name: dict(mark) for name, mark in sample["weekly_marks"].items()}
+    delta = record_weekly_usage(sample, account, limits, seed=not seeded)
+    seeded = seeded or weekly_used(limits) is not None
+    updates = {key: value for key, value in sample.items() if key not in st or value != st[key]}
+    return MonitorWeeklyUsage(updates, seeded, delta)
+
+
+class MonitorQuotaDecision(NamedTuple):
+    action: Literal["continue", "limit", "failed"]
+    info: Optional[dict] = None
+    reason: Optional[str] = None
+    allow_credits: bool = False
+
+
+def monitor_quota_decision(info, cfg, reason=None) -> MonitorQuotaDecision:
+    """Choose a quota action from a limit sample/settings, without RPCs or writes."""
+    if reason:
+        return MonitorQuotaDecision("limit" if cfg["enabled"] else "failed", info, reason)
+    if cfg["enabled"] and exhausted(info, cfg):
+        return MonitorQuotaDecision("limit", info, limit_reason(info, cfg), True)
+    return MonitorQuotaDecision("continue")
+
+
+@dataclass
+class MonitorEvents:
+    """State derived from exec stdout, including an unfinished JSON line."""
+    thread: str
+    review_entry: Optional[dict] = None
+    buffer: bytes = b""
+    eof: bool = False
+    failed: bool = False
+    completed: bool = False
+    reason: Optional[str] = None
+    authentication_failed: bool = False
+    refusal: Optional[str] = None
+    final_message: str = ""
+    exit_code: Optional[int] = None
+
+
+@dataclass
+class MonitorRollout:
+    """Rollout polling cursor and the stdout prefix queued at a weekly stop."""
+    path: Optional[Path]
+    previous_size: int
+    usage_offset: int
+    next_search: float
+    next_poll: float = 0.0
+    pending_weekly_spent: Optional[float] = None
+    pending_weekly_bytes: int = 0
+    current_info: Optional[dict] = None
+
+
+def monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last):
+    """Prepare exec arguments/schema and return the effective prompt for fallback."""
     if last.exists():
         last.unlink()
     args = [codex_binary(), "exec"]
@@ -2004,37 +2073,253 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
             if not prompt.endswith(rules):
                 prompt += "\n\n" + rules
     if st.get("kind") != "scout":
-        schema = d / ("review-schema.json" if reviewing else "result-schema.json")
+        schema = last.parent / ("review-schema.json" if reviewing else "result-schema.json")
         schema.write_text(json.dumps(REVIEW_SCHEMA if reviewing else RESULT_SCHEMA, indent=2), encoding="utf-8")
         args += ["--output-schema", str(schema)]
-    args += effort_args(effort) + [prompt]
+    return args + effort_args(effort) + [prompt], prompt
+
+
+@contextmanager
+def monitor_process(st, account, args, errors):
+    """Own one exec process group; terminate it before the caller's final accounting."""
+    proc = subprocess.Popen(args, cwd=st["worktree"], env=account_env(account), stdin=subprocess.DEVNULL,
+                            stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
+    try:
+        yield proc
+    finally:
+        terminate(proc)
+
+
+def monitor_thread_started(st, account, stream, reviewing, wrapup, attempt_started):
+    """Apply thread.started to task/event state before saving the new thread."""
+    thread = stream.thread
+    if reviewing and not wrapup:
+        stream.review_entry = {"account": account["name"], "thread": thread,
+                               "started": attempt_started, "finished": None, "result": None,
+                               "round": len(st.get("rounds", [])),
+                               "angle": st.get("review_angle") or "correctness"}
+        st.setdefault("reviews", []).append(stream.review_entry)
+    elif not reviewing:
+        st["thread"] = thread
+    if not reviewing and not any(t["account"] == account["name"] and t["thread"] == thread for t in st["threads"]):
+        st["threads"].append({"account": account["name"], "thread": thread, "started": time.time()})
+    if (st["rotations"] and not st["rotations"][-1].get("event")
+            and not st["rotations"][-1]["thread"]):
+        st["rotations"][-1]["thread"] = thread
+    save(st)
+
+
+def monitor_event(st, account, event, stream, control, reviewing, wrapup, attempt_started):
+    """Apply one decoded event in wire order; return an immediate stop, if any."""
+    if event.get("type") == "thread.started":
+        stream.thread = event["thread_id"]
+        monitor_thread_started(st, account, stream, reviewing, wrapup, attempt_started)
+    if (event.get("type") == "item.completed"
+            and (event.get("item") or {}).get("type") == "agent_message"):
+        stream.final_message = event["item"].get("text", "")
+    stream.refusal = refusal_message(event)
+    if stream.refusal is not None:
+        st["refusal"] = stream.refusal
+        return "refused", None
+    if control.repeated(event):
+        return "stuck", None
+    if limit_error(event):
+        stream.reason = "usage limit"
+    if auth_error(event):
+        stream.authentication_failed = True
+    # `error` events also carry retries ("Reconnecting... 2/5") of turns that complete.
+    if event.get("type") == "turn.failed":
+        stream.failed = True
+    if event.get("type") == "turn.completed":
+        stream.completed = True
+    return None
+
+
+def read_monitor_events(st, account, ready, sel, log, stream, usage, control,
+                        reviewing, wrapup, attempt_started):
+    """Append ready bytes verbatim, then decode complete lines without reordering."""
+    for key, _ in ready:
+        size = min(65536, usage.pending_weekly_bytes) if usage.pending_weekly_spent is not None else 65536
+        chunk = os.read(key.fileobj.fileno(), size)
+        if usage.pending_weekly_spent is not None:
+            usage.pending_weekly_bytes -= len(chunk)
+        if not chunk:
+            sel.unregister(key.fileobj)
+            stream.eof = True
+        else:
+            log.write(chunk)
+            stream.buffer += chunk
+            while b"\n" in stream.buffer:
+                line, stream.buffer = stream.buffer.split(b"\n", 1)
+                try:
+                    event = json.loads(line)
+                except ValueError:
+                    continue
+                result = monitor_event(st, account, event, stream, control, reviewing, wrapup, attempt_started)
+                if result is not None:
+                    return result
+    return None
+
+
+def resolve_monitor_quota(st, request, stopped, control, active_started, on_limit):
+    """Run quota effects while exec is alive, preserving stop/deadline priority."""
+    if request.action == "failed":
+        return "failed", None
+    # Quota RPCs and reset-journal locks run while exec is still alive.
+    def cancelled():
+        return stopped() or control.expired(active_started)
+
+    try:
+        decision = on_limit(request.info, request.reason, request.allow_credits, cancelled)
+    except RuntimeError:
+        if not cancelled():
+            raise
+        decision = None
+    if stopped():
+        return stop_outcome(st, stopped), None
+    if control.expired(active_started):
+        return "budget_exhausted", None
+    return ("limit", decision) if decision is not None or not request.allow_credits else None
+
+
+def poll_monitor_rollout(st, cfg, account, proc, stream, usage, control, record_limits):
+    """Read a changed rollout sample; return its quota action or queue a weekly stop."""
+    now = time.monotonic()
+    if usage.path is None and now >= usage.next_search:
+        usage.path = rollout_path(account["home"], stream.thread)
+        usage.next_search = now + ROLLOUT_SEARCH_SECONDS
+    if usage.path is None or now < usage.next_poll:
+        return MonitorQuotaDecision("continue")
+    usage.next_poll = now + RATE_POLL_SECONDS
+    size = usage.path.stat().st_size
+    if size == usage.previous_size:
+        return MonitorQuotaDecision("continue")
+    limits = rollout_limits(usage.path, record_limits, usage.usage_offset)
+    usage.previous_size = size
+    if limits is None:
+        return MonitorQuotaDecision("continue")
+    # A completed model turn needs no wrap-up while the CLI exits.
+    # The supervisor checks its final usage after monitor returns.
+    if control.weekly is not None and not stream.completed:
+        spent = st.get("weekly_used_percent", 0)
+        if spent >= control.weekly:
+            usage.pending_weekly_spent = spent
+            queued = fcntl.ioctl(proc.stdout.fileno(), termios.FIONREAD, bytes(4))
+            usage.pending_weekly_bytes = int.from_bytes(queued, sys.byteorder)
+            return MonitorQuotaDecision("continue")
+    usage.current_info = dict(account, logged_in=True, limits=limits)
+    return monitor_quota_decision(usage.current_info, cfg)
+
+
+def monitor_event_stream(st, cfg, account, proc, log, stream, usage, control, stopped,
+                         on_limit, record_limits, reviewing, wrapup, attempt_started, active_started):
+    """Supervise exec/stdout and return the original (outcome, quota payload) pair."""
+    with selectors.DefaultSelector() as sel:
+        sel.register(proc.stdout, selectors.EVENT_READ)
+        while not stream.eof or proc.poll() is None:
+            if stopped():
+                terminate(proc)
+                return stop_outcome(st, stopped), None
+            if control.expired(active_started):
+                return "budget_exhausted", None
+            ready = ([] if usage.pending_weekly_spent is not None and usage.pending_weekly_bytes == 0
+                     else sel.select(0 if usage.pending_weekly_spent is not None else 0.2))
+            result = read_monitor_events(st, account, ready, sel, log, stream, usage, control,
+                                         reviewing, wrapup, attempt_started)
+            if result is not None:
+                return result
+            if wrapup:
+                # A wrap-up gets one bounded attempt, without quota waits or retries.
+                if stream.authentication_failed or stream.reason:
+                    return "failed", None
+                continue
+            if usage.pending_weekly_spent is not None:
+                # Rollout and stdout are separate streams. A completion
+                # sent before the quota sample can still be queued here.
+                # Drain that queued prefix (including partial JSON),
+                # without waiting for or following subsequent output.
+                if not stream.completed:
+                    if ready and usage.pending_weekly_bytes > 0 and not stream.eof:
+                        continue
+                    if control.weekly_exhausted(usage.pending_weekly_spent):
+                        return "budget_exhausted", None
+                usage.pending_weekly_spent = None
+            if stream.authentication_failed:
+                return ("auth" if cfg["enabled"] else "failed"), None
+            if stream.reason:
+                request = monitor_quota_decision(usage.current_info, cfg, stream.reason)
+                return resolve_monitor_quota(st, request, stopped, control, active_started, on_limit)
+            if (cfg["enabled"] or control.weekly is not None) and stream.thread and proc.poll() is None:
+                request = poll_monitor_rollout(st, cfg, account, proc, stream, usage, control, record_limits)
+                if request.action != "continue":
+                    result = resolve_monitor_quota(st, request, stopped, control, active_started, on_limit)
+                    if result is not None:
+                        return result
+        stream.exit_code = proc.wait()
+    return ("completed" if stream.exit_code == 0 and not stream.failed else "failed"), None
+
+
+def finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
+                   record_limits, telemetry, usage_before, weekly_started):
+    """Close stdout, finalize results, account final rollout/telemetry, then save."""
+    proc.stdout.close()
+    st.pop("codex_pid", None)
+    message = last.read_text(encoding="utf-8").strip() if last.exists() else stream.final_message
+    if wrapup:
+        st["wrapup"]["result"] = None if stream.refusal else parse_result(message, reviewing=reviewing)
+        if stream.refusal:
+            st["wrapup"]["refusal"] = stream.refusal
+    elif stream.review_entry is not None:
+        stream.review_entry["finished"] = time.time()
+        stream.review_entry["result"] = None if stream.refusal else parse_result(message, reviewing=True)
+        if stream.refusal:
+            stream.review_entry.update(outcome="refused", refusal=stream.refusal)
+    elif not reviewing and st.get("kind") != "scout":
+        st["result"] = None if stream.refusal else parse_result(message)
+    try:
+        final_path = usage.path or rollout_path(account["home"], stream.thread)
+        if final_path is not None:
+            rollout_limits(final_path, record_limits, usage.usage_offset)
+        if telemetry is not None:
+            telemetry.add_usage(account["name"], stream.thread, usage_before,
+                                final_path, usage.usage_offset,
+                                st.get("weekly_used_percent", 0) - weekly_started)
+    except Exception as exc:
+        telemetry_error(st, exc)
+    save(st)
+
+
+def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=False,
+            control=None, wrapup=False, wrapup_thread=None, quota_snapshot=None):
+    """One exec attempt. The supervisor alone owns state; append CLI events verbatim."""
+    d = TASKS / st["slug"]
+    prepare_home(account)
+    reviewing = st.get("kind") == "review"
+    control = control or TurnControl(cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
+                                     else st.get("max_turn_minutes", cfg.get("max_turn_minutes")),
+                                     cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
+    thread = wrapup_thread if wrapup else "" if reviewing else st.get("thread", "")
+    stream = MonitorEvents(thread)
+    last = d / ("review.md" if reviewing else "last.md")
+    args, prompt = monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last)
     path = rollout_path(account["home"], thread) if thread else None
     previous_size = path.stat().st_size if path else 0
     telemetry = telemetry_phase(st)
     usage_before = rollout_usage(path)[1] if telemetry is not None else None
-    usage_offset = previous_size
     weekly_started = st.get("weekly_used_percent", 0)
     weekly_seeded = weekly_used(quota_snapshot or {}) is not None
     if weekly_seeded:
-        record_weekly_usage(st, account["name"], quota_snapshot, seed=True)
+        st.update(monitor_weekly_usage(st, account["name"], quota_snapshot, False).updates)
 
     def record_limits(limits):
         nonlocal weekly_seeded
-        delta = record_weekly_usage(st, account["name"], limits, seed=not weekly_seeded)
-        weekly_seeded = weekly_seeded or weekly_used(limits) is not None
-        return delta
+        sample = monitor_weekly_usage(st, account["name"], limits, weekly_seeded)
+        st.update(sample.updates)
+        weekly_seeded = sample.seeded
+        return sample.delta
 
     next_search = time.monotonic() + ROLLOUT_SEARCH_SECONDS if thread else 0.0
-    next_poll = 0.0
-    reason = None
-    current_info = None
-    failed = False
-    turn_completed = False
-    pending_weekly_spent = None
-    pending_weekly_bytes = 0
-    authentication_failed = False
-    refusal = None
-    final_message = ""
+    usage = MonitorRollout(path, previous_size, previous_size, next_search)
     st["exec_event_start"] = len(events(st))
     save(st)
     with (d / "events.jsonl").open("ab", buffering=0) as log, (d / "stderr.log").open("a") as errors:
@@ -2043,178 +2328,27 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         error_start = errors.tell()
         attempt_started = time.time()
         active_started = time.monotonic()
-
-        def quota_decision(local, why, allow_credits):
-            # Quota RPCs and reset-journal locks run while exec is still alive.
-            def cancelled():
-                return stopped() or control.expired(active_started)
-
-            try:
-                decision = on_limit(local, why, allow_credits, cancelled)
-            except RuntimeError:
-                if not cancelled():
-                    raise
-                decision = None
-            if stopped():
-                return stop_outcome(st, stopped), None
-            if control.expired(active_started):
-                return "budget_exhausted", None
-            return ("limit", decision) if decision is not None or not allow_credits else None
-
-        proc = subprocess.Popen(args, cwd=st["worktree"], env=account_env(account), stdin=subprocess.DEVNULL,
-                                stdout=subprocess.PIPE, stderr=errors, start_new_session=True)
+        proc = None
         try:
-            st["codex_pid"] = proc.pid
-            save(st)
-            buf = b""
-            with selectors.DefaultSelector() as sel:
-                sel.register(proc.stdout, selectors.EVENT_READ)
-                eof = False
-                while not eof or proc.poll() is None:
-                    if stopped():
-                        terminate(proc)
-                        return stop_outcome(st, stopped), None
-                    if control.expired(active_started):
-                        return "budget_exhausted", None
-                    ready = ([] if pending_weekly_spent is not None and pending_weekly_bytes == 0
-                             else sel.select(0 if pending_weekly_spent is not None else 0.2))
-                    for key, _ in ready:
-                        size = min(65536, pending_weekly_bytes) if pending_weekly_spent is not None else 65536
-                        chunk = os.read(key.fileobj.fileno(), size)
-                        if pending_weekly_spent is not None:
-                            pending_weekly_bytes -= len(chunk)
-                        if not chunk:
-                            sel.unregister(key.fileobj)
-                            eof = True
-                        else:
-                            log.write(chunk)
-                            buf += chunk
-                            while b"\n" in buf:
-                                line, buf = buf.split(b"\n", 1)
-                                try:
-                                    event = json.loads(line)
-                                except ValueError:
-                                    continue
-                                if event.get("type") == "thread.started":
-                                    thread = event["thread_id"]
-                                    if reviewing and not wrapup:
-                                        review_entry = {"account": account["name"], "thread": thread,
-                                                        "started": attempt_started, "finished": None, "result": None,
-                                                        "round": len(st.get("rounds", [])),
-                                                        "angle": st.get("review_angle") or "correctness"}
-                                        st.setdefault("reviews", []).append(review_entry)
-                                    elif not reviewing:
-                                        st["thread"] = thread
-                                    if not reviewing and not any(t["account"] == account["name"] and t["thread"] == thread for t in st["threads"]):
-                                        st["threads"].append({"account": account["name"], "thread": thread, "started": time.time()})
-                                    if (st["rotations"] and not st["rotations"][-1].get("event")
-                                            and not st["rotations"][-1]["thread"]):
-                                        st["rotations"][-1]["thread"] = thread
-                                    save(st)
-                                if (event.get("type") == "item.completed"
-                                        and (event.get("item") or {}).get("type") == "agent_message"):
-                                    final_message = event["item"].get("text", "")
-                                refusal = refusal_message(event)
-                                if refusal is not None:
-                                    st["refusal"] = refusal
-                                    return "refused", None
-                                if control.repeated(event):
-                                    return "stuck", None
-                                if limit_error(event):
-                                    reason = "usage limit"
-                                if auth_error(event):
-                                    authentication_failed = True
-                                # `error` events also carry retries ("Reconnecting... 2/5") of turns that complete.
-                                if event.get("type") == "turn.failed":
-                                    failed = True
-                                if event.get("type") == "turn.completed":
-                                    turn_completed = True
-                    if wrapup:
-                        # A wrap-up gets one bounded attempt, without quota waits or retries.
-                        if authentication_failed or reason:
-                            return "failed", None
-                        continue
-                    if pending_weekly_spent is not None:
-                        # Rollout and stdout are separate streams. A completion
-                        # sent before the quota sample can still be queued here.
-                        # Drain that queued prefix (including partial JSON),
-                        # without waiting for or following subsequent output.
-                        if not turn_completed:
-                            if ready and pending_weekly_bytes > 0 and not eof:
-                                continue
-                            if control.weekly_exhausted(pending_weekly_spent):
-                                return "budget_exhausted", None
-                        pending_weekly_spent = None
-                    if authentication_failed:
-                        return ("auth" if cfg["enabled"] else "failed"), None
-                    if reason:
-                        return quota_decision(current_info, reason, False) if cfg["enabled"] else ("failed", None)
-                    if (cfg["enabled"] or control.weekly is not None) and thread and proc.poll() is None:
-                        now = time.monotonic()
-                        if path is None and now >= next_search:
-                            path = rollout_path(account["home"], thread)
-                            next_search = now + ROLLOUT_SEARCH_SECONDS
-                        if path is not None and now >= next_poll:
-                            next_poll = now + RATE_POLL_SECONDS
-                            size = path.stat().st_size
-                            if size == previous_size:
-                                continue
-                            limits = rollout_limits(path, record_limits, usage_offset)
-                            previous_size = size
-                            if limits is not None:
-                                # A completed model turn needs no wrap-up while the CLI exits.
-                                # The supervisor checks its final usage after monitor returns.
-                                if control.weekly is not None and not turn_completed:
-                                    spent = st.get("weekly_used_percent", 0)
-                                    if spent >= control.weekly:
-                                        pending_weekly_spent = spent
-                                        queued = fcntl.ioctl(proc.stdout.fileno(), termios.FIONREAD, bytes(4))
-                                        pending_weekly_bytes = int.from_bytes(queued, sys.byteorder)
-                                        continue
-                                current_info = dict(account, logged_in=True, limits=limits)
-                                if cfg["enabled"] and exhausted(current_info, cfg):
-                                    decision = quota_decision(current_info, limit_reason(current_info, cfg), True)
-                                    if decision is not None:
-                                        return decision
-                code = proc.wait()
-        finally:
-            try:
-                terminate(proc)
-            finally:
-                control.elapsed += max(0, time.monotonic() - active_started)
-                proc.stdout.close()
-                st.pop("codex_pid", None)
-                message = last.read_text(encoding="utf-8").strip() if last.exists() else final_message
-                if wrapup:
-                    st["wrapup"]["result"] = None if refusal else parse_result(message, reviewing=reviewing)
-                    if refusal:
-                        st["wrapup"]["refusal"] = refusal
-                elif review_entry is not None:
-                    review_entry["finished"] = time.time()
-                    review_entry["result"] = None if refusal else parse_result(message, reviewing=True)
-                    if refusal:
-                        review_entry.update(outcome="refused", refusal=refusal)
-                elif not reviewing and st.get("kind") != "scout":
-                    st["result"] = None if refusal else parse_result(message)
-                try:
-                    final_path = path or rollout_path(account["home"], thread)
-                    if final_path is not None:
-                        rollout_limits(final_path, record_limits, usage_offset)
-                    if telemetry is not None:
-                        telemetry.add_usage(account["name"], thread, usage_before,
-                                            final_path, usage_offset,
-                                            st.get("weekly_used_percent", 0) - weekly_started)
-                except Exception as exc:
-                    telemetry_error(st, exc)
+            with monitor_process(st, account, args, errors) as proc:
+                st["codex_pid"] = proc.pid
                 save(st)
-    if reviewing and not review_fallback and not thread and code == 2:
+                result = monitor_event_stream(st, cfg, account, proc, log, stream, usage, control, stopped,
+                                              on_limit, record_limits, reviewing, wrapup, attempt_started, active_started)
+        finally:
+            if proc is not None:
+                control.elapsed = monitor_time_usage(control.elapsed, control.seconds, control.minutes,
+                                                     active_started, time.monotonic()).elapsed
+                finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
+                               record_limits, telemetry, usage_before, weekly_started)
+    if reviewing and not review_fallback and not stream.thread and stream.exit_code == 2:
         with (d / "stderr.log").open("rb") as errors:
             errors.seek(error_start)
             error = errors.read().decode("utf-8", errors="replace")
         if all(part in error for part in ("cannot be used with", "--base", "PROMPT")):
             return monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback=True,
                            control=control, quota_snapshot=quota_snapshot)
-    return ("completed" if code == 0 and not failed else "failed"), None
+    return result
 
 
 def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
