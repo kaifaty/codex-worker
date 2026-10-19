@@ -3,6 +3,7 @@ import ast
 import builtins
 from pathlib import Path
 import symtable
+import sys
 import tempfile
 import unittest
 
@@ -88,6 +89,8 @@ class _Reads(ast.NodeVisitor):
         self.annotations = {}
         self.class_name = None
         self.class_scopes = {}
+        self.class_bound = {}
+        self.class_fallbacks = {}
         self.comprehension_locals = []
         self.class_comprehension_reads = {}
         self._index(table)
@@ -97,6 +100,14 @@ class _Reads(ast.NodeVisitor):
         children = table.get_children()
         self.children[id(table)] = children
         self.positions[id(table)] = {}
+        if table.get_type() == "class":
+            bound = self.class_bound[id(table)] = {"__module__", "__qualname__"}
+            if sys.version_info >= (3, 13):
+                bound.add("__firstlineno__")
+            if (any(symbol.is_annotated() for symbol in table.get_symbols())
+                    and not any(child.get_type() == "annotation" and child.get_name() == "__annotate__"
+                                for child in children)):
+                bound.add("__annotations__")
         for child in children:
             self._index(child)
 
@@ -133,14 +144,62 @@ class _Reads(ast.NodeVisitor):
         return name
 
     def visit_Name(self, node):
+        name = self._name(node.id)
         if isinstance(node.ctx, ast.Load):
-            name = self._name(node.id)
             self.positions[id(self.table)].setdefault(name, node.lineno)
             if self.comprehension_locals and self.table is self.comprehension_locals[-1][0]:
                 local = any(name in names for table, names in self.comprehension_locals
                             if table is self.table)
                 if not local:
                     self.class_comprehension_reads.setdefault(id(self.table), {}).setdefault(name, node.lineno)
+            elif (self.table.get_type() == "class" and name in self.table.get_identifiers()
+                  and self.table.lookup(name).is_local()
+                  and name not in self.class_bound[id(self.table)]):
+                # Unbound class locals use globals (LOAD_NAME).
+                self.class_fallbacks.setdefault(id(self.table), {}).setdefault(name, node.lineno)
+        else:
+            self._class_bind(node.id, not isinstance(node.ctx, ast.Del))
+
+    def _class_bind(self, name, bound=True):
+        if (name and self.table.get_type() == "class"
+                and not any(table is self.table for table, _ in self.comprehension_locals)):
+            names = self.class_bound[id(self.table)]
+            if bound:
+                names.add(self._name(name))
+            else:
+                names.discard(self._name(name))
+
+    def visit_Assign(self, node):
+        self._visit_in(None, [node.value] + node.targets)
+
+    def visit_NamedExpr(self, node):
+        self._visit_in(None, [node.value, node.target])
+
+    def visit_AugAssign(self, node):
+        if isinstance(node.target, ast.Name):
+            self.visit(ast.copy_location(ast.Name(id=node.target.id, ctx=ast.Load()), node.target))
+        else:
+            self.visit(node.target)
+        self.visit(node.value)
+        if isinstance(node.target, ast.Name):
+            self.visit(node.target)
+
+    def visit_For(self, node):
+        self._visit_in(None, [node.iter, node.target] + node.body + node.orelse)
+
+    visit_AsyncFor = visit_For
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            self._class_bind(_import_name(node, alias))
+
+    visit_ImportFrom = visit_Import
+
+    def visit_ExceptHandler(self, node):
+        self._visit_in(None, [node.type])
+        self._class_bind(node.name)
+        self._visit_in(None, node.body)
+        self._class_bind(node.name, False)
 
     def visit_FunctionDef(self, node):
         args = node.args
@@ -152,6 +211,7 @@ class _Reads(ast.NodeVisitor):
                         args.kwarg.annotation if args.kwarg else None, node.returns]
         self._annotation(node.lineno, annotations)
         self._visit_in(self._child("function", node.name, node.lineno), node.body)
+        self._class_bind(node.name)
 
     visit_AsyncFunctionDef = visit_FunctionDef
 
@@ -167,12 +227,14 @@ class _Reads(ast.NodeVisitor):
             self.class_scopes[(node.lineno, node.col_offset)] = id(table)
         self._visit_in(table, node.body)
         self.class_name = previous_class
+        self._class_bind(node.name)
 
     def visit_AnnAssign(self, node):
-        self.visit(node.target)
-        self._annotation(node.lineno, [node.annotation], shared=True)
         if node.value is not None:
             self.visit(node.value)
+        if node.value is not None or not isinstance(node.target, ast.Name):
+            self.visit(node.target)
+        self._annotation(node.lineno, [node.annotation], shared=True)
 
     def visit_Lambda(self, node):
         for value in node.args.defaults + node.args.kw_defaults:
@@ -344,6 +406,8 @@ def check_layout(scripts):
         # a separate prohibition below; entrypoint path constants may use it.
         available = set(bindings.names) | set(dir(builtins)) | {"__file__"}
         class_globals = reads.class_comprehension_globals(source)
+        for scope, positions in reads.class_fallbacks.items():
+            class_globals.setdefault(scope, {}).update(positions)
         for scope in reads.tables:
             for symbol in scope.get_symbols():
                 class_line = class_globals.get(id(scope), {}).get(symbol.get_name())
@@ -508,6 +572,66 @@ class ModuleLayoutTests(unittest.TestCase):
         ):
             with self.subTest(source=source):
                 self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+
+    def test_class_local_reads_before_binding_fall_back_to_globals(self):
+        for source, line, name in (
+            ("class Example:\n    value = value\n", 2, "value"),
+            ("class Example:\n    first = value\n    value = 1\n", 2, "value"),
+            ("class Example:\n    value: int\n    first = value\n", 3, "value"),
+            ("class Example:\n    value: int = value\n", 2, "value"),
+            ("class Example:\n    value += 1\n", 2, "value"),
+            ("class Example:\n    first = (value := value)\n", 2, "value"),
+            ("class Example:\n    for value in value:\n        pass\n", 2, "value"),
+            ("class Example:\n    value = 1\n    first = value\n    del value\n    second = value\n", 5, "value"),
+            ("class Example:\n    values = [value for value in ()]\n    first = value\n    value = 1\n", 3, "value"),
+            ("class Example:\n    __value = __value\n", 2, "_Example__value"),
+            ("class Example:\n    __annotations__ = __annotations__\n", 2, "__annotations__"),
+            ("def outer():\n    value = 1\n    class Example:\n        value = value\nouter()\n", 4, "value"),
+        ):
+            with self.subTest(source=source):
+                with self.assertRaises(NameError):
+                    exec(source, {})
+                findings = self.check_tree({"codex_worker/a.py": source})
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn("a.py:%s: undefined-global: %s" % (line, name), findings[0])
+
+    def test_bound_class_names_and_enclosing_captures_pass(self):
+        for source in (
+            "class Example:\n    value = 1\n    first = value\n",
+            "value = 1\nclass Example:\n    value = value\n",
+            "class Example:\n    len = len\n",
+            "class Example:\n    __module__ = __module__\n    __qualname__ = __qualname__\n",
+            "from __future__ import annotations\nclass Example:\n    value: int\n    __annotations__ = __annotations__\n",
+            "class Example:\n    value: int = 1\n    first = value\n",
+            "class Example:\n    first = (value := 1)\n    second = value\n",
+            "class Example:\n    value = 1\n    value += 1\n    first = value\n",
+            "class Example:\n    def value():\n        pass\n    first = value\n",
+            "class Example:\n    class value:\n        pass\n    first = value\n",
+            "class Example:\n    import math as value\n    first = value\n",
+            "class Example:\n    from math import pi as value\n    first = value\n",
+            "class Example:\n    for value in (1,):\n        first = value\n",
+            "class Example:\n    try:\n        raise ValueError()\n    except ValueError as value:\n        first = value\n",
+            "def outer():\n    value = 1\n    class Example:\n        first = value\n    return Example\nouter()\n",
+        ):
+            with self.subTest(source=source):
+                exec(source, {})
+                self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+
+    def test_version_specific_class_namespace_setup(self):
+        source = "class Example:\n    value: int\n    __annotations__ = __annotations__\n"
+        if sys.version_info < (3, 14):
+            exec(source, {})
+            self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+        else:
+            with self.assertRaises(NameError):
+                exec(source, {})
+            findings = self.check_tree({"codex_worker/a.py": source})
+            self.assertEqual(len(findings), 1, findings)
+            self.assertIn("a.py:3: undefined-global: __annotations__", findings[0])
+        if sys.version_info >= (3, 13):
+            source = "class Example:\n    __firstlineno__ = __firstlineno__\n"
+            exec(source, {})
+            self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
 
     def test_private_class_global_has_its_read_line(self):
         findings = self.check_tree({
