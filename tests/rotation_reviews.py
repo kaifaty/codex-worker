@@ -464,6 +464,43 @@ class ReviewFixTests(RotationTestCase):
         self.assertNotIn("Результат A", output)
         self.assertIn("== commits on ", output)
 
+    def test_unstarted_review_does_not_reuse_previous_review_account(self):
+        self.configure(wait_for_reset=False)
+        self.configure_notify(events=["turn_finished"])
+        self.start("review-unstarted-account")
+        self.wait("review-unstarted-account")
+        self.notification("review-unstarted-account", "turn_finished")
+        self.account(self.home, "A", self.reset, used=99)
+        self.account(self.other, "B", self.reset + 3600, runs=[{
+            "mode": "complete", "reply": self.review_result(False)}])
+
+        self.cli("review", "review-unstarted-account")
+        self.wait("review-unstarted-account")
+        self.until(lambda: len(self.notifications("review-unstarted-account")) == 2)
+        self.assertIn("account second", self.cli("status", "review-unstarted-account"))
+        self.assertEqual(self.notifications("review-unstarted-account")[-1]["account"], "second")
+        self.assertEqual(len(self.review_invocations()), 1)
+        executions = len(self.invocations())
+        self.account(self.other, "B", self.reset + 3600, used=99)
+
+        self.cli("review", "review-unstarted-account")
+        output = self.wait("review-unstarted-account")
+        self.until(lambda: len(self.notifications("review-unstarted-account")) == 3)
+        self.assertIn("== all accounts at limit; earliest reset", output)
+        self.assertNotIn("== review by", output)
+        self.assertEqual(len(self.invocations()), executions)
+        finished = self.notifications("review-unstarted-account")[-1]
+        self.assertEqual(finished["outcome"], "exhausted")
+        with self.subTest(observable="status"):
+            self.assertIn("account ?", self.cli("status", "review-unstarted-account"))
+        with self.subTest(observable="turn_finished"):
+            self.assertIsNone(finished["account"])
+        with self.subTest(observable="telemetry"):
+            rows = [row for row in self.telemetry_journal()
+                    if row["slug"] == "review-unstarted-account" and row["phase"] == "turn"]
+            self.assertEqual(len(rows), 3)
+            self.assertIsNone(rows[-1]["account"])
+
     def test_start_review_runs_in_same_supervisor_and_say_resumes_working_thread(self):
         self.configure()
         self.account(self.home, "A", self.reset, runs=[

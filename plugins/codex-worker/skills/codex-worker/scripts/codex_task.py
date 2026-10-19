@@ -313,6 +313,8 @@ def reap_notifications():
 
 def current_turn_account(st):
     if st.get("kind") == "review":
+        if "review_account" in st and st["review_account"] is None:
+            return None
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         return st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
     return st["account"]
@@ -855,10 +857,9 @@ STATE_FIELDS = {
     "max_turn_minutes": StateField("turn"),  # say replaces this launch parameter, not spawn.
     "review_angles": StateField("turn"),  # say/review replace this launch parameter, not spawn.
     "publish": StateField("turn"),  # Last work receipt survives standalone review, like result.
-    # Preserve both known spawn lifetimes: https://github.com/kaifaty/codex-worker/issues/49
-    # Intentionally survives spawn until the next monitor.
+    # _run_turn clears the previous attempt before account selection can pause.
     "exec_event_start": StateField("attempt"),
-    # Intentionally survives spawn until the next review account selection (issue #49).
+    # _run_turn marks the review account unselected (None) before probing accounts.
     "review_account": StateField("cursor"),
 }
 
@@ -2486,7 +2487,10 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
 def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
     st.pop("refusal", None)
+    st.pop("exec_event_start", None)
     reviewing = st.get("kind") == "review"
+    if reviewing:
+        st["review_account"] = None
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
     control = TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
@@ -3864,7 +3868,7 @@ def describe(st, detail):
     scouting = st.get("kind") == "scout"
     account, thread = st["account"], st.get("thread", "")
     if reviewing:
-        account, thread = st.get("review_account", "?"), ""
+        account, thread = st.get("review_account") or "?", ""
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         if reviews:
             account, thread = reviews[-1]["account"], reviews[-1]["thread"]

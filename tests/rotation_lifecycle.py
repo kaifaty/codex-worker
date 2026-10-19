@@ -908,6 +908,36 @@ worker.reap_notifications = reap
             self.assertTrue((self.other / name).is_symlink(), name)
             self.assertEqual((self.other / name).resolve(), (self.home / name).resolve())
 
+    def test_say_without_an_exec_does_not_repeat_the_previous_failure(self):
+        for wait_for_reset in (False, True):
+            with self.subTest(wait_for_reset=wait_for_reset):
+                self.configure(language="en", wait_for_reset=wait_for_reset)
+                self.account(self.home, "A", self.reset, runs=[{"mode": "failed"}])
+                self.account(self.other, "B", self.reset + 3600)
+                slug = "failed-before-say-" + str(wait_for_reset).lower()
+                before = len(self.invocations())
+                self.start(slug)
+                failed = self.cli("wait", slug, "--timeout", "10")
+                self.assertNotIn("still running", failed)
+                self.assertIn('"type": "turn.failed"', failed)
+                self.assertIn("fixture task failed", failed)
+                self.assertEqual(len(self.invocations()), before + 1)
+
+                self.exhaust_accounts((self.home, "A", self.reset),
+                                      (self.other, "B", self.reset + 3600))
+                self.cli("say", slug, "Try again when an account is available")
+                try:
+                    output = self.wait(slug)
+                    expected = "== sleeping until " if wait_for_reset else "== all accounts at limit"
+                    self.assertIn(expected, output)
+                    self.assertIn("(Codex did not run this turn)", output)
+                    self.assertEqual(len(self.invocations()), before + 1)
+                    self.assertNotIn("== errors:", output)
+                    self.assertNotIn("fixture task failed", output)
+                finally:
+                    if wait_for_reset:
+                        self.cli("stop", slug)
+
     def test_pause_after_a_turn_does_not_repeat_the_old_result(self):
         self.configure(wait_for_reset=False)
         self.start("pause-later")
