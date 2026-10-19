@@ -3217,7 +3217,7 @@ def ci_json(st, args, stopped, timeout=60):
 
 
 def ci_failure_excerpt(text, limit):
-    """Keep complete failure blocks and test summaries, or the old unrecognized-log tail."""
+    """Prefer complete failure blocks and test summaries, or the old unrecognized-log tail."""
     lines = text.splitlines()
     # gh prefixes each original line with job, step and timestamp. Match the payload,
     # but keep the original lines (including prefixes) for wait and the repair prompt.
@@ -3276,15 +3276,20 @@ def ci_failure_excerpt(text, limit):
             selected.update(range(start, end))
         return [lines[index] for index in sorted(selected)]
 
-    # Reserve the omission notice and summaries before accepting the first whole
-    # blocks. Never cut through a traceback just to fill the available space.
+    # Reserve the omission notice and summaries before accepting the first whole blocks.
     selected = set(sorted(summaries)[:max(0, limit - 1)])
     available = limit - len(selected) - 1
+    kept_block = False
     for start, end in blocks:
         if end - start > available:
             break
         selected.update(range(start, end))
         available -= end - start
+        kept_block = True
+    if blocks and not kept_block:
+        # An oversized first block must still expose the beginning of the failure.
+        start, end = blocks[0]
+        selected.update(range(start, min(end, start + available)))
     excerpt = [lines[index] for index in sorted(selected)]
     excerpt.append(f"… {total - len(selected)} more failure lines omitted")
     return excerpt

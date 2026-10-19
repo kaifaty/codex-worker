@@ -1449,10 +1449,39 @@ class WorkspaceTests(RotationTestCase):
                 if kind == "adjacent":
                     self.assertEqual(retained, adjacent_lines[:144])
                 else:
-                    self.assertEqual(retained, [])
+                    self.assertEqual(retained, traceback_lines[:147])
                 self.assertEqual(selected[-1], "… %d more failure lines omitted" %
                                  (len(failure_lines) - len(retained)))
                 self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_oversized_first_traceback_keeps_its_start_and_summaries(self):
+        for unittest_header in (False, True):
+            header = (["=" * 70, "FAIL: test_example (tests.ExampleTests)", "-" * 70]
+                      if unittest_header else [])
+            failure_lines = (header + ["Traceback (most recent call last):"] +
+                             ['  File "example.py", line %d, in example' % index
+                              for index in range(298 - len(header))] +
+                             ["AssertionError: final failure"])
+            self.assertEqual(len(failure_lines), 300)
+            for prefix in ("", "tests\tRun tests\t2026-10-19T12:00:00.0000000Z "):
+                with self.subTest(unittest_header=unittest_header, prefix=bool(prefix)):
+                    prefixed_lines = [prefix + line for line in failure_lines]
+                    summary = [prefix + "Ran 1 tests in 0.123s", prefix + "FAILED (failures=1)"]
+                    log = "\n".join(prefixed_lines + [prefix] + summary)
+                    st, ci, calls, waits = self.run_ci_wait_fixture(
+                        [[self.ci_check("fail")]], jobs={"123": log})
+                    tail = ci["checks"][0]["tail"]
+                    selected = tail.splitlines()
+                    self.assertEqual(selected, prefixed_lines[:147] + summary +
+                                     ["… 153 more failure lines omitted"])
+                    self.assertEqual(len(selected), 150)
+                    self.assertIn(prefix + "Traceback (most recent call last):", selected)
+                    if unittest_header:
+                        self.assertIn(prefix + "FAIL: test_example (tests.ExampleTests)", selected)
+                    worker = self.worker()
+                    self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+                    self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                    self.assertEqual(waits, [])
 
     def test_ci_failure_logs_adjacent_real_tracebacks_keep_complete_first_blocks(self):
         log, blocks = self.ci_adjacent_tracebacks_fixture()
