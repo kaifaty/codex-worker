@@ -1,6 +1,5 @@
 """Shared fixtures and helpers for the rotation CLI tests."""
 import datetime
-import importlib.util
 import json
 import os
 import shutil
@@ -13,11 +12,10 @@ import time
 import unittest
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from functools import lru_cache
 from pathlib import Path
-from unittest import mock
 
 from process_cleanup import cleanup_processes
+from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,18 +25,10 @@ PYTHON = sys.executable
 IMPOSSIBLE_PID = 2 ** 31 - 1
 
 
-@lru_cache(maxsize=1)
-def worker_code():
-    # Reuse compilation, not module globals: subtests need independent mutable
-    # queues and every fixture needs its own environment-derived paths/defaults.
-    return compile(SCRIPT.read_bytes(), str(SCRIPT), "exec", dont_inherit=True)
-
-
 # The fake has the same process boundary as Codex: the supervisor must discover
 # the quota in a rollout, interrupt the process group, and create a fresh thread.
 FAKE_CODEX = r'''import datetime
 import fcntl
-import importlib.util
 import json
 import os
 import signal
@@ -50,10 +40,8 @@ from pathlib import Path
 
 clock = time
 if os.environ.get("CODEX_TASK_CLOCK_FILE"):
-    spec = importlib.util.spec_from_file_location("fake_clock_worker", os.environ["CODEX_FAKE_WORKER_SCRIPT"])
-    worker = importlib.util.module_from_spec(spec)
-    sys.dont_write_bytecode = True
-    spec.loader.exec_module(worker)
+''' + "\n".join("    " + line for line in WORKER_BOOTSTRAP.splitlines()) + r'''
+    worker = load_worker(name="fake_clock_worker", script=os.environ["CODEX_FAKE_WORKER_SCRIPT"])
     clock = worker.CLOCK
 
 home = Path(os.environ["CODEX_HOME"])
@@ -791,11 +779,7 @@ class RotationTestCase(unittest.TestCase):
         for key in ("CODEX_TASK_WAIT_POLL_SECONDS", "CODEX_TASK_RATE_POLL_SECONDS",
                     "CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "CODEX_TASK_CI_POLL_SECONDS"):
             env.pop(key, None)
-        with mock.patch.dict(os.environ, env, clear=True), mock.patch.object(sys, "dont_write_bytecode", True):
-            spec = importlib.util.spec_from_file_location("rotation_worker", str(SCRIPT))
-            worker = importlib.util.module_from_spec(spec)
-            exec(worker_code(), worker.__dict__)
-        return worker
+        return load_worker(env, clear=True)
 
     def start(self, slug, *args):
         return self.cli("start", slug, "--brief", str(self.brief), "--repo", str(self.repo), *args)

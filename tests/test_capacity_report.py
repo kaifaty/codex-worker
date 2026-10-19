@@ -1,9 +1,10 @@
 """Count capacity retries without duplicating final supervisor totals."""
-import importlib.util
 import json
 from pathlib import Path
 import tempfile
 import unittest
+
+from worker_loader import load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
@@ -16,9 +17,7 @@ class CapacityReportTests(unittest.TestCase):
         self.addCleanup(directory.cleanup)
         self.journal = Path(directory.name) / "journal.jsonl"
         self.now = 1_800_000_000
-        spec = importlib.util.spec_from_file_location("capacity_report", str(SCRIPT))
-        self.reporter = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(self.reporter)
+        self.reporter = load_worker(name="capacity_report", script=SCRIPT)
 
     def report(self, stages):
         rows = [dict(stage, v=1, at=self.now - 100 + index, repo="repo",

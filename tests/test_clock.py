@@ -1,5 +1,4 @@
 """Exercise real and shared file clocks without starting the Codex CLI."""
-import importlib.util
 import json
 import os
 from pathlib import Path
@@ -9,19 +8,17 @@ import sys
 import tempfile
 import time
 import unittest
-from unittest import mock
+
+from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
           / "plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
-CHILD = """
-import importlib.util
+CHILD = WORKER_BOOTSTRAP + """
 import json
 import sys
 
-spec = importlib.util.spec_from_file_location("child_clock_worker", sys.argv[1])
-worker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(worker)
+worker = load_worker(name="child_clock_worker", script=sys.argv[1])
 if len(sys.argv) > 2:
     print("ready", flush=True)
     if sys.stdin.readline() != "go\\n":
@@ -43,10 +40,7 @@ class ClockTests(unittest.TestCase):
         self.clock_file.write_text(json.dumps(self.initial), encoding="utf-8")
         environment = dict(os.environ, CODEX_TASK_HOME=str(self.home))
         environment.pop("CODEX_TASK_CLOCK_FILE", None)
-        with mock.patch.dict(os.environ, environment, clear=True):
-            spec = importlib.util.spec_from_file_location("clock_worker", str(SCRIPT))
-            self.worker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(self.worker)
+        self.worker = load_worker(environment, name="clock_worker", clear=True)
 
     def test_real_clock_uses_module_time(self):
         clock = self.worker.Clock()

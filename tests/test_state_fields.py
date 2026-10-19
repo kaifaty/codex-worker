@@ -1,13 +1,14 @@
 """Keep the flat task-state registry complete and its lifecycle behavior stable."""
 import ast
 import copy
-import importlib.util
 import json
 import os
 from pathlib import Path
 import tempfile
 import unittest
 from unittest import mock
+
+from worker_loader import load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
@@ -67,10 +68,7 @@ class StateFieldRegistryTests(unittest.TestCase):
         home = tempfile.TemporaryDirectory(prefix="codex-state-fields-")
         self.addCleanup(home.cleanup)
         self.home = Path(home.name)
-        with mock.patch.dict(os.environ, {"CODEX_TASK_HOME": home.name}):
-            spec = importlib.util.spec_from_file_location("state_fields_worker", str(SCRIPT))
-            self.worker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(self.worker)
+        self.worker = load_worker({"CODEX_TASK_HOME": home.name}, name="state_fields_worker")
         self.directory = self.worker.TASKS / "registry-test"
         self.directory.mkdir(parents=True)
 

@@ -1,16 +1,14 @@
 """Keep command synopses and flag documentation aligned with the option registry."""
-import importlib.util
-import os
 from pathlib import Path
 import re
 import tempfile
 import unittest
-from unittest import mock
+
+from worker_loader import load_worker
 
 
 SKILL = (Path(__file__).resolve().parents[1]
          / "plugins/codex-worker/skills/codex-worker")
-SCRIPT = SKILL / "scripts/codex_task.py"
 COMMANDS = ("start", "say", "review")
 
 
@@ -18,10 +16,7 @@ class OptionRegistryTests(unittest.TestCase):
     def setUp(self):
         home = tempfile.TemporaryDirectory(prefix="codex-options-")
         self.addCleanup(home.cleanup)
-        with mock.patch.dict(os.environ, {"CODEX_TASK_HOME": home.name}):
-            spec = importlib.util.spec_from_file_location("option_worker", str(SCRIPT))
-            self.worker = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(self.worker)
+        self.worker = load_worker({"CODEX_TASK_HOME": home.name}, name="option_worker")
 
     def test_docstring_synopses_match_option_registry(self):
         for command in COMMANDS:
