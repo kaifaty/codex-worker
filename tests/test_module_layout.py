@@ -90,15 +90,21 @@ class _Reads(ast.NodeVisitor):
         self.class_scopes = {}
         self.comprehension_locals = []
         self.class_comprehension_reads = {}
+        self.parents = {}
+        self.module_imports = {}
+        self.attributes = []
+        self.attribute_comprehensions = []
         self._index(table)
 
-    def _index(self, table):
+    def _index(self, table, parent=None):
         self.tables.append(table)
+        self.parents[id(table)] = parent
+        self.module_imports[id(table)] = {}
         children = table.get_children()
         self.children[id(table)] = children
         self.positions[id(table)] = {}
         for child in children:
-            self._index(child)
+            self._index(child, table)
 
     def _child(self, kind, name, line):
         for child in self.children[id(self.table)]:
@@ -141,6 +147,55 @@ class _Reads(ast.NodeVisitor):
                             if table is self.table)
                 if not local:
                     self.class_comprehension_reads.setdefault(id(self.table), {}).setdefault(name, node.lineno)
+
+    def visit_Import(self, node):
+        for alias in node.names:
+            if alias.name.split(".")[0] in {"codex_task", "codex_worker"}:
+                name = alias.asname or alias.name.split(".")[0]
+                target = alias.name if alias.asname else alias.name.split(".")[0]
+                self.module_imports[id(self.table)][self._name(name)] = target
+
+    def visit_ImportFrom(self, node):
+        if ((node.level == 1 and node.module is None)
+                or (not node.level and node.module == "codex_worker")):
+            for alias in node.names:
+                name = self._name(alias.asname or alias.name)
+                self.module_imports[id(self.table)][name] = "codex_worker." + alias.name
+
+    def visit_Attribute(self, node):
+        if isinstance(node.value, ast.Name):
+            name = self._name(node.value.id)
+            local = any(name in targets for table, targets in self.attribute_comprehensions
+                        if table is self.table)
+            skip_class = (self.table.get_type() == "class"
+                          and any(table is self.table for table, targets
+                                  in self.attribute_comprehensions))
+            if not local:
+                self.attributes.append((self.table, name, self._name(node.attr), node, skip_class))
+        self.generic_visit(node)
+
+    def imported_module(self, table, name, skip_class=False):
+        """Resolve an alias using lexical bindings rather than its spelling."""
+        if skip_class:
+            table = self.parents[id(table)]
+            while table is not None and table.get_type() == "class":
+                table = self.parents[id(table)]
+        if table is None:
+            return None
+        try:
+            symbol = table.lookup(name)
+        except KeyError:
+            return None
+        if table.get_type() == "module" or symbol.is_global():
+            return self.module_imports[id(self.tables[0])].get(name)
+        if symbol.is_imported() or symbol.is_local():
+            return self.module_imports[id(table)].get(name)
+        if symbol.is_free():
+            parent = self.parents[id(table)]
+            while parent is not None and parent.get_type() == "class":
+                parent = self.parents[id(parent)]
+            return self.imported_module(parent, name) if parent is not None else None
+        return None
 
     def visit_FunctionDef(self, node):
         args = node.args
@@ -188,13 +243,17 @@ class _Reads(ast.NodeVisitor):
             inner += [generator.iter, generator.target] + generator.ifs
         table = self._child("function", name, node.lineno)
         inlined_class = table is None and self.table.get_type() == "class"
-        if inlined_class:
+        if table is None:
             targets = {self._name(target.id) for generator in node.generators
                        for target in ast.walk(generator.target) if isinstance(target, ast.Name)}
+            self.attribute_comprehensions.append((self.table, targets))
+        if inlined_class:
             self.comprehension_locals.append((self.table, targets))
         self._visit_in(table, inner + values)
         if inlined_class:
             self.comprehension_locals.pop()
+        if table is None:
+            self.attribute_comprehensions.pop()
 
     def visit_ListComp(self, node):
         self._comprehension(node, "listcomp", [node.elt])
@@ -259,6 +318,7 @@ def check_layout(scripts):
     findings = []
     definitions = {}
     edges = {module: [] for module in modules}
+    analyses = {}
 
     def report(path, line, rule, detail):
         findings.append("%s:%s: %s: %s" % (path, line, rule, detail))
@@ -271,6 +331,10 @@ def check_layout(scripts):
         bindings.visit(tree)
         reads = _Reads(table)
         reads.visit(tree)
+        analyses[module] = (source, tree, bindings, reads)
+
+    for module, path in modules.items():
+        source, tree, bindings, reads = analyses[module]
         syntax_reads = {node.id: node.lineno for node in ast.walk(tree)
                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
         # __file__ is injected by Python's module loader. Package modules have
@@ -294,6 +358,13 @@ def check_layout(scripts):
                        % (name, other_path, other_line))
             else:
                 definitions[name] = (path, line)
+        for scope, name, attribute, node, skip_class in reads.attributes:
+            target = reads.imported_module(scope, name, skip_class)
+            if target not in analyses:
+                continue  # Unknown own modules have an import diagnostic below.
+            target_names = analyses[target][2].names
+            if not isinstance(node.ctx, ast.Load) or attribute not in target_names:
+                report(path, node.lineno, "module-attribute", node.value.id + "." + node.attr)
         for node in ast.walk(tree):
             if isinstance(node, ast.Global):
                 report(path, node.lineno, "no-global", ", ".join(node.names))
@@ -376,6 +447,18 @@ class ModuleLayoutTests(unittest.TestCase):
              "b.py:1: acyclic-imports"),
             ({"codex_worker/a.py": "path = __file__\n"},
              "a.py:1: no-package-file"),
+            ({"codex_worker/a.py": "from . import b\nvalue = b.missing\n",
+              "codex_worker/b.py": "name = 1\n"},
+             "a.py:2: module-attribute: b.missing"),
+            ({"codex_worker/a.py": "from . import b\nb.name = 1\n",
+              "codex_worker/b.py": "name = 1\n"},
+             "a.py:2: module-attribute: b.name"),
+            ({"codex_worker/a.py": "from . import b\ndel b.name\n",
+              "codex_worker/b.py": "name = 1\n"},
+             "a.py:2: module-attribute: b.name"),
+            ({"codex_worker/a.py": "from . import b\nb.name += 1\n",
+              "codex_worker/b.py": "name = 1\n"},
+             "a.py:2: module-attribute: b.name"),
         )
         for files, expected in mutants:
             with self.subTest(rule=expected):
@@ -472,6 +555,67 @@ class ModuleLayoutTests(unittest.TestCase):
             "codex_worker/b.py": "name = 1\n",
         })
         self.assertEqual(findings, [])
+
+    def test_module_attribute_import_forms_and_nested_reads(self):
+        for statement, alias in (
+            ("from . import b", "b"),
+            ("from . import b as other", "other"),
+            ("from codex_worker import b", "b"),
+            ("from codex_worker import b as other", "other"),
+            ("import codex_worker.b as other", "other"),
+        ):
+            with self.subTest(statement=statement):
+                findings = self.check_tree({
+                    "codex_worker/a.py": statement + "\ndef outer():\n    def inner():\n        return " + alias + ".missing\n    return inner\n",
+                    "codex_worker/b.py": "name = 1\n",
+                })
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn("a.py:4: module-attribute: " + alias + ".missing", findings[0])
+
+    def test_module_attributes_and_content_mutation_pass(self):
+        self.assertEqual(self.check_tree({
+            "codex_worker/a.py": ("from . import b\n"
+                                  "value = b.name\n"
+                                  "b.holder['key'] = 1\n"
+                                  "del b.holder['key']\n"
+                                  "copied_import = b.math\n"
+                                  "def outer():\n"
+                                  "    from . import b as other\n"
+                                  "    def inner():\n"
+                                  "        return other.name\n"
+                                  "    return inner\n"),
+            "codex_worker/b.py": "import math\nname = 1\nholder = {}\n",
+        }), [])
+
+    def test_unrelated_bindings_do_not_have_module_attributes(self):
+        for source in (
+            "from . import b\ndef function(b):\n    return b.missing\n",
+            "from . import b\ndef function():\n    b = object()\n    return b.missing\n",
+            "from . import b\nclass Example:\n    b = object()\n    value = b.missing\n",
+            "from . import b\nvalues = [b.missing for b in ()]\n",
+            "from . import b\ndef outer(b):\n    def inner():\n        return b.missing\n    return inner\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.check_tree({
+                    "codex_worker/a.py": source,
+                    "codex_worker/b.py": "name = 1\n",
+                }), [])
+
+    def test_class_module_attributes_skip_bindings_and_mangle_names(self):
+        source = ("from . import b\n"
+                  "class Example:\n"
+                  "    b = object()\n"
+                  "    values = [b.__private for item in (0,)]\n")
+        self.assertEqual(self.check_tree({
+            "codex_worker/a.py": source,
+            "codex_worker/b.py": "_Example__private = 1\n",
+        }), [])
+        findings = self.check_tree({
+            "codex_worker/a.py": source,
+            "codex_worker/b.py": "__private = 1\n",
+        })
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("a.py:4: module-attribute: b.__private", findings[0])
 
 
 if __name__ == "__main__":
