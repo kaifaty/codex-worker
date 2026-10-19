@@ -3216,6 +3216,73 @@ def ci_json(st, args, stopped, timeout=60):
     return json.loads(response.stdout)
 
 
+def ci_failure_excerpt(text, limit):
+    """Keep complete failure blocks and test summaries, or the old unrecognized-log tail."""
+    lines = text.splitlines()
+    # gh prefixes each original line with job, step and timestamp. Match the payload,
+    # but keep the original lines (including prefixes) for wait and the repair prompt.
+    prefix = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d{2}-\d{2}T\S+ ?")
+    payloads = [prefix.sub("", line) for line in lines]
+    failure = re.compile(r"^\s*(?:FAIL:|ERROR:|Traceback \(most recent call last\)|FAILED\b|E {3})"
+                         r"|\bAssertionError\b|\bError:|##\[error\]")
+    summary = re.compile(r"^\s*(?:Ran \d+ tests?\b|FAILED(?:\s*\(|\s*$))"
+                         r"|^\s*(?:=+\s*)?(?:\d+ \w+,\s*)*\d+ failed\b")
+    progress = re.compile(r"\.\.\.\s+(?:ok|FAIL|ERROR|skipped\b.*)$"
+                          r"|\bPASSED(?:\s+\[\s*\d+%\])?\s*$")
+    new_block = re.compile(r"^\s*(?:FAIL:|ERROR:|FAILED\b)|\bError:|##\[error\]")
+    summaries = {index for index, line in enumerate(payloads) if summary.search(line)}
+    matches = [index for index, line in enumerate(payloads) if failure.search(line)]
+    if not matches:
+        return lines[-limit:]
+
+    blocks = []
+    for index in matches:
+        if index in summaries or (blocks and index < blocks[-1][1]):
+            continue
+        start = index
+        # A nearby separator/source line gives context without pulling successful tests
+        # or a preceding failure block into this one.
+        for previous in range(index - 1, max(-1, index - 3), -1):
+            if blocks and previous < blocks[-1][1]:
+                break
+            line = payloads[previous].strip()
+            if (not line or previous in summaries or failure.search(payloads[previous])
+                    or progress.search(line)):
+                break
+            start = previous
+            if re.fullmatch(r"[-=_]{3,}", line):
+                break
+        end = index + 1
+        while end < len(lines):
+            line = payloads[end].strip()
+            if (not line or end in summaries or progress.search(line) or new_block.search(line)
+                    or line.startswith(("===", "___"))
+                    or ("AssertionError" in payloads[index] and "AssertionError" in line)):
+                break
+            end += 1
+        blocks.append((start, end))
+
+    total = sum(end - start for start, end in blocks) + len(summaries)
+    if total <= limit:
+        selected = set(summaries)
+        for start, end in blocks:
+            selected.update(range(start, end))
+        return [lines[index] for index in sorted(selected)]
+
+    # Reserve the omission notice and summaries before accepting the first whole
+    # blocks. Never cut through a traceback just to fill the available space.
+    selected = set(sorted(summaries)[:max(0, limit - 1)])
+    available = limit - len(selected) - 1
+    for start, end in blocks:
+        if end - start > available:
+            break
+        selected.update(range(start, end))
+        available -= end - start
+    excerpt = [lines[index] for index in sorted(selected)]
+    excerpt.append(f"… {total - len(selected)} more failure lines omitted")
+    return excerpt
+
+
 def ci_failure_logs(st, gh, stopped, deadline):
     remaining = 400
     for check in st["ci"]["checks"]:
@@ -3241,7 +3308,7 @@ def ci_failure_logs(st, gh, stopped, deadline):
                     text = "Failed job log unavailable"
         except (OSError, subprocess.TimeoutExpired) as exc:
             text = "Failed job log unavailable: " + str(exc)
-        lines = text.splitlines()[-min(150, remaining):]
+        lines = ci_failure_excerpt(text, min(150, remaining))
         check["tail"] = "\n".join(lines)
         remaining -= len(lines)
 

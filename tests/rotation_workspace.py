@@ -40,6 +40,29 @@ class WorkspaceTests(RotationTestCase):
     def ci_polls(self):
         return [event for event in self.gh_invocations() if event["argv"][:2] == ["pr", "checks"]]
 
+    def ci_unittest_failure_fixture(self):
+        prefix = "test (ubuntu-latest, 3.9)\tRun tests\t2026-10-19T12:00:00.0000000Z "
+        failure = [prefix + text for text in (
+            "=" * 70,
+            "FAIL: test_compatibility (tests.test_example.CompatibilityTests)",
+            "-" * 70,
+            "Traceback (most recent call last):",
+            '  File "tests/test_example.py", line 12, in test_compatibility',
+            "    self.assertEqual(actual, expected)",
+            "AssertionError: Python 3.9 compatibility")]
+        summary = [prefix + "Ran 301 tests in 0.123s", prefix + "FAILED (failures=1)"]
+        progress = [prefix + "test_success_%03d (tests.test_example.Tests) ... ok" % index
+                    for index in range(300)]
+        lines = (progress[:10] + failure + [prefix] + progress[10:] +
+                 [prefix + "-" * 70, summary[0], prefix, summary[1]])
+        return "\n".join(lines), failure, summary, progress
+
+    def ci_failure_blocks_fixture(self, count, job="fixture"):
+        blocks = [["=" * 70, "FAIL: test_%03d (%s.Tests)" % (index, job),
+                   "-" * 70, "AssertionError: %s failure %03d" % (job, index)]
+                  for index in range(count)]
+        return "\n\n".join("\n".join(block) for block in blocks), blocks
+
     def test_workspace_settings_are_normalized_saved_and_inherited_by_say_and_review(self):
         user_home = self.root / "user-home"
         user_home.mkdir()
@@ -1295,6 +1318,187 @@ class WorkspaceTests(RotationTestCase):
         self.assertIn(["run", "view", "--job", "1", "--log-failed",
                        "--repo", "github.com/fixture/repo"], job_calls)
         self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_select_unittest_failure_and_summary_without_success_lines(self):
+        log, failure, summary, progress = self.ci_unittest_failure_fixture()
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [[self.ci_check("fail")]], jobs={"123": log})
+        tail = ci["checks"][0]["tail"]
+        selected = tail.splitlines()
+        for line in failure + summary:
+            self.assertIn(line, selected)
+        for line in progress:
+            self.assertNotIn(line, tail)
+        self.assertEqual([line for line in selected if line in failure + summary], failure + summary)
+        self.assertLessEqual(len(selected), 150)
+        self.assertEqual(ci["outcome"], "failed")
+        worker = self.worker()
+        self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+        self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+        self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_select_pytest_assertion_failed_test_and_summary(self):
+        prefix = "pytest\tRun tests\t2026-10-19T12:00:00.0000000Z "
+        assertion = prefix + "E   assert 'actual' == 'expected'"
+        failed = prefix + "FAILED tests/test_example.py::test_compatibility - AssertionError"
+        summary = prefix + "========================= 1 failed, 300 passed in 0.12s ========================="
+        progress = [prefix + "tests/test_success.py::test_%03d PASSED" % index for index in range(300)]
+        log = "\n".join([prefix + "___________________ test_compatibility ___________________",
+                         prefix + "    def test_compatibility():",
+                         prefix + ">       assert actual == expected", assertion, prefix] +
+                        progress + [failed, summary])
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [[self.ci_check("fail")]], jobs={"123": log})
+        selected = ci["checks"][0]["tail"].splitlines()
+        self.assertIn(assertion, selected)
+        self.assertIn(failed, selected)
+        self.assertIn(summary, selected)
+        self.assertLess(selected.index(assertion), selected.index(failed))
+        self.assertLess(selected.index(failed), selected.index(summary))
+        self.assertFalse(any(line in selected for line in progress))
+        self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_select_github_error_annotation_without_other_markers(self):
+        prefix = "build\tCompile\t2026-10-19T12:00:00.0000000Z "
+        error = prefix + "##[error]compiler exited with code 2"
+        detail = prefix + "src/example.c:12: unknown identifier"
+        progress = [prefix + "compiled object %03d" % index for index in range(300)]
+        log = "\n".join([error, detail, prefix] + progress)
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [[self.ci_check("fail")]], jobs={"123": log})
+        selected = ci["checks"][0]["tail"].splitlines()
+        self.assertIn(error, selected)
+        self.assertIn(detail, selected)
+        self.assertFalse(any(line in selected for line in progress))
+        self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_select_standalone_python_and_tool_error_markers(self):
+        markers = ("ERROR: test_import (tests.test_example.Tests)",
+                   "Traceback (most recent call last):",
+                   "AssertionError: incompatible result", "Error: compilation failed")
+        for marker in markers:
+            with self.subTest(marker=marker):
+                log = ("\n".join(["=" * 70, marker, "failure detail", ""]) + "\n" +
+                       "\n".join("successful line %03d" % index for index in range(300)))
+                st, ci, calls, waits = self.run_ci_wait_fixture(
+                    [[self.ci_check("fail")]], jobs={"123": log})
+                selected = ci["checks"][0]["tail"].splitlines()
+                self.assertIn(marker, selected)
+                self.assertIn("failure detail", selected)
+                self.assertFalse(any(line.startswith("successful line ") for line in selected))
+                self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_without_markers_keep_the_previous_tail(self):
+        lines = ["unrecognized output %03d" % index for index in range(300)]
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [[self.ci_check("fail")]], jobs={"123": "\n".join(lines)})
+        self.assertEqual(ci["checks"][0]["tail"].splitlines(), lines[-150:])
+        self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_limit_keeps_first_complete_blocks_and_counts_omitted_lines(self):
+        log, blocks = self.ci_failure_blocks_fixture(40)
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [[self.ci_check("fail")]], jobs={"123": log})
+        selected = ci["checks"][0]["tail"].splitlines()
+        self.assertLessEqual(len(selected), 150)
+        self.assertRegex(selected[-1], r"^… \d+ more failure lines omitted$")
+        retained = selected[:-1]
+        self.assertEqual(len(retained) % 4, 0)
+        self.assertGreater(len(retained), 0)
+        failure_lines = [line for block in blocks for line in block]
+        self.assertEqual(retained, failure_lines[:len(retained)])
+        self.assertEqual(selected[-1], "… %d more failure lines omitted" %
+                         (len(failure_lines) - len(retained)))
+        self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_adjacent_blocks_and_oversized_traceback_keep_summaries(self):
+        prefix = "tests\tRun tests\t2026-10-19T12:00:00.0000000Z "
+        blocks = [[prefix + "##[error]failure %03d" % index] +
+                  [prefix + "failure %03d detail %d" % (index, detail) for detail in range(3)]
+                  for index in range(40)]
+        adjacent_lines = [line for block in blocks for line in block]
+        traceback_lines = ([prefix + "Traceback (most recent call last):"] +
+                           [prefix + '  File "example.py", line %d, in example' % index
+                            for index in range(160)] + [prefix + "AssertionError: final failure"])
+        fixtures = (("adjacent", adjacent_lines, 40, "errors=40"),
+                    ("oversized", traceback_lines, 1, "failures=1"))
+        for kind, failure_lines, test_count, failures in fixtures:
+            with self.subTest(kind=kind):
+                summary = [prefix + "Ran %d tests in 0.123s" % test_count,
+                           prefix + "FAILED (%s)" % failures]
+                log = "\n".join(failure_lines + [prefix] + summary)
+                st, ci, calls, waits = self.run_ci_wait_fixture(
+                    [[self.ci_check("fail")]], jobs={"123": log})
+                selected = ci["checks"][0]["tail"].splitlines()
+                self.assertLessEqual(len(selected), 150)
+                self.assertEqual(selected[-3:-1], summary)
+                retained = selected[:-3]
+                if kind == "adjacent":
+                    self.assertEqual(retained, adjacent_lines[:144])
+                else:
+                    self.assertEqual(retained, [])
+                self.assertEqual(selected[-1], "… %d more failure lines omitted" %
+                                 (len(failure_lines) - len(retained)))
+                self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_two_failed_jobs_each_keep_their_first_blocks(self):
+        checks = [self.ci_check("fail", name="job " + job, job=job) for job in ("123", "456")]
+        fixtures = {job: self.ci_failure_blocks_fixture(60, job) for job in ("123", "456")}
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [checks], jobs={job: fixture[0] for job, fixture in fixtures.items()})
+        tails = [check["tail"].splitlines() for check in ci["checks"]]
+        self.assertLessEqual(sum(map(len, tails)), 300)
+        for check, selected, job in zip(ci["checks"], tails, ("123", "456")):
+            with self.subTest(job=job):
+                self.assertLessEqual(len(selected), 150)
+                self.assertGreater(len(selected), 145)
+                failure_lines = [line for block in fixtures[job][1] for line in block]
+                self.assertEqual(selected[:-1], failure_lines[:len(selected) - 1])
+                self.assertEqual((len(selected) - 1) % 4, 0)
+                self.assertEqual(selected[-1], "… %d more failure lines omitted" %
+                                 (len(failure_lines) - len(selected) + 1))
+        self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_three_failed_jobs_share_the_400_line_budget(self):
+        jobs = ("123", "456", "789")
+        checks = [self.ci_check("fail", name="job " + job, job=job) for job in jobs]
+        fixtures = {job: self.ci_failure_blocks_fixture(60, job) for job in jobs}
+        st, ci, calls, waits = self.run_ci_wait_fixture(
+            [checks], jobs={job: fixture[0] for job, fixture in fixtures.items()})
+        tails = [check["tail"].splitlines() for check in ci["checks"]]
+        self.assertLessEqual(sum(map(len, tails)), 400)
+        self.assertGreater(sum(map(len, tails)), 395)
+        self.assertLess(len(tails[2]), len(tails[1]))
+        for selected, job in zip(tails, jobs):
+            with self.subTest(job=job):
+                self.assertLessEqual(len(selected), 150)
+                self.assertEqual((len(selected) - 1) % 4, 0)
+                failure_lines = [line for block in fixtures[job][1] for line in block]
+                self.assertEqual(selected[:-1], failure_lines[:len(selected) - 1])
+                self.assertEqual(selected[-1], "… %d more failure lines omitted" %
+                                 (len(failure_lines) - len(selected) + 1))
+        self.assertEqual(waits, [])
+
+    def test_ci_wait_and_repair_prompt_share_selected_failure_lines(self):
+        self.configure(language="en", sandbox="workspace")
+        log, failure, summary, progress = self.ci_unittest_failure_fixture()
+        self.configure_ci([[self.ci_check("fail")]], jobs={"123": log})
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("still broken\n")])
+        self.start("ci-selected-evidence", "--ci")
+        output = self.wait("ci-selected-evidence")
+        ci = self.state("ci-selected-evidence")["ci"]
+        self.assertEqual((ci["outcome"], ci["rounds"], ci["reason"]), ("failed", 1, "rounds_exhausted"))
+        tail = ci["checks"][0]["tail"]
+        prompt = self.invocations()[1]["prompt"]
+        self.assertIn(tail, output)
+        self.assertIn(tail, prompt)
+        for line in failure + summary:
+            self.assertIn(line, tail)
+        for line in progress:
+            self.assertNotIn(line, output)
+            self.assertNotIn(line, prompt)
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.ci_polls()), 2)
 
     def test_ci_failed_job_logs_use_each_check_repository(self):
         checks = [self.ci_check("fail", name="first job", job="123"),
