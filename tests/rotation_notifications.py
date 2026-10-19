@@ -103,8 +103,8 @@ class NotificationTests(RotationTestCase):
                          "outcome": "running", "check": check, "check_timeout": 1,
                          "pending": {"prompt": "fixture turn", "effort": None,
                                      "review_after": mode == "failed-check"}}
-                worker.save(state)
-                real_save = worker.save
+                worker.task_state.save(state)
+                real_save = worker.task_state.save
                 publications = []
 
                 def completed_turn(current, *args, **kwargs):
@@ -119,7 +119,7 @@ class NotificationTests(RotationTestCase):
                         return
                     publications.append({"state": json.loads(json.dumps(current)),
                                          "launched": {json.loads(proc.args[-1])["event"]
-                                                      for proc in worker.NOTIFY_PROCESSES}})
+                                                      for proc in worker.notifications.NOTIFY_PROCESSES}})
                     try:
                         worker.cmd_clean(SimpleNamespace(slug=slug, keep_branch=False))
                     finally:
@@ -133,13 +133,13 @@ class NotificationTests(RotationTestCase):
                         mock.patch.dict(os.environ, self.env), \
                         mock.patch.object(worker.signal, "signal"), \
                         mock.patch.object(worker, "run_turn", side_effect=completed_turn), \
-                        mock.patch.object(worker, "save", side_effect=save_and_clean):
+                        mock.patch.object(worker.task_state, "save", side_effect=save_and_clean):
                     try:
                         worker.cmd__run(SimpleNamespace(slug=slug))
                     finally:
                         gate.touch()
-                        self.extra_pids.update(proc.pid for proc in worker.NOTIFY_PROCESSES)
-                        for proc in worker.NOTIFY_PROCESSES:
+                        self.extra_pids.update(proc.pid for proc in worker.notifications.NOTIFY_PROCESSES)
+                        for proc in worker.notifications.NOTIFY_PROCESSES:
                             self.assertEqual(proc.wait(timeout=5), 0)
                     errors.flush()
                     errors.seek(0)
@@ -262,13 +262,13 @@ class NotificationTests(RotationTestCase):
         worker = self.worker()
         state = {"account": "main", "kind": "review", "review_start": 1,
                  "reviews": [{"account": "previous"}]}
-        self.assertEqual(worker.current_turn_account(state), "main")
+        self.assertEqual(worker.notifications.current_turn_account(state), "main")
         state["reviews"].append({"account": "second"})
-        self.assertEqual(worker.current_turn_account(state), "second")
+        self.assertEqual(worker.notifications.current_turn_account(state), "second")
         state["review_account"] = "third"
-        self.assertEqual(worker.current_turn_account(state), "third")
+        self.assertEqual(worker.notifications.current_turn_account(state), "third")
         state["kind"] = "work"
-        self.assertEqual(worker.current_turn_account(state), "main")
+        self.assertEqual(worker.notifications.current_turn_account(state), "main")
 
     def test_missing_notify_executable_is_logged_without_failing_work(self):
         self.configure()
@@ -302,9 +302,9 @@ class NotificationTests(RotationTestCase):
         finished, running = mock.Mock(), mock.Mock()
         finished.poll.return_value = 0
         running.poll.return_value = None
-        worker.NOTIFY_PROCESSES[:] = [finished, running]
-        worker.reap_notifications()
-        self.assertEqual(worker.NOTIFY_PROCESSES, [running])
+        worker.notifications.NOTIFY_PROCESSES[:] = [finished, running]
+        worker.notifications.reap_notifications()
+        self.assertEqual(worker.notifications.NOTIFY_PROCESSES, [running])
         finished.poll.assert_called_once_with()
         running.poll.assert_called_once_with()
         finished.wait.assert_not_called()
@@ -316,7 +316,7 @@ class NotificationTests(RotationTestCase):
                  "branch": "codex/notify-macos", "account": "main", "worktree": str(self.repo)}
         (self.home / "claude-tasks" / state["slug"]).mkdir(parents=True)
         with mock.patch.object(worker.subprocess, "Popen") as popen:
-            worker.notify(state, {"notify": "macos"}, "turn_finished",
+            worker.notifications.notify(state, {"notify": "macos"}, "turn_finished",
                           'completed "quoted" C:\\tmp\nwith newline')
         popen.assert_called_once()
         self.assertEqual(popen.call_args.args[0], [

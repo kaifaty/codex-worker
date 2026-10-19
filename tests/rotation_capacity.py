@@ -49,7 +49,7 @@ class CapacityRetryTests(RotationTestCase):
                 self.assert_resumed_same_thread(executions[0], executions[1], self.home)
                 worker = self.worker()
                 self.assertEqual(executions[1]["prompt"],
-                                 worker.capacity_resume_prompt(worker.accounts_config()))
+                                 worker.capacity_resume_prompt(worker.config.accounts_config()))
                 for execution in executions:
                     self.assert_output_schema(execution, slug)
                 state = self.state(slug)

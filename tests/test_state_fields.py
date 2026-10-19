@@ -74,7 +74,7 @@ class StateFieldRegistryTests(unittest.TestCase):
         self.addCleanup(home.cleanup)
         self.home = Path(home.name)
         self.worker = load_worker({"CODEX_TASK_HOME": home.name}, name="state_fields_worker")
-        self.directory = self.worker.TASKS / "registry-test"
+        self.directory = self.worker.config.TASKS / "registry-test"
         self.directory.mkdir(parents=True)
 
     def test_ast_inventory_covers_literal_accesses_and_excludes_nested_keys(self):
@@ -101,14 +101,16 @@ st[dynamic_key] = 1
         })
 
     def test_registry_matches_every_literal_root_state_key(self):
-        used = state_root_keys(ast.parse(SCRIPT.read_text(encoding="utf-8")))
-        registered = set(self.worker.STATE_FIELDS)
+        sources = [SCRIPT] + sorted(SCRIPT.with_name("codex_worker").glob("*.py"))
+        used = set().union(*(state_root_keys(ast.parse(path.read_text(encoding="utf-8")))
+                             for path in sources))
+        registered = set(self.worker.task_state.STATE_FIELDS)
         missing = used - registered
         unused = registered - used
         self.assertFalse(missing, "Unregistered state keys: " + ", ".join(sorted(missing)))
         self.assertFalse(unused, "Unused state registry keys: " + ", ".join(sorted(unused)))
         self.assertEqual(len(registered), 72)
-        for key, field in self.worker.STATE_FIELDS.items():
+        for key, field in self.worker.task_state.STATE_FIELDS.items():
             with self.subTest(key=key):
                 self.assertIn(field.lifetime, {"task", "history", "cursor", "turn", "attempt", "runtime"})
 
@@ -146,14 +148,14 @@ st[dynamic_key] = 1
             "work_completed": True, "worktree": str(self.home), "wrapup": {"status": "done"},
             "writable_dirs": [str(self.home / "writable")],
         }
-        self.assertEqual(set(st), set(self.worker.STATE_FIELDS))
+        self.assertEqual(set(st), set(self.worker.task_state.STATE_FIELDS))
         return st
 
     def spawn(self, st, kind):
         with mock.patch.object(self.worker.subprocess, "Popen") as popen, \
                 mock.patch.object(self.worker.time, "time", return_value=1234567), \
-                mock.patch.object(self.worker, "events", return_value=[{}] * 5), \
-                mock.patch.object(self.worker, "save") as save:
+                mock.patch.object(self.worker.threads, "events", return_value=[{}] * 5), \
+                mock.patch.object(self.worker.task_state, "save") as save:
             popen.return_value.pid = 200
             self.worker.spawn(st, "new-prompt", effort="medium", current_message=True,
                               kind=kind, review_after=True, fix_rounds=4)
@@ -164,7 +166,7 @@ st[dynamic_key] = 1
         st = self.complete_state()
         before = copy.deepcopy(st)
         self.spawn(st, "review")
-        marked = {key for key, field in self.worker.STATE_FIELDS.items()
+        marked = {key for key, field in self.worker.task_state.STATE_FIELDS.items()
                   if field.spawn_reset is not None}
         changed = {key for key in before if key not in st or st[key] != before[key]}
         self.assertEqual(changed - {"pid"}, marked)
@@ -197,7 +199,7 @@ st[dynamic_key] = 1
                 st = self.complete_state()
                 before = copy.deepcopy(st)
                 self.spawn(st, kind)
-                marked = {key for key, field in self.worker.STATE_FIELDS.items()
+                marked = {key for key, field in self.worker.task_state.STATE_FIELDS.items()
                           if field.spawn_reset is not None}
                 changed = {key for key in before if key not in st or st[key] != before[key]}
                 # kind already equals work in the fixture, so it need not change.
@@ -207,8 +209,8 @@ st[dynamic_key] = 1
                 self.assertIsNone(st["result"])
 
     def load_state(self, state):
-        self.worker.state_path("registry-test").write_text(json.dumps(state), encoding="utf-8")
-        return self.worker.load("registry-test")
+        self.worker.task_state.state_path("registry-test").write_text(json.dumps(state), encoding="utf-8")
+        return self.worker.task_state.load("registry-test")
 
     def test_load_keeps_the_same_defaults_and_insertion_order(self):
         expected = {"account": "main", "threads": [], "rotations": [], "reviews": [],
@@ -228,7 +230,7 @@ st[dynamic_key] = 1
     def test_load_preserves_present_values(self):
         st = self.complete_state()
         self.assertEqual(self.load_state(st), st)
-        present = {key: None for key, field in self.worker.STATE_FIELDS.items()
+        present = {key: None for key, field in self.worker.task_state.STATE_FIELDS.items()
                    if field.load_default is not None}
         self.assertEqual(self.load_state(present), present)
 

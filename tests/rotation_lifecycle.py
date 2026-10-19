@@ -71,14 +71,14 @@ from types import SimpleNamespace
 worker = load_worker(name="fixture_worker", script=sys.argv[1])
 state = json.loads(sys.argv[2])
 state["pid"] = os.getpid()
-worker.save(state)
+worker.task_state.save(state)
 observed = {}
 ''' + instrumentation + r'''
 try:
     worker.cmd__run(SimpleNamespace(slug=state["slug"]))
 finally:
     sys.settrace(None)
-for proc in list(worker.NOTIFY_PROCESSES):
+for proc in list(worker.notifications.NOTIFY_PROCESSES):
     proc.wait(timeout=5)
 print(json.dumps(observed))
 '''
@@ -103,7 +103,7 @@ def trace(frame, event, arg):
             # key is bound only after the dict iterator has started. This used
             # to raise when the handler inserted signal into that same dict.
             pid = current["codex_pid"]
-            observed.update(pid=pid, pgid=os.getpgid(pid), alive_before=worker.alive(pid))
+            observed.update(pid=pid, pgid=os.getpgid(pid), alive_before=worker.procs.alive(pid))
             os.kill(os.getpid(), signal.SIGTERM)
     return trace
 sys.settrace(trace)
@@ -126,14 +126,14 @@ sys.settrace(trace)
         self.account(self.home, "A", self.reset, runs=[{"mode": "hold"}])
         slug = "worker-pid-save-failed"
         observed = self.run_supervisor_fixture(slug, r'''
-real_save = worker.save
+real_save = worker.task_state.save
 def fail_once(current):
     if current.get("codex_pid") and not observed:
         pid = current["codex_pid"]
-        observed.update(pid=pid, pgid=os.getpgid(pid), alive_before=worker.alive(pid))
+        observed.update(pid=pid, pgid=os.getpgid(pid), alive_before=worker.procs.alive(pid))
         raise OSError("fixture initial worker PID save failure")
     return real_save(current)
-worker.save = fail_once
+worker.task_state.save = fail_once
 ''')
         self.extra_pids.add(observed["pid"])
         self.assertTrue(observed["alive_before"])
@@ -216,9 +216,9 @@ worker.signal.pthread_sigmask = sigmask
                 observed = self.run_supervisor_fixture(slug, "point = " + repr(point) + r'''
 observed.update(events=[], fired=False, finished_launched=False)
 real_record = worker.record_turn_result
-real_notify = worker.notify
+real_notify = worker.notifications.notify
 real_popen = worker.subprocess.Popen
-real_reap = worker.reap_notifications
+real_reap = worker.notifications.reap_notifications
 stop_signals = {signal.SIGINT, signal.SIGTERM}
 def interrupt(current):
     observed["fired"] = True
@@ -256,9 +256,9 @@ def reap():
         interrupt(observed["events"][-1])
     return result
 worker.record_turn_result = record
-worker.notify = notify
+worker.notifications.notify = notify
 worker.subprocess.Popen = popen
-worker.reap_notifications = reap
+worker.notifications.reap_notifications = reap
 ''')
                 self.assertTrue(observed["fired"], "fixture did not reach the finalization checkpoint")
                 self.assertEqual(observed["outcome_at_signal"], "completed")
@@ -491,10 +491,10 @@ worker.reap_notifications = reap
     def test_supervisor_preserves_first_signal_and_logs_each_before_cancellation(self):
         worker = self.worker()
         slug = "first-external-signal"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         state = {"slug": slug, "pid": os.getpid(), "repo": str(self.repo), "worktree": str(self.repo),
                  "kind": "scout", "outcome": "running", "pending": {"prompt": "question", "effort": None}}
-        worker.save(state)
+        worker.task_state.save(state)
         handlers = {}
         first = []
         current_signal = []
@@ -502,7 +502,7 @@ worker.reap_notifications = reap
         set_cancellation = cancellation.set
 
         def cancel_after_log():
-            log = worker.TASKS / slug / "stderr.log"
+            log = worker.config.TASKS / slug / "stderr.log"
             self.assertIn(signal.Signals(current_signal[0]).name, log.read_text().splitlines()[-1])
             set_cancellation()
 
@@ -512,7 +512,7 @@ worker.reap_notifications = reap
             handlers[signum] = handler
 
         def interrupt(st, cfg, prompt, effort, current_message, stopped, sleep):
-            log = worker.TASKS / slug / "stderr.log"
+            log = worker.config.TASKS / slug / "stderr.log"
             for signum in (signal.SIGTERM, signal.SIGINT):
                 current_signal[:] = [signum]
                 handlers[signum](signum, None)
@@ -524,44 +524,44 @@ worker.reap_notifications = reap
 
         with mock.patch.object(worker.signal, "signal", side_effect=signal_handler), \
                 mock.patch.object(worker.threading, "Event", return_value=cancellation), \
-                mock.patch.object(worker, "accounts_config", return_value={"enabled": False}), \
+                mock.patch.object(worker.config, "accounts_config", return_value={"enabled": False}), \
                 mock.patch.object(worker, "run_turn", side_effect=interrupt), \
                 mock.patch.object(worker, "record_turn_result"), \
-                mock.patch.object(worker, "notify"), \
+                mock.patch.object(worker.notifications, "notify"), \
                 mock.patch.object(worker, "guarded_changes", return_value=[]):
             worker.cmd__run(SimpleNamespace(slug=slug))
-        state = worker.load(slug)
+        state = worker.task_state.load(slug)
         self.assertEqual(state["outcome"], "interrupted")
         self.assertEqual(state["signal"], first[0])
         self.assertEqual(state["signal"]["name"], "SIGTERM")
-        self.assertEqual(len((worker.TASKS / slug / "stderr.log").read_text().splitlines()), 2)
+        self.assertEqual(len((worker.config.TASKS / slug / "stderr.log").read_text().splitlines()), 2)
 
     def test_stop_request_is_durable_before_signal_and_survives_supervisor_save(self):
         worker = self.worker()
         slug = "stop-save-race"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         state = {"slug": slug, "pid": IMPOSSIBLE_PID, "outcome": "running"}
-        worker.save(state)
+        worker.task_state.save(state)
         supervisor_state = dict(state)
 
         def signal_after_request(pid, signum):
             self.assertEqual((pid, signum), (state["pid"], signal.SIGINT))
-            latest = worker.load(slug)
+            latest = worker.task_state.load(slug)
             self.assertEqual(latest["stop_request"]["pid"], pid)
             supervisor_state["checkpoint"] = "concurrent supervisor progress"
-            worker.save(supervisor_state)
-            self.assertEqual(worker.load(slug)["stop_request"], latest["stop_request"])
+            worker.task_state.save(supervisor_state)
+            self.assertEqual(worker.task_state.load(slug)["stop_request"], latest["stop_request"])
 
-        with mock.patch.object(worker, "alive", side_effect=[True, False]), \
+        with mock.patch.object(worker.procs, "alive", side_effect=[True, False]), \
                 mock.patch.object(worker.os, "killpg", side_effect=signal_after_request) as killpg, \
                 mock.patch.object(worker.time, "sleep"), mock.patch("builtins.print"):
             worker.cmd_stop(SimpleNamespace(slug=slug))
         killpg.assert_called_once()
-        self.assertEqual(worker.load(slug)["checkpoint"], "concurrent supervisor progress")
-        self.assertEqual(worker.stop_outcome(dict(state), lambda: True), "stopped")
-        self.assertEqual(worker.stop_outcome(dict(state), lambda: False), None)
+        self.assertEqual(worker.task_state.load(slug)["checkpoint"], "concurrent supervisor progress")
+        self.assertEqual(worker.task_state.stop_outcome(dict(state), lambda: True), "stopped")
+        self.assertEqual(worker.task_state.stop_outcome(dict(state), lambda: False), None)
         next_turn = dict(state, pid=os.getpid())
-        self.assertEqual(worker.stop_outcome(next_turn, lambda: True), "interrupted")
+        self.assertEqual(worker.task_state.stop_outcome(next_turn, lambda: True), "interrupted")
 
     def test_interrupted_notification_obeys_notify_events_filter(self):
         self.configure(language="en")
@@ -746,7 +746,7 @@ worker.reap_notifications = reap
 
     def test_mid_turn_limit_sleeps_and_resumes_same_thread(self):
         self.configure()  # Omitting wait_for_reset enables automatic continuation.
-        self.assertTrue(self.worker().accounts_config()["wait_for_reset"])
+        self.assertTrue(self.worker().config.accounts_config()["wait_for_reset"])
         reset = time.time() + 4
         self.account(self.home, "A", reset, auto_reset=True, runs=[
             {"mode": "usage_error", "messages": ["Работа до лимита"]},
@@ -771,7 +771,7 @@ worker.reap_notifications = reap
         for execution in executions:
             self.assert_output_schema(execution, "reset-resume")
         worker = self.worker()
-        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.accounts_config()))
+        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.config.accounts_config()))
         self.assertIn("Продолжение после сброса завершено", second)
         self.assertNotIn("auto-continue at", second)
         state = self.state("reset-resume")
@@ -1203,9 +1203,9 @@ worker.reap_notifications = reap
                                    RuntimeError("temporary quota RPC unavailable")], None))
         for name, replies, expected in cases:
             with self.subTest(case=name):
-                with mock.patch.object(worker, "account_rpc") as account_rpc:
+                with mock.patch.object(worker.accounts, "account_rpc") as account_rpc:
                     account_rpc.return_value.__enter__.return_value.side_effect = replies
-                    info = worker.account_read(account)
+                    info = worker.accounts.account_read(account)
                 self.assertIs(info["logged_in"], expected)
                 if expected is None:
                     self.assertTrue(info.get("error"))
@@ -1243,8 +1243,8 @@ worker.reap_notifications = reap
 
     def test_unknown_account_status_retries_six_times_at_five_minute_intervals(self):
         worker = self.worker()
-        self.assertEqual(worker.ACCOUNT_RETRY_SECONDS, 300)
-        self.assertEqual(worker.MAX_ACCOUNT_RETRIES, 6)
+        self.assertEqual(worker.config.ACCOUNT_RETRY_SECONDS, 300)
+        self.assertEqual(worker.config.MAX_ACCOUNT_RETRIES, 6)
         cfg = {"wait_for_reset": True, "switch_at": 99}
         clock = [1000.0]
         sleeps = []
@@ -1256,11 +1256,11 @@ worker.reap_notifications = reap
             sleeps.append(seconds)
             clock[0] += seconds
 
-        with mock.patch.object(worker, "SLEEP_STEP", 60), \
+        with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
                 mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
                 mock.patch.object(worker.time, "sleep", side_effect=sleep), \
-                mock.patch.object(worker, "save"), \
-                mock.patch.object(worker, "snapshots", return_value=unknown) as snapshots:
+                mock.patch.object(worker.task_state, "save"), \
+                mock.patch.object(worker.accounts, "snapshots", return_value=unknown) as snapshots:
             chosen = worker.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: False)
         self.assertIsNone(chosen)
         self.assertEqual(snapshots.call_count, 6)
@@ -1283,11 +1283,11 @@ worker.reap_notifications = reap
             clock[0] += seconds
             stopped[0] = True
 
-        with mock.patch.object(worker, "SLEEP_STEP", 60), \
+        with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
                 mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
                 mock.patch.object(worker.time, "sleep", side_effect=sleep) as sleeper, \
-                mock.patch.object(worker, "save"), \
-                mock.patch.object(worker, "snapshots") as snapshots:
+                mock.patch.object(worker.task_state, "save"), \
+                mock.patch.object(worker.accounts, "snapshots") as snapshots:
             chosen = worker.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: stopped[0])
         self.assertIsNone(chosen)
         sleeper.assert_called_once_with(60)
@@ -1302,9 +1302,9 @@ worker.reap_notifications = reap
                 proc.poll.return_value = None if live else 0
                 with mock.patch.object(worker.os, "killpg", side_effect=PermissionError), \
                         mock.patch.object(worker.os, "kill") as kill:
-                    self.assertIs(worker.signal_group(proc, 0), live)
+                    self.assertIs(worker.procs.signal_group(proc, 0), live)
                     kill.assert_not_called()
-                    self.assertIs(worker.signal_group(proc, signal.SIGTERM), live)
+                    self.assertIs(worker.procs.signal_group(proc, signal.SIGTERM), live)
                     if live:
                         kill.assert_called_once_with(proc.pid, signal.SIGTERM)
                     else:

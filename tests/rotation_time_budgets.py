@@ -38,7 +38,7 @@ class TimeBudgetTests(RotationTestCase):
         self.assert_output_schema(executions[1], "time-cap")
         worker = self.worker()
         self.assertEqual(executions[1]["prompt"],
-                         worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
+                         worker.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
         self.assertFalse(self.review_invocations())
         self.assertIn("== turn stopped: time budget 90 min exhausted", output)
         self.assertIn(result["summary"], output)
@@ -114,7 +114,7 @@ class TimeBudgetTests(RotationTestCase):
                     self.assertEqual(executions[1]["thread"], executions[0]["thread"])
                     worker = self.worker()
                     self.assertEqual(executions[1]["prompt"], worker.wrapup_prompt(
-                        state, state["turn_stop"], worker.accounts_config()))
+                        state, state["turn_stop"], worker.config.accounts_config()))
                     self.assertIn("== turn stopped: time budget 2 min exhausted", output)
                     self.assertIn(result["summary"], output)
                     self.assertFalse(self.process_is_live(executions[0]["pid"]))
@@ -276,7 +276,7 @@ class TimeBudgetTests(RotationTestCase):
         prompt = executions[1]["prompt"]
         self.assertIn(command, prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
+        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
         self.assertIn("== turn stopped: repeated failure ×3: " + command, output)
         self.assertIn(result["summary"], output)
         self.assertFalse(self.review_invocations())
@@ -322,7 +322,7 @@ class TimeBudgetTests(RotationTestCase):
         prompt = self.invocations()[-1]["prompt"]
         self.assertIn(command["command"], prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
+        self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.config.accounts_config()))
 
     def test_max_minutes_uses_config_default_and_say_override_for_one_turn(self):
         clock = self.enable_fake_clock()
@@ -510,7 +510,7 @@ class TimeBudgetTests(RotationTestCase):
 
     def test_cap_settings_validate_values_and_keep_safe_defaults(self):
         worker = self.worker()
-        config = worker.accounts_config()
+        config = worker.config.accounts_config()
         self.assertIsNone(config["max_turn_minutes"])
         self.assertEqual(config["max_review_minutes"], 30)
         self.assertEqual(config["repeat_limit"], 3)
@@ -523,7 +523,7 @@ class TimeBudgetTests(RotationTestCase):
                 with self.subTest(key=key, value=value):
                     path.write_text(json.dumps({key: value}))
                     with self.assertRaises(SystemExit) as raised:
-                        worker.accounts_config()
+                        worker.config.accounts_config()
                     self.assertIn(key, str(raised.exception))
 
     def test_budget_during_automatic_fix_runs_check_then_stops_the_cycle(self):

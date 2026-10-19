@@ -17,11 +17,11 @@ class WeeklyBudgetTests(RotationTestCase):
 
         def record(limits):
             nonlocal seeded
-            if worker.weekly_used(limits) is not None:
-                worker.record_weekly_usage(st, account, limits, seed=not seeded)
+            if worker.budgets.weekly_used(limits) is not None:
+                worker.budgets.record_weekly_usage(st, account, limits, seed=not seeded)
                 seeded = True
 
-        worker.rollout_limits(path, on_limits=record)
+        worker.threads.rollout_limits(path, on_limits=record)
         phase.add_usage(account, thread, None, path, 0,
                         weekly_spent=st.get("weekly_used_percent", 0) - before)
 
@@ -235,7 +235,7 @@ class WeeklyBudgetTests(RotationTestCase):
     def test_weekly_marks_ignore_late_and_overlapping_phase_samples(self):
         worker = self.worker()
         slug = "weekly-overlapping-samples"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "created": time.time(),
               "account": "main"}
         for turn, values in enumerate(((10, 17), (12, 14)), 1):
@@ -247,8 +247,8 @@ class WeeklyBudgetTests(RotationTestCase):
             with worker.record_phase(st, "work", lambda: False) as phase:
                 self.record_weekly_phase_usage(worker, st, phase, "main", "thread-%d" % turn, path)
                 phase.finish(outcome="completed")
-            worker.save(st)
-            st = worker.load(slug)
+            worker.task_state.save(st)
+            st = worker.task_state.load(slug)
         self.assertEqual(st["weekly_used_percent"], 7)
         rows = self.phase_telemetry_journal()
         self.assertEqual([row["weekly_spent"] for row in rows], [7, 0])
@@ -263,12 +263,12 @@ class WeeklyBudgetTests(RotationTestCase):
         for slug, values in (("weekly-original-order", (10, 17, 12, 14)),
                              ("weekly-shuffled-order", (14, 12, 17, 10))):
             with self.subTest(order=values):
-                (worker.TASKS / slug).mkdir(parents=True)
+                (worker.config.TASKS / slug).mkdir(parents=True)
                 st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo),
                       "created": time.time(), "account": "main", "turns": 1}
-                seed = worker.normalize_limits({"primary": {"used_percent": 10,
+                seed = worker.accounts.normalize_limits({"primary": {"used_percent": 10,
                                                "window_minutes": 10080, "resets_at": self.reset}})
-                self.assertEqual(worker.record_weekly_usage(st, "main", seed), 0)
+                self.assertEqual(worker.budgets.record_weekly_usage(st, "main", seed), 0)
                 path = self.root / (slug + ".jsonl")
                 path.write_text("".join(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
                     "primary": {"used_percent": value, "window_minutes": 10080,
@@ -287,7 +287,7 @@ class WeeklyBudgetTests(RotationTestCase):
     def test_weekly_marks_keep_accounts_and_windows_separate(self):
         worker = self.worker()
         slug = "weekly-account-windows"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "created": time.time()}
         cases = [("main", 10, 17, self.reset, 7), ("second", 20, 22, self.reset, 2),
                  ("main", 12, 14, self.reset, 0), ("main", 2, 4, None, 0),
@@ -309,14 +309,14 @@ class WeeklyBudgetTests(RotationTestCase):
                 expected += delta
                 self.assertEqual(st["weekly_used_percent"], expected)
                 self.assertEqual(self.phase_telemetry_journal()[-1]["weekly_spent"], delta)
-                worker.save(st)
-                st = worker.load(slug)
+                worker.task_state.save(st)
+                st = worker.task_state.load(slug)
         # This is the sole compatibility contract for the persisted mark format.
         expected_marks = {
             "main": {"reset": self.reset + 604800, "used": 5},
             "second": {"reset": self.reset, "used": 22}}
-        self.assertEqual(json.loads(worker.state_path(slug).read_text())["weekly_marks"], expected_marks)
-        self.assertEqual(worker.load(slug)["weekly_marks"], expected_marks)
+        self.assertEqual(json.loads(worker.task_state.state_path(slug).read_text())["weekly_marks"], expected_marks)
+        self.assertEqual(worker.task_state.load(slug)["weekly_marks"], expected_marks)
         report = json.loads(self.cli("report", "--slug", slug, "--json"))
         self.assertEqual(report["tasks"][0]["weekly_used_percent"], 13)
         self.assertEqual({row["account"]: row["weekly_used_percent"] for row in report["accounts"]},
@@ -423,7 +423,7 @@ class WeeklyBudgetTests(RotationTestCase):
     def test_weekly_marks_count_growth_on_both_sides_of_reset_within_exec(self):
         worker = self.worker()
         slug = "weekly-reset-inside-exec"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo),
               "created": time.time(), "account": "main", "turns": 1}
         samples = [(90, self.reset), (92, self.reset), (1, self.reset + 604800),
@@ -478,7 +478,7 @@ class WeeklyBudgetTests(RotationTestCase):
     def test_weekly_marks_count_new_window_recovered_above_previous_percentage(self):
         worker = self.worker()
         slug = "weekly-reset-recovered"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "created": time.time()}
         for turn, (before, after, reset) in enumerate(
                 [(10, 12, self.reset), (2, 14, self.reset + 604800)], 1):
@@ -490,8 +490,8 @@ class WeeklyBudgetTests(RotationTestCase):
             with worker.record_phase(st, "work", lambda: False) as phase:
                 self.record_weekly_phase_usage(worker, st, phase, "main", "thread-%d" % turn, path)
                 phase.finish(outcome="completed")
-            worker.save(st)
-            st = worker.load(slug)
+            worker.task_state.save(st)
+            st = worker.task_state.load(slug)
         self.assertEqual(st["weekly_used_percent"], 14)
         rows = self.phase_telemetry_journal()
         self.assertEqual([(row["usage"][0]["weekly_used_before"], row["usage"][0]["weekly_used_after"])
@@ -502,7 +502,7 @@ class WeeklyBudgetTests(RotationTestCase):
     def test_weekly_budget_late_stopped_sample_does_not_overlap_wrapup(self):
         worker = self.worker()
         slug = "weekly-late-stop"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         account = {"name": "main", "home": str(self.home)}
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo), "base": "main",
               "kind": "work", "account": "main", "thread": "same-thread", "threads": [],
@@ -567,13 +567,13 @@ class WeeklyBudgetTests(RotationTestCase):
                 observed.append("late quota 17 after exec stopped")
                 append_quota(17)
 
-        with mock.patch.object(worker, "prepare_home"), \
-                mock.patch.object(worker, "terminate", side_effect=terminate), \
+        with mock.patch.object(worker.accounts, "prepare_home"), \
+                mock.patch.object(worker.procs, "terminate", side_effect=terminate), \
                 mock.patch.object(worker.subprocess, "Popen", side_effect=[proc, wrap]) as popen, \
                 mock.patch.object(worker.selectors, "DefaultSelector", side_effect=[selector, wrap_selector]), \
                 mock.patch.object(worker.os, "read", side_effect=read), \
                 mock.patch.object(worker.fcntl, "ioctl", return_value=bytes(4)), \
-                mock.patch.object(worker, "rollout_path", return_value=rollout):
+                mock.patch.object(worker.threads, "rollout_path", return_value=rollout):
             worker.run_turn(st, {"enabled": False, "accounts": [account]}, "work", None,
                             False, lambda: False, lambda seconds: None)
         self.assertEqual(observed, ["exec quota 16, no completion", "late quota 17 after exec stopped",
@@ -593,7 +593,7 @@ class WeeklyBudgetTests(RotationTestCase):
     def test_final_weekly_budget_drains_completion_before_counting_fix_once(self):
         worker = self.worker()
         slug = "weekly-completion-order"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         account = {"name": "main", "home": str(self.home)}
         st = {"slug": slug, "repo": str(self.repo), "worktree": str(self.repo),
               "base": "main", "kind": "work", "account": "main", "thread": "same-thread",
@@ -649,7 +649,7 @@ class WeeklyBudgetTests(RotationTestCase):
                 exited[0] = True
             return chunk
 
-        read_rollout_limits = worker.rollout_limits
+        read_rollout_limits = worker.threads.rollout_limits
 
         def read_limits(path, on_limits=None, offset=0):
             self.assertIs(path, rollout)
@@ -662,15 +662,15 @@ class WeeklyBudgetTests(RotationTestCase):
                 observed.append("final quota")
             return read_rollout_limits(path, on_limits=on_limits, offset=offset)
 
-        with mock.patch.object(worker, "prepare_home"), \
-                mock.patch.object(worker, "terminate"), \
+        with mock.patch.object(worker.accounts, "prepare_home"), \
+                mock.patch.object(worker.procs, "terminate"), \
                 mock.patch.object(worker.subprocess, "Popen", return_value=proc) as popen, \
                 mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
                 mock.patch.object(worker.os, "read", side_effect=read), \
                 mock.patch.object(worker.fcntl, "ioctl", return_value=(
                     len(b'{"type":"turn.completed"}\n').to_bytes(4, sys.byteorder))), \
-                mock.patch.object(worker, "rollout_path", return_value=rollout), \
-                mock.patch.object(worker, "rollout_limits", side_effect=read_limits), \
+                mock.patch.object(worker.threads, "rollout_path", return_value=rollout), \
+                mock.patch.object(worker.threads, "rollout_limits", side_effect=read_limits), \
                 mock.patch.object(worker, "publish_pr") as publish_pr, \
                 mock.patch.object(worker, "wrapup_turn", side_effect=AssertionError("unexpected wrap-up")) as wrapup:
             worker.run_turn(st, {"enabled": False, "accounts": [account]}, "finish the fix", None,
@@ -868,10 +868,10 @@ class WeeklyBudgetTests(RotationTestCase):
                 if language is not None:
                     cfg["language"] = language
                 state = {"max_task_weekly_percent": 10, "weekly_used_percent": 0}
-                worker.warn_weekly_headroom(state, cfg, infos)
+                worker.budgets.warn_weekly_headroom(state, cfg, infos)
                 self.assertEqual(state["weekly_budget_warning"], expected)
                 state["weekly_used_percent"] = 5
-                worker.warn_weekly_headroom(state, cfg, infos)
+                worker.budgets.warn_weekly_headroom(state, cfg, infos)
                 self.assertNotIn("weekly_budget_warning", state)
 
     def test_weekly_budget_warns_only_when_remaining_budget_exceeds_account_reserve(self):

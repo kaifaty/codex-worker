@@ -18,14 +18,14 @@ class PromptTests(unittest.TestCase):
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
         self.worker = load_worker({"CODEX_TASK_HOME": str(self.root)}, name="prompt_worker")
-        self.task = self.worker.TASKS / "prompt-contract"
+        self.task = self.worker.config.TASKS / "prompt-contract"
         self.task.mkdir(parents=True)
         (self.task / "brief.md").write_text("Implement the requested change.\n")
         self.st = {"slug": "prompt-contract", "base": "origin/main",
                    "worktree": str(self.root), "threads": []}
         # Git output is prompt input here; generating a text contract never
         # needs a real checkout or an external command.
-        shell = mock.patch.object(self.worker, "sh", side_effect=AssertionError("unexpected shell command"))
+        shell = mock.patch.object(self.worker.procs, "sh", side_effect=AssertionError("unexpected shell command"))
         shell.start()
         self.addCleanup(shell.stop)
 
@@ -68,10 +68,10 @@ class PromptTests(unittest.TestCase):
             with self.subTest(language=language):
                 cfg = {"language": language}
                 st = dict(self.st, thread="existing-thread")
-                self.assertEqual(self.worker.followup_prompt(st, message, cfg), message)
-                with mock.patch.object(self.worker, "sh", return_value="fixture git output"), \
-                        mock.patch.object(self.worker, "workspace_filter_driver", return_value=None):
-                    prompt = self.worker.followup_prompt(self.st, message, cfg)
+                self.assertEqual(self.worker.threads.followup_prompt(st, message, cfg), message)
+                with mock.patch.object(self.worker.procs, "sh", return_value="fixture git output"), \
+                        mock.patch.object(self.worker.sandboxing, "workspace_filter_driver", return_value=None):
+                    prompt = self.worker.threads.followup_prompt(self.st, message, cfg)
                 for part in ("Implement the requested change.", message, "fixture git output") + parts[language]:
                     self.assertIn(part, prompt)
                 self.assertTrue(prompt.endswith("\n"))

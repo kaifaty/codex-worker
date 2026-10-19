@@ -24,7 +24,7 @@ class AccountAuthTests(RotationTestCase):
                 self.assert_resumed_same_thread(executions[0], executions[1], self.home)
                 for execution in executions:
                     self.assert_output_schema(execution, slug)
-                self.assertEqual(executions[1]["prompt"], worker.auth_resume_prompt(worker.accounts_config()))
+                self.assertEqual(executions[1]["prompt"], worker.auth_resume_prompt(worker.config.accounts_config()))
                 self.assertIn("Recovered after authentication", output)
                 self.assertFalse(self.state(slug).get("needs_login"))
                 self.assertFalse(self.state(slug)["rotations"])
@@ -216,10 +216,10 @@ class AccountAuthTests(RotationTestCase):
             self.assertLessEqual(probes[0], 6, "the auth transition cap must bound the loop")
             return "auth", None
 
-        with mock.patch.object(worker, "snapshots", side_effect=snapshots), \
+        with mock.patch.object(worker.accounts, "snapshots", side_effect=snapshots), \
                 mock.patch.object(worker, "monitor", side_effect=monitor) as attempts, \
-                mock.patch.object(worker, "handoff", return_value="handoff with the original task"), \
-                mock.patch.object(worker, "save"):
+                mock.patch.object(worker.threads, "handoff", return_value="handoff with the original task"), \
+                mock.patch.object(worker.task_state, "save"):
             worker.run_turn(st, cfg, "original prompt", None, False, lambda: False, lambda seconds: None)
         self.assertEqual(st["outcome"], "failed")
         self.assertLessEqual(attempts.call_count, 1 + 2 * len(cfg["accounts"]))
@@ -294,24 +294,24 @@ class AccountAuthTests(RotationTestCase):
         raw = {"primary": {"used_percent": 10, "window_minutes": 300, "resets_at": self.reset},
                "secondary": {"used_percent": 99, "window_minutes": 10080, "resets_at": self.reset + 3600},
                "credits": {"hasCredits": True, "balance": "12.34", "unlimited": False}}
-        info = {"logged_in": True, "limits": worker.normalize_limits(raw)}
-        self.assertTrue(worker.exhausted(info, cfg))
-        self.assertEqual(worker.reset_time(info, cfg), self.reset + 3600)
-        self.assertEqual(worker.longest_window(info)["reset"], self.reset + 3600)
+        info = {"logged_in": True, "limits": worker.accounts.normalize_limits(raw)}
+        self.assertTrue(worker.accounts.exhausted(info, cfg))
+        self.assertEqual(worker.accounts.reset_time(info, cfg), self.reset + 3600)
+        self.assertEqual(worker.accounts.longest_window(info)["reset"], self.reset + 3600)
         info["limits"]["primary"].update(used=100, reset=self.reset + 7200)
-        self.assertEqual(worker.reset_time(info, cfg), self.reset + 7200)
+        self.assertEqual(worker.accounts.reset_time(info, cfg), self.reset + 7200)
         for credit, expected in (({"hasCredits": True, "balance": "12.34"}, True),
                                  ({"hasCredits": True, "balance": "0"}, False),
                                  ({"hasCredits": True, "balance": "invalid"}, False),
                                  ({"hasCredits": False, "balance": "12.34"}, False),
                                  ({"unlimited": True}, True)):
             with self.subTest(credits=credit):
-                self.assertEqual(worker.has_credits({"limits": {"credits": credit}}), expected)
-        clear = worker.normalize_limits({"primary": {"usedPercent": 3, "windowDurationMins": 10080,
+                self.assertEqual(worker.accounts.has_credits({"limits": {"credits": credit}}), expected)
+        clear = worker.accounts.normalize_limits({"primary": {"usedPercent": 3, "windowDurationMins": 10080,
                                                      "resetsAt": self.reset}})
-        self.assertTrue(worker.exhausted({"limits": clear, "ordinary": False}, cfg))
+        self.assertTrue(worker.accounts.exhausted({"limits": clear, "ordinary": False}, cfg))
         clear["reached"] = "workspace_member_credits_depleted"
-        self.assertTrue(worker.exhausted({"limits": clear}, cfg))
+        self.assertTrue(worker.accounts.exhausted({"limits": clear}, cfg))
 
     def test_unknown_stale_and_nearby_resets_wait_before_rechecking(self):
         worker = self.worker()
@@ -329,12 +329,12 @@ class AccountAuthTests(RotationTestCase):
                     sleeps.append(seconds)
                     clock[0] += seconds
 
-                with mock.patch.object(worker, "SLEEP_STEP", 60), \
-                        mock.patch.object(worker, "RESET_MARGIN", 0), \
+                with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
+                        mock.patch.object(worker.config, "RESET_MARGIN", 0), \
                         mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
                         mock.patch.object(worker.time, "sleep", side_effect=sleep), \
-                        mock.patch.object(worker, "save"), \
-                        mock.patch.object(worker, "snapshots", return_value=[ready]) as snapshots:
+                        mock.patch.object(worker.task_state, "save"), \
+                        mock.patch.object(worker.accounts, "snapshots", return_value=[ready]) as snapshots:
                     chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
                 self.assertIs(chosen, ready)
                 self.assertEqual(sum(sleeps), duration)
@@ -358,13 +358,13 @@ class AccountAuthTests(RotationTestCase):
             self.assertEqual(seconds, 60)
             clock[0] += 5000  # Wall time advances while the machine is asleep.
 
-        with mock.patch.object(worker, "SLEEP_STEP", 60), \
-                mock.patch.object(worker, "RESET_MARGIN", 120), \
+        with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
+                mock.patch.object(worker.config, "RESET_MARGIN", 120), \
                 mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
                 mock.patch.object(worker.time, "monotonic", side_effect=AssertionError("use wall time")), \
                 mock.patch.object(worker.time, "sleep", side_effect=mac_sleep) as sleeper, \
-                mock.patch.object(worker, "save"), \
-                mock.patch.object(worker, "snapshots", return_value=[other, current]):
+                mock.patch.object(worker.task_state, "save"), \
+                mock.patch.object(worker.accounts, "snapshots", return_value=[other, current]):
             chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
         sleeper.assert_called_once_with(60)
         self.assertIs(chosen, current, "keep the existing thread when both subscriptions become available")
@@ -375,12 +375,12 @@ class AccountAuthTests(RotationTestCase):
 
     def test_reset_wait_exhausts_eight_day_budget_across_sleep_episodes(self):
         worker = self.worker()
-        self.assertEqual(worker.MAX_RESET_WAIT_SECONDS, 8 * 86400)
+        self.assertEqual(worker.config.MAX_RESET_WAIT_SECONDS, 8 * 86400)
         cfg = {"wait_for_reset": True, "switch_at": 99}
         clock = [1000.0]
         sleeps = []
         st = {"account": "main", "thread": "current-thread", "rotations": [],
-              "reset_wait_seconds": worker.MAX_RESET_WAIT_SECONDS - 120}
+              "reset_wait_seconds": worker.config.MAX_RESET_WAIT_SECONDS - 120}
         limited = {"name": "main", "logged_in": True, "limits": {"primary": {
             "used": 99, "minutes": 10080, "reset": 1060}}}
 
@@ -388,12 +388,12 @@ class AccountAuthTests(RotationTestCase):
             sleeps.append(seconds)
             clock[0] += seconds
 
-        with mock.patch.object(worker, "SLEEP_STEP", 60), \
-                mock.patch.object(worker, "RESET_MARGIN", 0), \
+        with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
+                mock.patch.object(worker.config, "RESET_MARGIN", 0), \
                 mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
                 mock.patch.object(worker.time, "sleep", side_effect=sleep), \
-                mock.patch.object(worker, "save"), \
-                mock.patch.object(worker, "snapshots", return_value=[limited]) as snapshots:
+                mock.patch.object(worker.task_state, "save"), \
+                mock.patch.object(worker.accounts, "snapshots", return_value=[limited]) as snapshots:
             chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
         self.assertIsNone(chosen)
         self.assertEqual(sleeps, [60, 60])
@@ -410,12 +410,12 @@ class AccountAuthTests(RotationTestCase):
               "sleeping": {"until": self.reset, "account": "main", "reason": "quota"},
               "turns": 1, "branch": "test-branch", "base": "HEAD", "account": "main",
               "thread": "current-thread", "worktree": str(self.repo)}
-        with mock.patch.object(worker, "load", side_effect=lambda slug: dict(st)), \
-                mock.patch.object(worker, "alive", return_value=False), \
-                mock.patch.object(worker, "save") as save, \
-                mock.patch.object(worker, "last_message", return_value=""), \
-                mock.patch.object(worker, "events", return_value=[]), \
-                mock.patch.object(worker, "sh", return_value=""), \
+        with mock.patch.object(worker.task_state, "load", side_effect=lambda slug: dict(st)), \
+                mock.patch.object(worker.procs, "alive", return_value=False), \
+                mock.patch.object(worker.task_state, "save") as save, \
+                mock.patch.object(worker.threads, "last_message", return_value=""), \
+                mock.patch.object(worker.threads, "events", return_value=[]), \
+                mock.patch.object(worker.procs, "sh", return_value=""), \
                 mock.patch("builtins.print") as printer:
             worker.cmd_status(SimpleNamespace(slug=st["slug"]))
             status = "\n".join(str(call.args[0]) for call in printer.call_args_list)
@@ -432,7 +432,7 @@ class AccountAuthTests(RotationTestCase):
         cfg = {"wait_for_reset": True, "switch_at": 99}
         clock = [1000.0]
         st = {"account": "main", "thread": "current-thread", "rotations": [],
-              "reset_wait_seconds": worker.MAX_RESET_WAIT_SECONDS - 90}
+              "reset_wait_seconds": worker.config.MAX_RESET_WAIT_SECONDS - 90}
         limited = {"name": "main", "logged_in": True, "limits": {"primary": {
             "used": 99, "minutes": 10080, "reset": 1060}}}
         ready = dict(limited, limits={"primary": {"used": 0, "minutes": 10080, "reset": 2000}})
@@ -447,12 +447,12 @@ class AccountAuthTests(RotationTestCase):
             self.assertTrue(cancelled(), "a slow quota probe must respect the same wait deadline")
             return [ready]
 
-        with mock.patch.object(worker, "SLEEP_STEP", 60), \
-                mock.patch.object(worker, "RESET_MARGIN", 0), \
+        with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
+                mock.patch.object(worker.config, "RESET_MARGIN", 0), \
                 mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
                 mock.patch.object(worker.time, "sleep", side_effect=sleep), \
-                mock.patch.object(worker, "save"), \
-                mock.patch.object(worker, "snapshots", side_effect=snapshots):
+                mock.patch.object(worker.task_state, "save"), \
+                mock.patch.object(worker.accounts, "snapshots", side_effect=snapshots):
             chosen = worker.wait_for_account(st, [limited], cfg, "quota", lambda: False)
         self.assertIsNone(chosen, "do not launch an executor once the wait budget has expired")
         self.assertEqual(st["reset_wait_seconds"], 8 * 86400)
@@ -466,12 +466,12 @@ class AccountAuthTests(RotationTestCase):
                 clock = [0.0]
                 stopped = [False]
                 slug = "quota-cancel-" + case
-                (worker.TASKS / slug).mkdir(parents=True)
+                (worker.config.TASKS / slug).mkdir(parents=True)
                 st = {"slug": slug, "pid": IMPOSSIBLE_PID, "thread": "", "worktree": str(self.repo),
                       "threads": [], "rotations": []}
                 if case == "stop":
                     st["stop_request"] = {"at": time.time(), "pid": st["pid"]}
-                worker.save(st)
+                worker.task_state.save(st)
                 proc = mock.Mock(pid=IMPOSSIBLE_PID)
                 proc.poll.return_value = None
                 proc.stdout.fileno.return_value = 99
@@ -492,10 +492,10 @@ class AccountAuthTests(RotationTestCase):
                         return {"reason": reason}
                     raise RuntimeError("stopped")
 
-                with mock.patch.object(worker, "prepare_home"), \
-                        mock.patch.object(worker, "save"), \
-                        mock.patch.object(worker, "events", return_value=[]), \
-                        mock.patch.object(worker, "terminate") as terminate, \
+                with mock.patch.object(worker.accounts, "prepare_home"), \
+                        mock.patch.object(worker.task_state, "save"), \
+                        mock.patch.object(worker.threads, "events", return_value=[]), \
+                        mock.patch.object(worker.procs, "terminate") as terminate, \
                         mock.patch.object(worker.subprocess, "Popen", return_value=proc), \
                         mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
                         mock.patch.object(worker.os, "read", return_value=(
@@ -516,8 +516,8 @@ class AccountAuthTests(RotationTestCase):
 
     def test_monitor_bounds_rollout_searches_and_reads_during_long_step(self):
         worker = self.worker()
-        self.assertEqual(worker.RATE_POLL_SECONDS, 30)
-        self.assertEqual(worker.ROLLOUT_SEARCH_SECONDS, 5)
+        self.assertEqual(worker.config.RATE_POLL_SECONDS, 30)
+        self.assertEqual(worker.config.ROLLOUT_SEARCH_SECONDS, 5)
         duration = 600.0
         rollout = self.root / "unchanged-rollout.jsonl"
         rollout.write_text("The rollout stays unchanged throughout this step.\n")
@@ -529,7 +529,7 @@ class AccountAuthTests(RotationTestCase):
                 cached_rollout = mock.Mock(wraps=rollout)
                 emitted = [False]
                 slug = "poll-resume" if resumed else "poll-new"
-                (worker.TASKS / slug).mkdir(parents=True)
+                (worker.config.TASKS / slug).mkdir(parents=True)
                 st = {"slug": slug, "thread": "same-thread" if resumed else "",
                       "worktree": str(self.repo), "threads": [], "rotations": []}
                 proc = mock.Mock(pid=IMPOSSIBLE_PID)
@@ -559,23 +559,23 @@ class AccountAuthTests(RotationTestCase):
                 def read_limits(path, on_limits=None, offset=0):
                     self.assertIs(path, cached_rollout)
                     reads.append(clock[0])
-                    limits = worker.normalize_limits({"primary": {"usedPercent": 10,
+                    limits = worker.accounts.normalize_limits({"primary": {"usedPercent": 10,
                         "windowDurationMins": 10080, "resetsAt": self.reset}})
                     if on_limits is not None:
                         on_limits(limits)
                     return limits
 
                 selector.select.side_effect = select
-                with mock.patch.object(worker, "prepare_home"), \
-                        mock.patch.object(worker, "save"), \
-                        mock.patch.object(worker, "events", return_value=[]), \
-                        mock.patch.object(worker, "terminate"), \
+                with mock.patch.object(worker.accounts, "prepare_home"), \
+                        mock.patch.object(worker.task_state, "save"), \
+                        mock.patch.object(worker.threads, "events", return_value=[]), \
+                        mock.patch.object(worker.procs, "terminate"), \
                         mock.patch.object(worker.subprocess, "Popen", return_value=proc), \
                         mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
                         mock.patch.object(worker.os, "read", side_effect=read), \
                         mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
-                        mock.patch.object(worker, "rollout_path", side_effect=find_rollout), \
-                        mock.patch.object(worker, "rollout_limits", side_effect=read_limits):
+                        mock.patch.object(worker.threads, "rollout_path", side_effect=find_rollout), \
+                        mock.patch.object(worker.threads, "rollout_limits", side_effect=read_limits):
                     result = worker.monitor(st, {"enabled": True, "switch_at": 99},
                                             {"name": "main", "home": str(self.home)}, "prompt", None,
                                             lambda: False, mock.Mock(side_effect=AssertionError("unexpected limit")))
@@ -587,15 +587,15 @@ class AccountAuthTests(RotationTestCase):
                     self.assertLessEqual(len(searches), 4, "stop searching after finding the rollout")
                     self.assertTrue(all(b - a >= 5 - 1e-8 for a, b in zip(searches, searches[1:])), searches)
                     self.assertTrue(reads, "read the newly discovered rollout")
-                self.assertLessEqual(len(reads), int(duration / worker.RATE_POLL_SECONDS) + 1)
+                self.assertLessEqual(len(reads), int(duration / worker.config.RATE_POLL_SECONDS) + 1)
                 self.assertLessEqual(cached_rollout.stat.call_count,
-                                     int(duration / worker.RATE_POLL_SECONDS) + 2)
-                self.assertTrue(all(b - a >= worker.RATE_POLL_SECONDS - 1e-8
+                                     int(duration / worker.config.RATE_POLL_SECONDS) + 2)
+                self.assertTrue(all(b - a >= worker.config.RATE_POLL_SECONDS - 1e-8
                                     for a, b in zip(reads, reads[1:])), reads)
 
     def test_wait_polls_each_second_and_clears_dead_legacy_pid(self):
         worker = self.worker()
-        self.assertEqual(worker.WAIT_POLL_SECONDS, 1)
+        self.assertEqual(worker.config.WAIT_POLL_SECONDS, 1)
         st = {"slug": "legacy-pid", "pid": IMPOSSIBLE_PID, "rotations": [], "turns": 1,
               "branch": "test-branch", "base": "HEAD", "worktree": str(self.repo)}
         running = [True]
@@ -604,13 +604,13 @@ class AccountAuthTests(RotationTestCase):
             self.assertEqual(seconds, 1)
             running[0] = False
 
-        with mock.patch.object(worker, "load", side_effect=lambda slug: dict(st)), \
-                mock.patch.object(worker, "alive", side_effect=lambda pid: bool(pid) and running[0]), \
+        with mock.patch.object(worker.task_state, "load", side_effect=lambda slug: dict(st)), \
+                mock.patch.object(worker.procs, "alive", side_effect=lambda pid: bool(pid) and running[0]), \
                 mock.patch.object(worker.time, "sleep", side_effect=sleep) as sleeper, \
-                mock.patch.object(worker, "save") as save, \
-                mock.patch.object(worker, "last_message", return_value=""), \
-                mock.patch.object(worker, "events", return_value=[]), \
-                mock.patch.object(worker, "sh", return_value=""), \
+                mock.patch.object(worker.task_state, "save") as save, \
+                mock.patch.object(worker.threads, "last_message", return_value=""), \
+                mock.patch.object(worker.threads, "events", return_value=[]), \
+                mock.patch.object(worker.procs, "sh", return_value=""), \
                 mock.patch("builtins.print"):
             worker.cmd_wait(SimpleNamespace(slug=st["slug"], timeout=0))
         sleeper.assert_called_once_with(1)

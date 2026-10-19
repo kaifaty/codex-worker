@@ -209,7 +209,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertIn(question, prompt)
         self.assertNotIn("TASK-RULES-MUST-NOT-REACH-SCOUT", prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.scout_prompt(question, worker.accounts_config()))
+        self.assertEqual(prompt, worker.scout_prompt(question, worker.config.accounts_config()))
         self.assertIn(reply, output)
         self.assert_scout_output(output)
         telemetry = self.phase_telemetry_journal()
@@ -306,7 +306,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertIn(question.read_text().strip(), prompt)
         self.assertNotIn("SCOUT-MUST-SKIP-CUSTOM-TASK-RULES", prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.scout_prompt(question.read_text(), worker.accounts_config()))
+        self.assertEqual(prompt, worker.scout_prompt(question.read_text(), worker.config.accounts_config()))
         self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
         self.assertEqual(self.git("branch", "--list", "codex/scout-file"), "")
@@ -460,41 +460,41 @@ class ResultScoutConfigTests(RotationTestCase):
         bundle = self.root / "bundled-codex"
         bundle.write_text("fixture")
         with mock.patch.dict(os.environ, self.env), \
-                mock.patch.object(worker, "CHATGPT_CODEX", bundle), \
+                mock.patch.object(worker.config, "CHATGPT_CODEX", bundle), \
                 mock.patch.object(worker.shutil, "which", return_value="/opt/bin/codex") as which:
-            self.assertEqual(worker.resolve_codex(), str(self.fake))
+            self.assertEqual(worker.config.resolve_codex(), str(self.fake))
             which.assert_not_called()
             os.environ.pop("CODEX_TASK_CODEX")
-            self.assertEqual(worker.resolve_codex(), str(bundle))
+            self.assertEqual(worker.config.resolve_codex(), str(bundle))
             which.assert_not_called()
             bundle.unlink()
-            self.assertEqual(worker.resolve_codex(), "/opt/bin/codex")
+            self.assertEqual(worker.config.resolve_codex(), "/opt/bin/codex")
             which.assert_called_once_with("codex")
             which.return_value = None
             with self.assertRaises(SystemExit) as error:
-                worker.resolve_codex()
+                worker.config.resolve_codex()
             self.assertIn("Codex CLI", str(error.exception))
             self.assertIn("CODEX_TASK_CODEX", str(error.exception))
 
     def test_new_settings_override_legacy_and_legacy_remains_readable(self):
         self.configure()
         worker = self.worker()
-        self.assertTrue(worker.accounts_config()["enabled"])
-        self.assertEqual(worker.accounts_config()["language"], "ru")
+        self.assertTrue(worker.config.accounts_config()["enabled"])
+        self.assertEqual(worker.config.accounts_config()["language"], "ru")
         path = self.home / "codex-worker.json"
         path.write_text(json.dumps({"language": "en", "switch_at": 95}))
-        cfg = worker.accounts_config()
+        cfg = worker.config.accounts_config()
         self.assertEqual(cfg["language"], "en")
         self.assertEqual(cfg["switch_at"], 95)
         self.assertFalse(cfg["enabled"], "a settings file alone must not enable rotation")
         self.assertEqual(cfg["accounts"], [{"name": "main", "home": str(self.home)}])
         # A malformed legacy file must not affect the preferred settings.
         (self.home / "claude-accounts.json").write_text("not json")
-        self.assertEqual(worker.accounts_config(), cfg)
+        self.assertEqual(worker.config.accounts_config(), cfg)
 
     def test_language_defaults_rules_and_generated_prompts(self):
         worker = self.worker()
-        task = worker.TASKS / "language"
+        task = worker.config.TASKS / "language"
         task.mkdir(parents=True)
         (task / "brief.md").write_text("Implement the requested change.\n")
         st = {"slug": "language", "base": "HEAD", "worktree": str(self.repo), "threads": []}
@@ -502,12 +502,12 @@ class ResultScoutConfigTests(RotationTestCase):
             with self.subTest(language=language):
                 if language == "ru":
                     (self.home / "codex-worker.json").write_text('{"language":"ru"}')
-                cfg = worker.accounts_config()
+                cfg = worker.config.accounts_config()
                 self.assertEqual(cfg["language"], language)
                 expected = SKILL / "references" / ("rules.ru.md" if language == "ru" else "rules.md")
-                self.assertEqual(worker.rules_path(), expected)
-                self.assertEqual(worker.rules_text(), expected.read_text())
-                prompt = worker.handoff(st)
+                self.assertEqual(worker.sandboxing.rules_path(), expected)
+                self.assertEqual(worker.sandboxing.rules_text(), expected.read_text())
+                prompt = worker.threads.handoff(st)
                 if language == "ru":
                     self.assertRegex(prompt, "[А-Яа-яЁё]")
                 else:
@@ -523,8 +523,8 @@ class ResultScoutConfigTests(RotationTestCase):
         for language in ("en", "ru"):
             with self.subTest(language=language):
                 (self.home / "codex-worker.json").write_text(json.dumps({"language": language}))
-                self.assertEqual(worker.rules_path(), override)
-                self.assertEqual(worker.rules_text(), override.read_text())
+                self.assertEqual(worker.sandboxing.rules_path(), override)
+                self.assertEqual(worker.sandboxing.rules_text(), override.read_text())
         self.start("custom-rules")
         self.wait("custom-rules")
         prompt = self.invocations()[0]["prompt"]
@@ -545,7 +545,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertNotRegex(self.invocations()[0]["prompt"], "[А-Яа-яЁё]")
         worker = self.worker()
         self.assertEqual(self.invocations()[1]["prompt"], worker.review_prompt(
-            self.state("single-account"), worker.accounts_config()))
+            self.state("single-account"), worker.config.accounts_config()))
         self.assertIn((SKILL / "references" / "rules.md").read_text().splitlines()[0],
                       self.invocations()[0]["prompt"])
         self.notification("single-account", "turn_finished")
@@ -559,7 +559,7 @@ class ResultScoutConfigTests(RotationTestCase):
         legacy.write_text(json.dumps(cfg))
         old = legacy.read_bytes()
         worker = self.worker()
-        with mock.patch.object(worker, "prepare_home"), \
+        with mock.patch.object(worker.accounts, "prepare_home"), \
                 mock.patch.object(worker.os, "execvpe") as execute, \
                 mock.patch("builtins.print"):
             worker.cmd_login(SimpleNamespace(name="second", browser=False))

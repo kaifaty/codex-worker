@@ -28,9 +28,9 @@ if len(sys.argv) > 2:
     if sys.stdin.readline() != "go\\n":
         sys.exit("missing start signal")
     for _ in range(int(sys.argv[2])):
-        worker.CLOCK.sleep(float(sys.argv[3]))
-print(json.dumps({"wall": worker.CLOCK.time(),
-                  "monotonic": worker.CLOCK.monotonic()}))
+        worker.clock.CLOCK.sleep(float(sys.argv[3]))
+print(json.dumps({"wall": worker.clock.CLOCK.time(),
+                  "monotonic": worker.clock.CLOCK.monotonic()}))
 """
 
 
@@ -47,7 +47,7 @@ class ClockTests(unittest.TestCase):
         self.worker = load_worker(environment, name="clock_worker", clear=True)
 
     def test_real_clock_uses_module_time(self):
-        clock = self.worker.Clock()
+        clock = self.worker.clock.Clock()
         for name in ("time", "monotonic"):
             with self.subTest(method=name):
                 before = getattr(time, name)()
@@ -60,7 +60,7 @@ class ClockTests(unittest.TestCase):
         self.assertGreaterEqual(time.monotonic() - before, 0.001)
 
     def test_file_sleep_advances_both_clocks(self):
-        clock = self.worker.Clock(self.clock_file)
+        clock = self.worker.clock.Clock(self.clock_file)
         self.assertEqual(clock.time(), self.initial["wall"])
         self.assertEqual(clock.monotonic(), self.initial["monotonic"])
         clock.sleep(7.25)
@@ -74,7 +74,7 @@ class ClockTests(unittest.TestCase):
                     CODEX_TASK_CLOCK_FILE=str(self.clock_file))
 
     def test_environment_clock_is_shared_by_two_processes(self):
-        clock = self.worker.Clock(self.clock_file)
+        clock = self.worker.clock.Clock(self.clock_file)
         for advance in (0, 3.5):
             with self.subTest(advance=advance):
                 clock.sleep(advance)
@@ -120,7 +120,7 @@ class ClockTests(unittest.TestCase):
             self.assertGreaterEqual(observed["wall"], self.initial["wall"] + repeats * seconds)
             self.assertGreaterEqual(observed["monotonic"],
                                     self.initial["monotonic"] + repeats * seconds)
-        clock = self.worker.Clock(self.clock_file)
+        clock = self.worker.clock.Clock(self.clock_file)
         total = count * repeats * seconds
         self.assertEqual(clock.time(), self.initial["wall"] + total)
         self.assertEqual(clock.monotonic(), self.initial["monotonic"] + total)

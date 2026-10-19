@@ -10,6 +10,7 @@ import unittest
 
 SCRIPTS = (Path(__file__).resolve().parents[1]
            / "plugins/codex-worker/skills/codex-worker/scripts")
+PACKAGE_FILE_ALLOWLIST = {"codex_worker/config.py"}
 
 
 class _Bindings(ast.NodeVisitor):
@@ -403,7 +404,7 @@ def check_layout(scripts):
         syntax_reads = {node.id: node.lineno for node in ast.walk(tree)
                         if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)}
         # __file__ is injected by Python's module loader. Package modules have
-        # a separate prohibition below; entrypoint path constants may use it.
+        # a separate prohibition below, apart from the path-owning config.
         available = set(bindings.names) | set(dir(builtins)) | {"__file__"}
         class_globals = reads.class_comprehension_globals(source)
         for scope, positions in reads.class_fallbacks.items():
@@ -437,7 +438,9 @@ def check_layout(scripts):
                     and node.func.id in {"globals", "locals", "vars"}
                     and not node.args and not node.keywords):
                 report(path, node.lineno, "no-dynamic-namespace", node.func.id + "()")
-            if (module != "codex_task" and isinstance(node, ast.Name)
+            if (module != "codex_task"
+                    and path.relative_to(scripts).as_posix() not in PACKAGE_FILE_ALLOWLIST
+                    and isinstance(node, ast.Name)
                     and node.id == "__file__"):
                 report(path, node.lineno, "no-package-file", "__file__")
 
@@ -493,6 +496,9 @@ class ModuleLayoutTests(unittest.TestCase):
              "b.py:1: acyclic-imports"),
             ({"codex_worker/a.py": "path = __file__\n"},
              "a.py:1: no-package-file"),
+            ({"codex_worker/config.py": "config_path = __file__\n",
+              "codex_worker/a.py": "path = __file__\n"},
+             "a.py:1: no-package-file"),
             ({"codex_worker/a.py": "from . import b\nvalue = b.missing\n",
               "codex_worker/b.py": "name = 1\n"},
              "a.py:2: module-attribute: b.missing"),
@@ -545,6 +551,12 @@ class ModuleLayoutTests(unittest.TestCase):
                 findings = self.check_tree({"codex_worker/a.py": source})
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:%s: undefined-global: missing" % line, findings[0])
+
+    def test_package_config_can_anchor_paths(self):
+        self.assertEqual(self.check_tree({
+            "codex_task.py": "entry_path = __file__\n",
+            "codex_worker/config.py": "config_path = __file__\n",
+        }), [])
 
     def test_class_comprehension_bodies_skip_class_bindings(self):
         for expression in (
