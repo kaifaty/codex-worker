@@ -2877,6 +2877,8 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             outcome = stop_outcome(st, stopped) or st["outcome"]
             result = reviews[-1].get("result") if reviews else None
             if reviews:
+                if st.get("review_account") is None:
+                    st["review_account"] = reviews[-1]["account"]
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
                       "account": current_turn_account(st),
