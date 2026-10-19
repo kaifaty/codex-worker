@@ -4,7 +4,8 @@
 Run with /usr/bin/python3 -I tests/compare_rotation_assertions.py. The default
 base revision is origin/main. No tests are imported or executed.
 Assertion comparisons cover changed tests and existing helpers, retain every
-argument and ignore only AST locations.
+argument and ignore AST locations. --strip-module-hops also ignores package
+module hops at the known loaded-worker expressions during a module split.
 """
 
 import argparse
@@ -18,6 +19,31 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 EXCLUDED = {"rotation_runner.py", "stress_rotation.py"}
+# Loaded-script expressions in rotation_*.py: local fixtures use worker,
+# PromptTests stores self.worker, and RotationTestCase.worker() returns a module.
+# Keep this explicit so fixture methods such as self.state(slug) stay untouched.
+WORKER_EXPRESSIONS = ("worker", "self.worker", "self.worker()")
+WORKER_ASTS = frozenset(
+    ast.dump(ast.parse(expression, mode="eval").body, include_attributes=False)
+    for expression in WORKER_EXPRESSIONS
+)
+SCRIPTS = ROOT / "plugins/codex-worker/skills/codex-worker/scripts"
+
+
+class StripModuleHops(ast.NodeTransformer):
+    def __init__(self, modules):
+        self.modules = modules
+
+    def visit_Attribute(self, node):
+        worker_hop = (node.attr in self.modules
+                      and ast.dump(node.value, include_attributes=False) in WORKER_ASTS)
+        self.generic_visit(node)
+        if worker_hop:
+            replacement = node.value
+            if isinstance(replacement, (ast.Name, ast.Attribute)):
+                replacement.ctx = node.ctx
+            return ast.copy_location(replacement, node)
+        return node
 
 
 def git_show(spec):
@@ -63,7 +89,7 @@ def assertion_calls(node):
     return calls
 
 
-def collect_definitions(sources):
+def collect_definitions(sources, modules=()):
     tests = {}
     helpers = {}
     for path, source in sorted(sources.items()):
@@ -99,7 +125,10 @@ def collect_definitions(sources):
 
             visit_AsyncFunctionDef = visit_FunctionDef
 
-        Definitions().visit(ast.parse(source, filename=path))
+        tree = ast.parse(source, filename=path)
+        if modules:
+            tree = StripModuleHops(modules).visit(tree)
+        Definitions().visit(tree)
     return tests, helpers
 
 
@@ -131,9 +160,11 @@ def changed_definitions(before, after, require_assertions=False):
     return changed
 
 
-def compare(revision):
-    before, before_helpers = collect_definitions(sources_at_revision(revision))
-    after, after_helpers = collect_definitions(working_sources())
+def compare(revision, strip_module_hops=False):
+    modules = ({path.stem for path in (SCRIPTS / "codex_worker").glob("*.py")}
+               if strip_module_hops else set())
+    before, before_helpers = collect_definitions(sources_at_revision(revision), modules)
+    after, after_helpers = collect_definitions(working_sources(), modules)
     changed = changed_definitions(before, after)
     changed_helpers = changed_definitions(
         before_helpers, after_helpers, require_assertions=True)
@@ -160,9 +191,11 @@ def main():
                         help="local Git revision to compare (default: %(default)s)")
     parser.add_argument("--json", action="store_true",
                         help="emit the full comparison as JSON")
+    parser.add_argument("--strip-module-hops", action="store_true",
+                        help="ignore worker.<package module> hops in test bodies")
     args = parser.parse_args()
     try:
-        result = compare(args.base)
+        result = compare(args.base, strip_module_hops=args.strip_module_hops)
     except (OSError, ValueError, SyntaxError, subprocess.CalledProcessError) as error:
         parser.exit(2, "comparison failed: {}\n".format(error))
     if args.json:
