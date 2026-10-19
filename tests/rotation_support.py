@@ -38,6 +38,7 @@ def worker_code():
 # the quota in a rollout, interrupt the process group, and create a fresh thread.
 FAKE_CODEX = r'''import datetime
 import fcntl
+import importlib.util
 import json
 import os
 import signal
@@ -46,6 +47,14 @@ import sys
 import time
 import uuid
 from pathlib import Path
+
+clock = time
+if os.environ.get("CODEX_TASK_CLOCK_FILE"):
+    spec = importlib.util.spec_from_file_location("fake_clock_worker", os.environ["CODEX_FAKE_WORKER_SCRIPT"])
+    worker = importlib.util.module_from_spec(spec)
+    sys.dont_write_bytecode = True
+    spec.loader.exec_module(worker)
+    clock = worker.CLOCK
 
 home = Path(os.environ["CODEX_HOME"])
 fixture_path = home / "fixture.json"
@@ -63,7 +72,7 @@ def trace(value):
     value.setdefault("pid", os.getpid())
     value.setdefault("ppid", os.getppid())
     value.setdefault("pgid", os.getpgrp())
-    value.setdefault("monotonic", time.monotonic())
+    value.setdefault("monotonic", clock.monotonic())
     append(trace_path, value)
 
 def emit(value):
@@ -89,10 +98,10 @@ def limits(value):
     if value.get("auto_reset") and (not reset_gate or Path(reset_gate).exists()):
         for name in ("primary", "secondary"):
             window = result[name]
-            if not window or window.get("resetsAt") is None or time.time() < window["resetsAt"]:
+            if not window or window.get("resetsAt") is None or clock.time() < window["resetsAt"]:
                 continue
             release = value.get("release_at", window["resetsAt"])
-            if time.time() < release:
+            if clock.time() < release:
                 # A quota provider can postpone its reset after the first deadline.
                 window["resetsAt"] = release
             else:
@@ -298,9 +307,9 @@ def execute():
         return 1
 
     def capacity_failure():
-        deadline = time.monotonic() + run.get("delay", 0)
-        while not stopped[0] and time.monotonic() < deadline:
-            time.sleep(0.02)
+        deadline = clock.monotonic() + run.get("delay", 0)
+        while not stopped[0] and clock.monotonic() < deadline:
+            clock.sleep(0.02)
         if stopped[0]:
             return 130
         if any(key in run for key in ("token_usage_after", "weekly_used_after")):
@@ -332,6 +341,11 @@ def execute():
     # Publish the ready fixture before the supervisor starts looking for its rollout.
     emit({"type": "thread.started", "thread_id": thread})
     emit({"type": "turn.started"})
+    if run.get("delay_gate"):
+        while not Path(run["delay_gate"]).exists() and not stopped[0]:
+            time.sleep(0.02)
+        if stopped[0]:
+            return 130
     if run.get("spawn_child"):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -374,7 +388,7 @@ def execute():
     if run["mode"] == "refused":
         return refusal()
     if run["mode"] in ("limit", "usage_error"):
-        time.sleep(run.get("limit_after", 0.15))
+        clock.sleep(run.get("limit_after", 0.15))
         value = fixture()
         value["primary"]["usedPercent"] = 99
         value["ordinaryUsageAllowed"] = run.get("ordinaryUsageAllowed", True)
@@ -392,14 +406,14 @@ def execute():
     if run["mode"] == "capacity_error":
         return capacity_failure()
     if "weekly_update_after" in run:
-        deadline = time.monotonic() + run["weekly_update_after"]
-        while not stopped[0] and time.monotonic() < deadline:
-            time.sleep(0.02)
+        deadline = clock.monotonic() + run["weekly_update_after"]
+        while not stopped[0] and clock.monotonic() < deadline:
+            clock.sleep(0.02)
         if not stopped[0]:
             rollout_limits()
-    deadline = time.monotonic() + run.get("delay", 0)
-    while not stopped[0] and time.monotonic() < deadline:
-        time.sleep(0.02)
+    deadline = clock.monotonic() + run.get("delay", 0)
+    while not stopped[0] and clock.monotonic() < deadline:
+        clock.sleep(0.02)
     if run["mode"] in ("limit", "hold"):
         deadline = time.monotonic() + 100
         while not stopped[0] and time.monotonic() < deadline:
@@ -595,6 +609,14 @@ class RotationTestCase(unittest.TestCase):
         self.reset = int(time.time()) + 7200
         self.account(self.home, "A", self.reset)
         self.account(self.other, "B", self.reset + 3600)
+
+    def enable_fake_clock(self):
+        """Share the production file-backed clock with every fixture process."""
+        path = self.root / "clock.json"
+        path.write_text(json.dumps({"wall": time.time(), "monotonic": time.monotonic()}))
+        self.env["CODEX_TASK_CLOCK_FILE"] = str(path)
+        self.env["CODEX_FAKE_WORKER_SCRIPT"] = str(SCRIPT)
+        return self.worker().CLOCK
 
     @property
     def repo(self):

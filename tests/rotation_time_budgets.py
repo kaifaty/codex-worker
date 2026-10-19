@@ -63,6 +63,7 @@ class TimeBudgetTests(RotationTestCase):
                               if row["phase"] == "turn")["budget_stop"], "minutes")
 
     def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
+        clock = self.enable_fake_clock()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en", use_reset_credits=True)
         gate = self.root / "publish-rollout"
@@ -99,6 +100,7 @@ class TimeBudgetTests(RotationTestCase):
                                  if event.get("command") == "exec-child")
                     self.extra_pids.add(child)
                     self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
+                    clock.sleep(4.1)
                     output = self.wait("cap-locked-journal", timeout=10)
                     state = self.state("cap-locked-journal")
                     self.assertEqual(state["outcome"], "budget_exhausted")
@@ -148,15 +150,15 @@ class TimeBudgetTests(RotationTestCase):
         self.assertIn(result["summary"], output)
 
     def test_time_budget_does_not_count_sleep_until_subscription_reset(self):
+        clock = self.enable_fake_clock()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
         self.configure()
-        reset = time.time() + 4
+        reset = clock.time() + 4
         self.account(self.home, "A", reset, auto_reset=True, runs=[
             {"mode": "usage_error", "limit_after": 0.1},
             {"mode": "complete", "delay": 0.6, "reply": "Finished after a long quota sleep"}])
         self.account(self.other, "B", self.reset, used=99)
-        reset = self.reset_after_ready(
-            lambda: self.start("cap-reset-sleep", "--max-minutes", "2.5"), reset, 4, after_exec=True)
+        self.start("cap-reset-sleep", "--max-minutes", "2.5")
         output = self.wait("cap-reset-sleep", timeout=12, through_sleep=True)
         state = self.state("cap-reset-sleep")
         self.assertEqual(state["outcome"], "completed")
@@ -190,14 +192,20 @@ class TimeBudgetTests(RotationTestCase):
                             for index, primary in published), published)
 
     def test_time_budget_accumulates_exec_time_across_account_rotation(self):
+        self.enable_fake_clock()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
         self.configure(language="en")
         # Each exec fits a fresh budget; together they must exceed the shared cap.
         self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error", "limit_after": 1.8}])
+        gate = self.root / "start-second-delay"
         self.account(self.other, "B", self.reset, runs=[
-            {"mode": "complete", "delay": 2.2, "reply": "This would finish if the budget restarted"},
+            {"mode": "complete", "delay": 2.2, "delay_gate": str(gate),
+             "reply": "This would finish if the budget restarted"},
             {"mode": "complete", "reply": self.work_result("partial")}])
         self.start("cap-rotation", "--max-minutes", "1.7")
+        self.until(lambda: len(self.invocations()) == 2 and
+                   self.state("cap-rotation")["thread"] == self.invocations()[1]["thread"])
+        gate.touch()
         self.wait("cap-rotation", timeout=12)
         executions = self.invocations()
         self.assertEqual(self.state("cap-rotation")["outcome"], "budget_exhausted")
@@ -315,6 +323,7 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual(prompt, worker.wrapup_prompt(state, state["turn_stop"], worker.accounts_config()))
 
     def test_max_minutes_uses_config_default_and_say_override_for_one_turn(self):
+        clock = self.enable_fake_clock()
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en", max_turn_minutes=18)
         legacy = self.home / "claude-accounts.json"
@@ -325,6 +334,9 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "complete", "delay": 4.8, "reply": "Say override completed"},
             {"mode": "hold"}, {"mode": "complete", "reply": self.work_result("partial")}])
         self.start("cap-config")
+        self.until(lambda: len(self.invocations()) == 1 and
+                   self.state("cap-config")["thread"] == self.invocations()[0]["thread"])
+        clock.sleep(3.7)
         output = self.wait("cap-config", timeout=12)
         self.assertEqual(self.state("cap-config")["outcome"], "budget_exhausted")
         self.assertIn("== turn stopped: time budget 18 min exhausted", output)
@@ -332,6 +344,9 @@ class TimeBudgetTests(RotationTestCase):
         self.assertIn("Say override completed", self.wait("cap-config", timeout=12))
         self.assertEqual(self.state("cap-config")["outcome"], "completed")
         self.cli("say", "cap-config", "Use the configured default again")
+        self.until(lambda: len(self.invocations()) == 4 and
+                   self.state("cap-config").get("codex_pid") == self.invocations()[3]["pid"])
+        clock.sleep(3.7)
         self.wait("cap-config", timeout=12)
         self.assertEqual(self.state("cap-config")["outcome"], "budget_exhausted")
         self.assertEqual(len(self.invocations()), 5)

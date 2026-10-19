@@ -155,6 +155,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         self.assertEqual(report["tasks"][0]["slug"], recovered["slug"])
 
     def test_telemetry_busy_journal_does_not_block_checks_or_stop(self):
+        self.enable_fake_clock()
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
         journal = self.home / "codex-worker-log.jsonl"
