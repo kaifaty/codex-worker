@@ -857,9 +857,9 @@ STATE_FIELDS = {
     "max_turn_minutes": StateField("turn"),  # say replaces this launch parameter, not spawn.
     "review_angles": StateField("turn"),  # say/review replace this launch parameter, not spawn.
     "publish": StateField("turn"),  # Last work receipt survives standalone review, like result.
-    # _run_turn clears the previous attempt before account selection can pause.
-    "exec_event_start": StateField("attempt"),
-    # _run_turn marks the review account unselected (None) before probing accounts.
+    # New user turns discard the exec cursor; automatic phases retain the last attempt.
+    "exec_event_start": StateField("attempt", spawn_reset=STATE_DELETE),
+    # review_turn marks the account unselected (None) before phase/angle early exits.
     "review_account": StateField("cursor"),
 }
 
@@ -2487,10 +2487,7 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
 def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
     st.pop("refusal", None)
-    st.pop("exec_event_start", None)
     reviewing = st.get("kind") == "review"
-    if reviewing:
-        st["review_account"] = None
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
     control = TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
@@ -2856,6 +2853,7 @@ def merge_reviews(angles):
 
 
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
+    st["review_account"] = None
     angles = selected_review_angles(st, cfg) if angles is None else angles
     records = []
     result = None
@@ -2864,6 +2862,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
     save(st)
     try:
         for angle in angles or [None]:
+            st["review_account"] = None
             if stopped():
                 st["outcome"] = stop_outcome(st, stopped)
                 break
@@ -3870,7 +3869,7 @@ def describe(st, detail):
     if reviewing:
         account, thread = st.get("review_account") or "?", ""
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
-        if reviews:
+        if reviews and ("review_account" not in st or st["review_account"] is not None):
             account, thread = reviews[-1]["account"], reviews[-1]["thread"]
     location = st["worktree"] if scouting else st["branch"]
     label = "  scout" if scouting else ("  review" if reviewing else "")

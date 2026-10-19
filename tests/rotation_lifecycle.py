@@ -3,6 +3,7 @@ import datetime
 import json
 import os
 import selectors
+import shlex
 import signal
 import subprocess
 import threading
@@ -907,6 +908,37 @@ worker.reap_notifications = reap
         for name in ("AGENTS.md", "skills", "rules"):
             self.assertTrue((self.other / name).is_symlink(), name)
             self.assertEqual((self.other / name).resolve(), (self.home / name).resolve())
+
+    def test_unstarted_automatic_review_does_not_repeat_a_handled_rotation_failure(self):
+        self.configure(language="en", wait_for_reset=False)
+        self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error"}])
+        self.account(self.other, "B", self.reset + 3600, runs=[{
+            "mode": "complete", "reply": self.work_result()}])
+        check = self.root / "exhaust-accounts.py"
+        check.write_text(
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "for name in sys.argv[1:]:\n"
+            "    path = Path(name)\n"
+            "    value = json.loads(path.read_text())\n"
+            "    value['primary']['usedPercent'] = 99\n"
+            "    path.write_text(json.dumps(value))\n")
+        command = shlex.join([PYTHON, "-I", str(check), str(self.home / "fixture.json"),
+                              str(self.other / "fixture.json")])
+        slug = "rotation-before-unstarted-review"
+        self.start(slug, "--review", "--check", command)
+        output = self.wait(slug)
+        executions = self.invocations()
+        self.assertEqual(len(executions), 2)
+        self.assertEqual([entry["home"] for entry in executions],
+                         [str(self.home), str(self.other)])
+        self.assertEqual([entry["mode"] for entry in executions], ["usage_error", "complete"])
+        self.assertFalse(self.review_invocations())
+        self.assertIn("== check `" + command + "`: passed (exit 0,", output)
+        self.assertIn("== all accounts at limit; earliest reset", output)
+        self.assertIn("(Codex did not run review)", output)
+        self.assertNotIn("== errors:", output)
+        self.assertNotIn('"type": "turn.failed"', output)
 
     def test_say_without_an_exec_does_not_repeat_the_previous_failure(self):
         for wait_for_reset in (False, True):

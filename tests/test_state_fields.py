@@ -167,7 +167,7 @@ st[dynamic_key] = 1
         self.assertEqual(set(st) - set(before), set())
         deleted = {"sleeping", "turn_finished", "error", "review_skipped", "auto_fix_stop",
                    "auto_fix_escalations", "turn_stop", "wrapup", "review_result",
-                   "review_angle", "refusal", "stop_request", "signal", "ci"}
+                   "review_angle", "refusal", "stop_request", "signal", "ci", "exec_event_start"}
         self.assertEqual(set(before) - set(st), deleted)
         expected = {
             "pending": {"prompt": "new-prompt", "effort": "medium", "current_message": True,
@@ -182,7 +182,7 @@ st[dynamic_key] = 1
             with self.subTest(key=key):
                 self.assertEqual(st[key], value)
         self.assertEqual(st["pid"], 200)
-        for key in {"exec_event_start", "review_account", "publish", "result"}:
+        for key in {"review_account", "publish", "result"}:
             with self.subTest(preserved=key):
                 self.assertEqual(st[key], before[key])
 
