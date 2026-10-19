@@ -3869,31 +3869,124 @@ def review_angles(value):
     return list(dict.fromkeys(angles))
 
 
+# Rows follow the existing help/synopsis order for each command. Command entries
+# override argparse keywords; "group" names a mutually exclusive option group.
+# Synopsis tokens keep their own notation (including required/optional markers).
+OPTION_REGISTRY = (
+    {"names": ("--brief",), "argparse": {"required": True},
+     "synopsis": "--brief FILE|-", "commands": {"start": {}}},
+    {"names": ("--repo",), "argparse": {"default": "."},
+     "synopsis": "[--repo DIR]", "commands": {"start": {}}},
+    {"names": ("--base",),
+     "argparse": {"default": None, "help": "default: the remote's default branch (origin/HEAD)"},
+     "synopsis": "[--base origin/<branch>]", "commands": {"start": {}}},
+    {"names": ("--file",), "argparse": {},
+     "synopsis": "--file FILE", "commands": {"say": {}}},
+    {"names": ("--effort",), "argparse": {"default": None},
+     "synopsis": "[--effort E]",
+     "commands": {"start": {"help": "default: model_reasoning_effort from ~/.codex/config.toml"},
+                  "say": {}, "review": {}}},
+    {"names": ("--parallel",), "argparse": {"action": "store_true"},
+     "synopsis": "[--parallel]", "commands": {"start": {}}},
+    {"names": ("--sandbox",),
+     "argparse": {"choices": ("off", "workspace"), "default": None,
+                  "help": "write sandbox for this task (default: sandbox setting, off)"},
+     "synopsis": "[--sandbox off|workspace]", "commands": {"start": {}}},
+    {"names": ("--max-minutes",),
+     "argparse": {"type": max_minutes, "help": "active exec time budget (default: max_turn_minutes setting)"},
+     "synopsis": "[--max-minutes M]", "commands": {"start": {}, "say": {}}},
+    {"names": ("--max-weekly",),
+     "argparse": {"type": max_weekly, "metavar": "P", "help": "replace the task weekly percentage point budget"},
+     "synopsis": "[--max-weekly P]",
+     "commands": {"start": {"help": "task weekly percentage point budget (default: max_task_weekly_percent setting)"},
+                  "say": {}, "review": {}}},
+    {"names": ("--review",),
+     "argparse": {"action": "store_true", "help": "review in a fresh thread after successful completion"},
+     "synopsis": "[--review]", "commands": {"start": {}, "say": {}}},
+    {"names": ("--review-angles",),
+     "argparse": {"type": review_angles, "metavar": "LIST",
+                  "help": "review with comma-separated presets or auto (implies --review)"},
+     "synopsis": "[--review-angles LIST]",
+     "commands": {"start": {}, "say": {},
+                  "review": {"help": "comma-separated presets or auto (default: one review)"}}},
+    {"names": ("--fix-rounds",),
+     "argparse": {"type": int, "choices": range(6), "default": None,
+                  "help": "automatic fix rounds after review, 0–5 (default: 0; requires --review)"},
+     "synopsis": "[--fix-rounds N]", "commands": {"start": {}, "say": {}}},
+    {"names": ("--ci",), "argparse": {"action": "store_true"}, "synopsis": "[--ci]",
+     "commands": {"start": {"help": "wait for PR CI and repair failures (default: ci setting)"},
+                  "say": {"group": "ci", "help": "enable PR CI waiting and repair for this task"}}},
+    {"names": ("--no-ci",), "argparse": {"action": "store_true"}, "synopsis": "[--no-ci]",
+     "commands": {"say": {"group": "ci", "help": "disable PR CI waiting and repair for this task"}}},
+    {"names": ("--ci-rounds",), "argparse": {"type": ci_rounds, "metavar": "N"},
+     "synopsis": "[--ci-rounds N]",
+     "commands": {"start": {"help": "maximum CI repair rounds (default: 1)"},
+                  "say": {"help": "replace the saved maximum CI repair rounds"}}},
+    {"names": ("--check",), "argparse": {}, "synopsis": "[--check CMD]",
+     "commands": {"start": {"help": "shell command to run after completed work turns; saved for follow-ups"},
+                  "say": {"group": "checks", "help": "replace the saved check command"}}},
+    {"names": ("--no-check",), "argparse": {"action": "store_true"}, "synopsis": "[--no-check]",
+     "commands": {"say": {"group": "checks", "help": "remove the saved check command"}}},
+    {"names": ("--check-timeout",), "argparse": {"type": check_timeout},
+     "synopsis": "[--check-timeout SEC]",
+     "commands": {"start": {"default": 1800, "help": "check timeout in seconds (default: 1800)"},
+                  "say": {"default": None, "help": "replace the saved check timeout"}}},
+    {"names": ("--guard",),
+     "argparse": {"action": "append", "default": [], "metavar": "GLOB",
+                  "help": "guard matching repository paths (repeatable)"},
+     "synopsis": "[--guard GLOB]", "commands": {"start": {}}},
+    {"names": ("--base-check",),
+     "argparse": {"action": "store_true", "help": "also check task HEAD with guarded files restored from base"},
+     "synopsis": "[--base-check]", "commands": {"start": {}}},
+    {"names": ("--no-base-check",),
+     "argparse": {"action": "store_true", "help": "disable the saved base check"},
+     "synopsis": "[--no-base-check]", "commands": {"say": {}}},
+)
+
+
+def command_options(command):
+    for option in OPTION_REGISTRY:
+        if command in option["commands"]:
+            kwargs = dict(option["argparse"], **option["commands"][command])
+            group = kwargs.pop("group", None)
+            yield option, kwargs, group
+
+
+def add_command_options(parser, command):
+    groups = {}
+    for option, kwargs, group in command_options(command):
+        target = parser
+        if group is not None:
+            if group not in groups:
+                groups[group] = parser.add_mutually_exclusive_group()
+            target = groups[group]
+        target.add_argument(*option["names"], **kwargs)
+
+
+def command_synopsis(command):
+    positional = '<slug> "message" |' if command == "say" else "<slug>"
+    parts = ["codex_task.py", command, positional]
+    options = list(command_options(command))
+    seen_groups = set()
+    for option, _, group in options:
+        if group is None:
+            parts.append(option["synopsis"])
+        elif group not in seen_groups:
+            tokens = [item["synopsis"].strip("[]") for item, _, name in options if name == group]
+            parts.append("[" + " | ".join(tokens) + "]")
+            seen_groups.add(group)
+    synopsis = " ".join(parts)
+    if command == "review":
+        synopsis += "  fresh review (task must be idle)"
+    return synopsis
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start")
     s.add_argument("slug")
-    s.add_argument("--brief", required=True)
-    s.add_argument("--repo", default=".")
-    s.add_argument("--base", default=None, help="default: the remote's default branch (origin/HEAD)")
-    s.add_argument("--effort", default=None, help="default: model_reasoning_effort from ~/.codex/config.toml")
-    s.add_argument("--parallel", action="store_true")
-    s.add_argument("--sandbox", choices=("off", "workspace"), default=None,
-                   help="write sandbox for this task (default: sandbox setting, off)")
-    s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
-    s.add_argument("--max-weekly", type=max_weekly, metavar="P", help="task weekly percentage point budget (default: max_task_weekly_percent setting)")
-    s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
-    s.add_argument("--review-angles", type=review_angles, metavar="LIST",
-                   help="review with comma-separated presets or auto (implies --review)")
-    s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
-                   help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
-    s.add_argument("--ci", action="store_true", help="wait for PR CI and repair failures (default: ci setting)")
-    s.add_argument("--ci-rounds", type=ci_rounds, metavar="N", help="maximum CI repair rounds (default: 1)")
-    s.add_argument("--check", help="shell command to run after completed work turns; saved for follow-ups")
-    s.add_argument("--check-timeout", type=check_timeout, default=1800, help="check timeout in seconds (default: 1800)")
-    s.add_argument("--guard", action="append", default=[], metavar="GLOB", help="guard matching repository paths (repeatable)")
-    s.add_argument("--base-check", action="store_true", help="also check task HEAD with guarded files restored from base")
+    add_command_options(s, "start")
     s = sub.add_parser("scout", help="answer a code question in an existing directory, read-only")
     s.add_argument("slug")
     s.add_argument("question", nargs="?")
@@ -3904,30 +3997,10 @@ def main():
     s = sub.add_parser("say")
     s.add_argument("slug")
     s.add_argument("message", nargs="?")
-    s.add_argument("--file")
-    s.add_argument("--effort", default=None)
-    s.add_argument("--max-minutes", type=max_minutes, help="active exec time budget (default: max_turn_minutes setting)")
-    s.add_argument("--max-weekly", type=max_weekly, metavar="P", help="replace the task weekly percentage point budget")
-    s.add_argument("--review", action="store_true", help="review in a fresh thread after successful completion")
-    s.add_argument("--review-angles", type=review_angles, metavar="LIST",
-                   help="review with comma-separated presets or auto (implies --review)")
-    s.add_argument("--fix-rounds", type=int, choices=range(6), default=None,
-                   help="automatic fix rounds after review, 0–5 (default: 0; requires --review)")
-    ci = s.add_mutually_exclusive_group()
-    ci.add_argument("--ci", action="store_true", help="enable PR CI waiting and repair for this task")
-    ci.add_argument("--no-ci", action="store_true", help="disable PR CI waiting and repair for this task")
-    s.add_argument("--ci-rounds", type=ci_rounds, metavar="N", help="replace the saved maximum CI repair rounds")
-    checks = s.add_mutually_exclusive_group()
-    checks.add_argument("--check", help="replace the saved check command")
-    checks.add_argument("--no-check", action="store_true", help="remove the saved check command")
-    s.add_argument("--check-timeout", type=check_timeout, default=None, help="replace the saved check timeout")
-    s.add_argument("--no-base-check", action="store_true", help="disable the saved base check")
+    add_command_options(s, "say")
     s = sub.add_parser("review")
     s.add_argument("slug")
-    s.add_argument("--effort", default=None)
-    s.add_argument("--max-weekly", type=max_weekly, metavar="P", help="replace the task weekly percentage point budget")
-    s.add_argument("--review-angles", type=review_angles, metavar="LIST",
-                   help="comma-separated presets or auto (default: one review)")
+    add_command_options(s, "review")
     s = sub.add_parser("wait")
     s.add_argument("slug")
     s.add_argument("--timeout", type=int, default=0)
