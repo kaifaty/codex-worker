@@ -223,7 +223,40 @@ class NotificationTests(RotationTestCase):
         self.assert_review_pause_wake_account("notify-review-sleep")
 
     def test_second_review_angle_pause_and_wake_use_its_executor_account(self):
-        self.assert_review_pause_wake_account("notify-angle-sleep", "correctness,concurrency")
+        clock = self.enable_fake_clock()
+        slug = "notify-angle-sleep"
+        self.configure()
+        self.configure_notify()
+        self.start(slug)
+        self.wait(slug)
+        working = self.state(slug)
+        reset = clock.time() + 3
+        self.account(self.home, "A", reset + 3600, used=99)
+        runs = [{"mode": "complete", "reply": self.review_result(False)},
+                {"mode": "usage_error", "limit_after": 0.05},
+                {"mode": "complete", "reply": self.review_result(False)}]
+        self.account(self.other, "B", reset, runs=runs, auto_reset=True)
+        self.reset_after_ready(
+            lambda: self.cli("review", slug, "--review-angles", "correctness,concurrency"), reset, 3)
+        self.wait(slug, timeout=10, through_sleep=True)
+        state = self.state(slug)
+        # An immediate logical sleep can finish before another CLI observes it.
+        sleeping = [entry for entry in state["rotations"] if entry.get("event") == "sleep"]
+        self.assertTrue(sleeping)
+        paused_review = next(entry for entry in reversed(state["reviews"])
+                             if entry["started"] <= sleeping[-1]["at"])
+        self.assertEqual(paused_review["angle"], "concurrency")
+        for name in ("paused", "woke", "review_done"):
+            event = self.notification(slug, name)
+            self.assertEqual(event["account"], "second")
+            self.assertEqual(event["kind"], "review")
+        self.until(lambda: len([event for event in self.notifications(slug)
+                                if event["event"] == "turn_finished"]) == 2)
+        finished = [event for event in self.notifications(slug) if event["event"] == "turn_finished"][-1]
+        self.assertEqual(finished["account"], "second")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["account"], "main")
+        self.assertEqual(state["thread"], working["thread"])
 
     def test_current_turn_account_uses_only_current_review_records(self):
         worker = self.worker()

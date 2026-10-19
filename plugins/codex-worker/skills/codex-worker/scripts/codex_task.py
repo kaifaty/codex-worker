@@ -53,6 +53,54 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Literal, NamedTuple, Optional
 
+
+class Clock:
+    """Logical time, optionally shared by test processes through a locked JSON file.
+
+    OS/process deadlines keep using the time module. File-clock sleeps advance
+    both values under one lock, then briefly yield so other processes can run.
+    The file is updated in place to preserve its flock identity.
+    """
+
+    def __init__(self, clock_file=None):
+        self.path = Path(clock_file) if clock_file is not None else None
+
+    def _read(self, name):
+        with self.path.open(encoding="utf-8") as stream:
+            fcntl.flock(stream, fcntl.LOCK_SH)
+            return json.load(stream)[name]
+
+    def time(self):
+        return time.time() if self.path is None else self._read("wall")
+
+    def monotonic(self):
+        return time.monotonic() if self.path is None else self._read("monotonic")
+
+    def sleep(self, seconds):
+        if self.path is None:
+            return time.sleep(seconds)
+        if not math.isfinite(seconds) or seconds < 0:
+            raise ValueError("sleep length must be finite and non-negative")
+        # Supervisor signal handlers read CLOCK too. Deliver them after closing
+        # the exclusive lock so a handler cannot wait on its interrupted writer.
+        mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM})
+        try:
+            with self.path.open("r+", encoding="utf-8") as stream:
+                fcntl.flock(stream, fcntl.LOCK_EX)
+                value = json.load(stream)
+                value["wall"] += seconds
+                value["monotonic"] += seconds
+                stream.seek(0)
+                json.dump(value, stream)
+                stream.truncate()
+                stream.flush()
+        finally:
+            signal.pthread_sigmask(signal.SIG_SETMASK, mask)
+        time.sleep(0.001)
+
+
+CLOCK = Clock(os.environ.get("CODEX_TASK_CLOCK_FILE"))
+
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 CODEX = os.environ.get("CODEX_TASK_CODEX")
 CODEX_HOME = Path(os.environ.get("CODEX_TASK_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
@@ -335,7 +383,7 @@ def notify(st, cfg, event, message, **fields):
         return
     message = st["slug"] + ": " + " ".join(message.splitlines())
     payload = dict(event=event, slug=st["slug"], repo=st["repo"], branch=st["branch"],
-                   kind=st.get("kind", "work"), account=current_turn_account(st), at=time.time(), message=message)
+                   kind=st.get("kind", "work"), account=current_turn_account(st), at=CLOCK.time(), message=message)
     payload.update(fields)
     if setting == "macos":
         escaped = message.replace("\\", "\\\\").replace('"', '\\"')
@@ -562,7 +610,7 @@ def reset_credits(info):
     return sorted((c for c in info.get("reset_credits", {}).get("credits", [])
                    if c.get("id") and c.get("status") == "available"
                    and c.get("resetType") == "codexRateLimits"
-                   and (c.get("expiresAt") is None or c["expiresAt"] > time.time())),
+                   and (c.get("expiresAt") is None or c["expiresAt"] > CLOCK.time())),
                   key=lambda c: c.get("expiresAt") if c.get("expiresAt") is not None else float("inf"))
 
 
@@ -572,6 +620,7 @@ def reset_journal(cancelled=lambda: False):
     path = CODEX_HOME / "codex-worker-resets.jsonl"
     # Parallel tasks must agree on a key, even if one dies during the RPC.
     with path.open("a+", encoding="utf-8") as journal:
+        waiting_logged = False
         while True:
             if cancelled():
                 raise RuntimeError("stopped")
@@ -579,6 +628,9 @@ def reset_journal(cancelled=lambda: False):
                 fcntl.flock(journal, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
+                if not waiting_logged:
+                    print("reset journal: waiting for lock", file=sys.stderr, flush=True)
+                    waiting_logged = True
                 time.sleep(0.05)
         journal.seek(0)
         entries = []
@@ -597,7 +649,7 @@ def reset_journal(cancelled=lambda: False):
             journal.write("\n")
 
         def record(entry, **fields):
-            value = dict(entry, at=time.time(), **fields)
+            value = dict(entry, at=CLOCK.time(), **fields)
             journal.write(json.dumps(value, ensure_ascii=False) + "\n")
             journal.flush()
             os.fsync(journal.fileno())
@@ -794,7 +846,7 @@ STATE_FIELDS = {
     "kind": StateField("cursor", spawn_reset=lambda st, turn: turn["kind"]),
     "work_completed": StateField("turn", spawn_reset=lambda st, turn: False),
     "review_start": StateField("turn", spawn_reset=lambda st, turn: len(st.get("reviews", []))),
-    "turn_started": StateField("turn", spawn_reset=lambda st, turn: time.time()),
+    "turn_started": StateField("turn", spawn_reset=lambda st, turn: CLOCK.time()),
     "check_start": StateField("turn", spawn_reset=lambda st, turn: len(st.get("checks", []))),
     "turns": StateField("history", spawn_reset=lambda st, turn: st.get("turns", 0) + 1),
     "rotation_start": StateField("turn", spawn_reset=lambda st, turn: len(st["rotations"])),
@@ -1007,7 +1059,7 @@ def last_message(st):
 def followup_prompt(st, message, cfg, source="claude"):
     """Journal follow-ups before dispatch so rotation includes the current request."""
     with (TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
-        stream.write(json.dumps({"at": time.time(), "text": message, "source": source},
+        stream.write(json.dumps({"at": CLOCK.time(), "text": message, "source": source},
                                 ensure_ascii=False) + "\n")
     return message if st.get("thread") else handoff(st, current_message=True, cfg=cfg)
 
@@ -1127,7 +1179,7 @@ def record_turn_result(st, stopped):
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         review = st.get("review_result") or ((reviews[-1].get("result") or {}) if reviews else {})
         result = st.get("result") or {}
-        row = {"v": 1, "at": time.time(), "slug": st["slug"], "repo": Path(st["repo"]).name,
+        row = {"v": 1, "at": CLOCK.time(), "slug": st["slug"], "repo": Path(st["repo"]).name,
                "created": st.get("created"), "kind": st.get("kind", "work"), "phase": "turn",
                "turn": st.get("turns", 0), "round": len(st.get("rounds", [])),
                "account": current_turn_account(st), "started": st.get("turn_started"),
@@ -1149,7 +1201,7 @@ class PhaseTelemetry:
     def __init__(self, st, phase, stopped=lambda: False):
         self.st, self.phase = st, phase
         self.stopped = stopped
-        self.started, self.clock = time.time(), time.monotonic()
+        self.started, self.clock = CLOCK.time(), CLOCK.monotonic()
         self.sleep_seconds = 0.0
         self.weekly_started = st.get("weekly_used_percent", 0)
         self.finished = False
@@ -1204,7 +1256,7 @@ class PhaseTelemetry:
                             if any(entry["tokens"][key] is not None for entry in self.usage)
                             else None) for key in TOKEN_FIELDS}
             last = self.usage[-1] if self.usage else {}
-            finished = time.time()
+            finished = CLOCK.time()
             check = self.check or {}
             row = {"v": 1, "at": finished, "slug": st["slug"], "repo": Path(st["repo"]).name,
                    "created": st.get("created"),
@@ -1214,7 +1266,7 @@ class PhaseTelemetry:
                    "thread": last.get("thread", (reviews[-1].get("thread") if reviews else None)
                                       if reviewing else st.get("thread")),
                    "started": self.started, "finished": finished,
-                   "active_seconds": round(max(0, time.monotonic() - self.clock - self.sleep_seconds), 3),
+                   "active_seconds": round(max(0, CLOCK.monotonic() - self.clock - self.sleep_seconds), 3),
                    "sleep_seconds": round(self.sleep_seconds, 3),
                    "outcome": outcome or st.get("outcome"), "result_status": result.get("status"),
                    "verdict": result.get("verdict"),
@@ -1653,7 +1705,7 @@ def earliest_reset(infos, cfg):
 def record_exhausted(st, infos, cfg, reason):
     stamp, name = earliest_reset(infos, cfg)
     st.pop("sleeping", None)
-    st["exhausted"] = {"at": time.time(), "reset": stamp, "account": name, "reason": reason}
+    st["exhausted"] = {"at": CLOCK.time(), "reset": stamp, "account": name, "reason": reason}
     st["outcome"] = "exhausted"
     save(st)
     notify(st, cfg, "paused", f"paused: {reason}", until=stamp)
@@ -1663,7 +1715,7 @@ def try_reset_credit(st, infos, cfg, stopped):
     """Return fresh quotas after a reset or concurrent quota recovery; never retry here."""
     stamp, _ = earliest_reset(infos, cfg)
     if (not cfg.get("use_reset_credits", False) or stamp is None
-            or stamp - time.time() <= cfg.get("reset_credit_min_hours", 12) * 3600
+            or stamp - CLOCK.time() <= cfg.get("reset_credit_min_hours", 12) * 3600
             or available(infos, cfg)):
         return None
     eligible = [i for i in infos if i.get("logged_in") and not i.get("duplicate")]
@@ -1676,7 +1728,7 @@ def try_reset_credit(st, infos, cfg, stopped):
         return None
     credit, info = min(choices, key=lambda pair: pair[0].get("expiresAt")
                        if pair[0].get("expiresAt") is not None else float("inf"))
-    event = {"event": "reset_credit", "at": time.time(), "account": info["name"],
+    event = {"event": "reset_credit", "at": CLOCK.time(), "account": info["name"],
              "credit_id": credit["id"], "expires_at": credit.get("expiresAt")}
     try:
         # A concurrent unknown attempt takes priority over the candidate selected above.
@@ -1709,7 +1761,7 @@ def refresh_login_state(st, infos, new_turn=False):
             names.remove(info["name"])
         elif info.get("logged_in") is False and info["name"] not in names:
             names.append(info["name"])
-            st["rotations"].append({"event": "needs_login", "at": time.time(), "account": info["name"]})
+            st["rotations"].append({"event": "needs_login", "at": CLOCK.time(), "account": info["name"]})
             notify(st, None, "needs_login", f"{info['name']} needs login", account=info["name"])
     if names != st.get("needs_login", []):
         st["needs_login"] = names
@@ -1729,7 +1781,7 @@ def exclude_auth_account(st, account, info):
     names = st.setdefault("needs_login", [])
     if name not in names:
         names.append(name)
-        st["rotations"].append({"event": "needs_login", "at": time.time(), "account": name})
+        st["rotations"].append({"event": "needs_login", "at": CLOCK.time(), "account": name})
         notify(st, None, "needs_login", f"{name} needs login", account=name)
     save(st)
 
@@ -1750,7 +1802,7 @@ def task_snapshots(st, cfg, stopped, new_turn=False):
             if action["outcome"] == "consumed (inferred)":
                 st["reset_reconciled"] = True
                 credit = action["credit"]
-                st["rotations"].append({"event": "reset_credit", "at": time.time(), "account": info["name"],
+                st["rotations"].append({"event": "reset_credit", "at": CLOCK.time(), "account": info["name"],
                                         "credit_id": credit["id"], "expires_at": credit.get("expiresAt"),
                                         "outcome": action["outcome"]})
                 save(st)
@@ -1775,21 +1827,21 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
     infos = refresh_login_state(st, infos)
     if no_logged_in_accounts(st, infos):
         return None
-    sleep = sleep or time.sleep
+    sleep = sleep or CLOCK.sleep
     probe_retries = 0
-    wait_started = time.time()
+    wait_started = CLOCK.time()
     already_waited = st.get("reset_wait_seconds", 0)
     deadline = wait_started + MAX_RESET_WAIT_SECONDS - already_waited
 
     def cancelled():
-        return stopped() or time.time() >= deadline
+        return stopped() or CLOCK.time() >= deadline
 
     def update_waited():
-        st["reset_wait_seconds"] = already_waited + max(0, time.time() - wait_started)
+        st["reset_wait_seconds"] = already_waited + max(0, CLOCK.time() - wait_started)
 
     while not stopped():
         update_waited()
-        remaining = deadline - time.time()
+        remaining = deadline - CLOCK.time()
         if remaining <= 0:
             record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
             return None
@@ -1827,7 +1879,7 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             probing = bool(unknown) and probe_retries < MAX_ACCOUNT_RETRIES
         if no_logged_in_accounts(st, infos):
             return None
-        started = time.time()
+        started = CLOCK.time()
         stamp, name = earliest_reset(infos, cfg)
         # A delayed reset may still have its old timestamp. Avoid a tight RPC loop.
         until = stamp + RESET_MARGIN if stamp is not None else started + RESET_RETRY_SECONDS
@@ -1844,16 +1896,16 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         save(st)
         notify(st, cfg, "paused", f"paused until {local_time(until)}: {sleeping['reason']}", until=until)
         phase = telemetry_phase(st)
-        sleep_started = time.monotonic() if phase is not None else None
+        sleep_started = CLOCK.monotonic() if phase is not None else None
         try:
             while not stopped():
-                left = until - time.time()
+                left = until - CLOCK.time()
                 if left <= 0:
                     break
                 sleep(min(SLEEP_STEP, left))
         finally:
             if phase is not None:
-                phase.sleep_seconds += max(0, time.monotonic() - sleep_started)
+                phase.sleep_seconds += max(0, CLOCK.monotonic() - sleep_started)
             update_waited()
         if stopped():
             return None
@@ -1862,7 +1914,7 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             return None
         st.pop("sleeping", None)
         st["outcome"] = "running"
-        st["rotations"].append(dict(sleeping, at=time.time(), event="wake"))
+        st["rotations"].append(dict(sleeping, at=CLOCK.time(), event="wake"))
         save(st)
         notify(st, cfg, "woke", "woke to recheck account limits")
         infos = task_snapshots(st, cfg, cancelled)
@@ -1942,7 +1994,7 @@ def stop_at_weekly_budget(st):
     st.update(outcome="budget_exhausted", review_skipped="budget")
     if budget_stop(st) != "weekly":
         st["turn_stop"] = {"outcome": "budget_exhausted", "weekly": st["max_task_weekly_percent"],
-                           "spent": st["weekly_used_percent"], "at": time.time()}
+                           "spent": st["weekly_used_percent"], "at": CLOCK.time()}
     if st.get("fix_rounds"):
         st["auto_fix_stop"] = "budget"
     return True
@@ -2005,7 +2057,7 @@ class TurnControl:
     def expired(self, started):
         if self.seconds is None:
             return False
-        usage = monitor_time_usage(self.elapsed, self.seconds, self.minutes, started, time.monotonic())
+        usage = monitor_time_usage(self.elapsed, self.seconds, self.minutes, started, CLOCK.monotonic())
         if usage.reason is not None:
             self.reason = usage.reason
             return True
@@ -2204,7 +2256,7 @@ def monitor_thread_started(st, account, stream, reviewing, wrapup, attempt_start
     elif not reviewing:
         st["thread"] = thread
     if not reviewing and not any(t["account"] == account["name"] and t["thread"] == thread for t in st["threads"]):
-        st["threads"].append({"account": account["name"], "thread": thread, "started": time.time()})
+        st["threads"].append({"account": account["name"], "thread": thread, "started": CLOCK.time()})
     if (st["rotations"] and not st["rotations"][-1].get("event")
             and not st["rotations"][-1]["thread"]):
         st["rotations"][-1]["thread"] = thread
@@ -2376,7 +2428,7 @@ def finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
         if stream.refusal:
             st["wrapup"]["refusal"] = stream.refusal
     elif stream.review_entry is not None:
-        stream.review_entry["finished"] = time.time()
+        stream.review_entry["finished"] = CLOCK.time()
         stream.review_entry["result"] = None if stream.refusal else parse_result(message, reviewing=True)
         if stream.refusal:
             stream.review_entry.update(outcome="refused", refusal=stream.refusal)
@@ -2433,8 +2485,8 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         if stopped():
             return stop_outcome(st, stopped), None
         error_start = errors.tell()
-        attempt_started = time.time()
-        active_started = time.monotonic()
+        attempt_started = CLOCK.time()
+        active_started = CLOCK.monotonic()
         proc = None
         try:
             with monitor_process(st, account, args, errors) as proc:
@@ -2445,7 +2497,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
         finally:
             if proc is not None:
                 control.elapsed = monitor_time_usage(control.elapsed, control.seconds, control.minutes,
-                                                     active_started, time.monotonic()).elapsed
+                                                     active_started, CLOCK.monotonic()).elapsed
                 finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
                                record_limits, telemetry, usage_before, weekly_started)
     if reviewing and not review_fallback and not stream.thread and stream.exit_code == 2:
@@ -2466,7 +2518,7 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
 
 def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     """Publish the typed stop and allow exactly one short resume on its thread."""
-    st["turn_stop"] = dict(reason, at=time.time())
+    st["turn_stop"] = dict(reason, at=CLOCK.time())
     st["outcome"] = reason["outcome"]
     st["review_skipped"] = reason["outcome"]
     st["wrapup"] = {"outcome": "not_run", "result": None}
@@ -2492,9 +2544,9 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     if st.get("kind") not in ("review", "scout"):
         st["result"] = st["wrapup"]["result"]
     elif review_entry is not None and st["wrapup"]["outcome"] == "completed":
-        review_entry.update(result=st["wrapup"]["result"], finished=time.time())
+        review_entry.update(result=st["wrapup"]["result"], finished=CLOCK.time())
     if review_entry is not None and st["wrapup"]["outcome"] == "refused":
-        review_entry.update(outcome="refused", refusal=st["refusal"], result=None, finished=time.time())
+        review_entry.update(outcome="refused", refusal=st["refusal"], result=None, finished=CLOCK.time())
     st["outcome"] = (stop_outcome(st, stopped) or
                      ("refused" if st["wrapup"]["outcome"] == "refused" else reason["outcome"]))
     save(st)
@@ -2543,7 +2595,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                 return
         if resuming and chosen["name"] != st["account"]:
             prompt = handoff(st, current_message=current_message, cfg=cfg)
-            st["rotations"].append({"at": time.time(), "from": st["account"], "to": chosen["name"],
+            st["rotations"].append({"at": CLOCK.time(), "from": st["account"], "to": chosen["name"],
                                     "reason": limit_reason(current, cfg), "thread": ""})
             rotation = st["rotations"][-1]
             rotations += 1
@@ -2589,7 +2641,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                             and control.weekly_exhausted(st.get("weekly_used_percent", 0)))
         if weekly_exhausted and result != "completed":
             result = "budget_exhausted"
-        if result in ("auth", "limit", "capacity") and control.expired(time.monotonic()):
+        if result in ("auth", "limit", "capacity") and control.expired(CLOCK.monotonic()):
             result = "budget_exhausted"
         if result != "auth":
             st.setdefault("auth_failures", {})[account["name"]] = 0
@@ -2622,17 +2674,17 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             capacity_retried = True
             st["capacity_retries"] = st.get("capacity_retries", 0) + 1
             save(st)
-            sleep_started = time.monotonic()
+            sleep_started = CLOCK.monotonic()
             try:
                 until = sleep_started + CAPACITY_RETRY_SECONDS
                 while not stopped():
-                    left = until - time.monotonic()
+                    left = until - CLOCK.monotonic()
                     if left <= 0:
                         break
                     sleep(min(SLEEP_STEP, left))
             finally:
                 if phase is not None:
-                    phase.sleep_seconds += max(0, time.monotonic() - sleep_started)
+                    phase.sleep_seconds += max(0, CLOCK.monotonic() - sleep_started)
             if stopped():
                 st["outcome"] = stop_outcome(st, stopped)
                 break
@@ -2685,7 +2737,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             continue
         if not reviewing:
             prompt = handoff(st, current_message=current_message, cfg=cfg)
-        st["rotations"].append({"at": time.time(), "from": account["name"], "to": chosen["name"],
+        st["rotations"].append({"at": CLOCK.time(), "from": account["name"], "to": chosen["name"],
                                 "reason": decision["reason"], "thread": ""})
         rotation = st["rotations"][-1]
         if result == "auth":
@@ -2706,6 +2758,7 @@ def execute_check(st, stopped, cwd, filename):
     if stopped():
         return None
     started = time.monotonic()
+    measured_started = CLOCK.monotonic()
     proc = None
     outcome = "failed"
     code = None
@@ -2742,8 +2795,8 @@ def execute_check(st, stopped, cwd, filename):
     if stopped():
         outcome = stop_outcome(st, stopped)
         st["outcome"] = outcome
-    result = {"cmd": st["check"], "exit": code, "seconds": round(time.monotonic() - started, 3),
-              "at": time.time(), "outcome": outcome}
+    result = {"cmd": st["check"], "exit": code, "seconds": round(CLOCK.monotonic() - measured_started, 3),
+              "at": CLOCK.time(), "outcome": outcome}
     if outcome in ("failed", "timeout"):
         result["tail"] = check_tail(st, filename)
     return result
@@ -2783,7 +2836,7 @@ def _run_base_check(st, stopped):
         return {"outcome": "skipped", "reason": f"filter driver {driver} is configured; commit this turn manually"}
     if st["worktree"] in st["check"]:
         return {"outcome": "skipped", "reason": "check command uses the task worktree's absolute path"}
-    started = time.monotonic()
+    started = CLOCK.monotonic()
     log = TASKS / st["slug"] / "base-check.log"
     log.write_text("", encoding="utf-8")
     result = None
@@ -2819,7 +2872,7 @@ def _run_base_check(st, stopped):
             output.write("\nbase check setup/cleanup failed: " + (detail or str(exc)) + "\n")
         result = None
     if result is None:
-        result = {"outcome": "failed", "exit": None, "seconds": round(time.monotonic() - started, 3)}
+        result = {"outcome": "failed", "exit": None, "seconds": round(CLOCK.monotonic() - started, 3)}
     result["tail"] = check_tail(st, "base-check.log")
     return result
 
@@ -2922,7 +2975,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             if stop_at_weekly_budget(st):
                 break
             start = len(st.get("reviews", []))
-            started = time.time()
+            started = CLOCK.time()
             st.update(review_angle=angle, outcome="running")
             focused = prompt + f"\n\nReview angle: {angle}. {REVIEW_ANGLES[angle]}" if angle else prompt
             run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
@@ -2935,7 +2988,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
                       "account": current_turn_account(st),
-                      "started": started, "finished": time.time()}
+                      "started": started, "finished": CLOCK.time()}
             if outcome == "refused":
                 record["refusal"] = st.get("refusal", "")
             records.append(record)
@@ -2976,7 +3029,7 @@ def publish_work(st, stopped):
     """Publish a completed workspace turn outside the worker's write boundary."""
     if st.get("sandbox") != "workspace" or not completed_work_turn(st) or stopped():
         return
-    receipt = {"at": time.time(), "sha": "", "pushed": False, "pr": "", "action": "skipped", "error": ""}
+    receipt = {"at": CLOCK.time(), "sha": "", "pushed": False, "pr": "", "action": "skipped", "error": ""}
 
     def run(args):
         return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
@@ -3017,9 +3070,9 @@ def publish_pr(st, stopped):
     """The supervisor is the only PR writer, in every work mode."""
     if not completed_work_turn(st) or stopped():
         return
-    receipt = st.setdefault("publish", {"at": time.time(), "sha": "", "pushed": False,
+    receipt = st.setdefault("publish", {"at": CLOCK.time(), "sha": "", "pushed": False,
                                         "pr": "", "action": "skipped", "error": ""})
-    receipt.update(at=time.time(), action="skipped", pr="")
+    receipt.update(at=CLOCK.time(), action="skipped", pr="")
 
     def run(args):
         return subprocess.run(args, cwd=st["worktree"], check=True, capture_output=True,
@@ -3376,7 +3429,7 @@ def ci_failure_logs(st, gh, stopped, deadline):
         if not job or not remaining:
             continue
         try:
-            available = deadline - time.monotonic()
+            available = deadline - CLOCK.monotonic()
             if available <= 0:
                 text = "Failed job log unavailable: CI timeout"
             else:
@@ -3400,12 +3453,12 @@ def wait_ci(st, stopped, sleep):
     ci = {"sha": "", "outcome": "pending", "checks": [], "seconds": previous.get("seconds", 0),
           "rounds": previous.get("rounds", 0), "reason": ""}
     st["ci"] = ci
-    started = time.monotonic()
+    started = CLOCK.monotonic()
     deadline = started + st.get("ci_timeout_minutes", 30) * MINUTE_SECONDS
     prior_seconds = ci["seconds"]
 
     def finish(outcome, reason):
-        ci.update(outcome=outcome, reason=reason, seconds=round(prior_seconds + time.monotonic() - started, 3))
+        ci.update(outcome=outcome, reason=reason, seconds=round(prior_seconds + CLOCK.monotonic() - started, 3))
         save(st)
         return ci
 
@@ -3426,7 +3479,7 @@ def wait_ci(st, stopped, sleep):
     try:
         ci["sha"] = sh(GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         head = ci_json(st, [gh, "pr", "view", pr, "--json", "headRefOid"], stopped,
-                       timeout=min(60, max(0.001, deadline - time.monotonic())))
+                       timeout=min(60, max(0.001, deadline - CLOCK.monotonic())))
         if not isinstance(head, dict):
             raise ValueError("invalid PR head response")
         if head.get("headRefOid") != ci["sha"]:
@@ -3436,7 +3489,7 @@ def wait_ci(st, stopped, sleep):
     empty_deadline = started + 3 * MINUTE_SECONDS
     seen_checks = False
     while not stopped():
-        now = time.monotonic()
+        now = CLOCK.monotonic()
         if now >= deadline:
             return finish("timeout", "timeout")
         try:
@@ -3455,7 +3508,7 @@ def wait_ci(st, stopped, sleep):
                 if all(item["bucket"] in ("pass", "skipping", "fail", "cancel") for item in values):
                     # Do not attribute checks to our SHA if the PR moved while we waited.
                     head = ci_json(st, [gh, "pr", "view", pr, "--json", "headRefOid"], stopped,
-                                   timeout=min(60, max(0.001, deadline - time.monotonic())))
+                                   timeout=min(60, max(0.001, deadline - CLOCK.monotonic())))
                     if not isinstance(head, dict):
                         raise ValueError("invalid PR head response")
                     if head.get("headRefOid") != ci["sha"]:
@@ -3466,13 +3519,13 @@ def wait_ci(st, stopped, sleep):
                     if stopped():
                         break
                     return finish("failed" if failed else "passed", "rounds_exhausted" if failed else "passed")
-            elif not seen_checks and time.monotonic() >= empty_deadline:
+            elif not seen_checks and CLOCK.monotonic() >= empty_deadline:
                 return finish("none", "none")
         except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
             ci["error"] = str(exc)
         if stopped():
             break
-        now = time.monotonic()
+        now = CLOCK.monotonic()
         ci["seconds"] = round(prior_seconds + now - started, 3)
         save(st)
         boundary = min(deadline, empty_deadline) if not seen_checks and not ci.get("error") else deadline
@@ -3552,7 +3605,7 @@ def cmd__run(a):
     st = None
     def stop(signum, frame):
         nonlocal received_signal
-        at = time.time()
+        at = CLOCK.time()
         name = signal.Signals(signum).name
         if not finalized and received_signal is None:
             received_signal = {"signum": signum, "name": name, "at": at}
@@ -3579,6 +3632,8 @@ def cmd__run(a):
         return cancelled
     signal.signal(signal.SIGINT, stop)
     signal.signal(signal.SIGTERM, stop)
+    # Preserve interruptible real waits; file-clock waits advance logical time.
+    sleep = stopped_flag.wait if CLOCK.path is None else CLOCK.sleep
     # The launcher publishes pid and pending before the supervisor becomes the only writer.
     for _ in range(200):
         st = load(a.slug)
@@ -3595,10 +3650,10 @@ def cmd__run(a):
         effort = pending["effort"]
         working = st.get("kind") not in ("review", "scout")
         if st.get("kind") == "review":
-            review_turn(st, cfg, pending["prompt"], effort, stopped, stopped_flag.wait, new_turn=True)
+            review_turn(st, cfg, pending["prompt"], effort, stopped, sleep, new_turn=True)
         else:
             work_turn(st, cfg, pending["prompt"], effort, pending.get("current_message", False),
-                      stopped, stopped_flag.wait)
+                      stopped, sleep)
             if working:
                 save(st)
         work_result = st.get("result") if st.get("kind") not in ("review", "scout") else None
@@ -3614,11 +3669,11 @@ def cmd__run(a):
                 and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")
                 and not stop_at_weekly_budget(st)):
             st["work_completed"] = True
-            review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, stopped_flag.wait)
+            review = review_turn(st, cfg, review_prompt(st, cfg), effort, stopped, sleep)
             if st.get("fix_rounds"):
-                auto_fix(st, cfg, review, effort, stopped, stopped_flag.wait)
+                auto_fix(st, cfg, review, effort, stopped, sleep)
         if working:
-            ci_cycle(st, cfg, effort, stopped, stopped_flag.wait)
+            ci_cycle(st, cfg, effort, stopped, sleep)
         checks = st.get("checks", [])[st.get("check_start", 0):]
         check = checks[-1] if checks else None
     except (Exception, SystemExit) as exc:
@@ -3637,7 +3692,7 @@ def cmd__run(a):
                                        else st.get("review_skipped", "review unknown"))
             st.pop("sleeping", None)
             st.pop("pending", None)
-            st["turn_finished"] = time.time()
+            st["turn_finished"] = CLOCK.time()
             record_turn_result(st, stopped)
             if cfg is not None:
                 account = current_turn_account(st)
@@ -3704,7 +3759,7 @@ def cmd_start(a):
           "ci_timeout_minutes": cfg["ci_timeout_minutes"],
           "max_task_weekly_percent": a.max_weekly if a.max_weekly is not None else cfg.get("max_task_weekly_percent"),
           "weekly_used_percent": 0,
-          "created": time.time(), "turns": 0}
+          "created": CLOCK.time(), "turns": 0}
     save(st)
     proc = spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
@@ -3741,7 +3796,7 @@ def cmd_scout(a):
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "kind": "scout", "repo": str(directory), "worktree": str(directory), "branch": "",
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
-          "rotations": [], "reviews": [], "checks": [], "created": time.time(), "turns": 0}
+          "rotations": [], "reviews": [], "checks": [], "created": CLOCK.time(), "turns": 0}
     save(st)
     proc = spawn(st, prompt, a.effort, kind="scout")
     for _ in range(300):
@@ -3856,7 +3911,7 @@ def wait_turn_lines(st, slug):
     sleeping = st.get("outcome") == "sleeping"
     publication = st.get("publish")
     yield (f"== {slug}: turn {st.get('turns')} {'paused' if sleeping else 'finished'} after "
-          f"{(st.get('turn_finished', time.time()) - st.get('turn_started', time.time())) / 60:.1f} min")
+          f"{(st.get('turn_finished', CLOCK.time()) - st.get('turn_started', CLOCK.time())) / 60:.1f} min")
     if st.get("capacity_retries", 0):
         yield "== retried: model at capacity"
     if st.get("turn_stop"):
@@ -3930,7 +3985,7 @@ def wait_review_lines(st, slug):
         return
     entries = angles or reviews[-1:]
     for entry in entries:
-        minutes = ((entry["finished"] if angles else entry.get("finished") or time.time()) - entry["started"]) / 60
+        minutes = ((entry["finished"] if angles else entry.get("finished") or CLOCK.time()) - entry["started"]) / 60
         heading = "== review " + (f"angle {entry['angle']} " if angles else "") + f"by {entry['account']} ({minutes:.1f} min):"
         result = entry.get("result")
         if angles and entry["outcome"] == "refused":
@@ -4080,7 +4135,7 @@ def cmd_stop(a):
         if not alive(pid):
             print("not running")
             return
-        st["stop_request"] = {"at": time.time(), "pid": pid}
+        st["stop_request"] = {"at": CLOCK.time(), "pid": pid}
         write_state(st)
     try:
         os.killpg(pid, signal.SIGINT)
