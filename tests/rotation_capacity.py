@@ -18,15 +18,15 @@ class CapacityRetryTests(RotationTestCase):
                 with self.subTest(event_type=event_type, message=message):
                     event = ({"type": event_type, "error": {"message": message}}
                              if event_type == "turn.failed" else {"type": event_type, "message": message})
-                    stream = worker.MonitorEvents("")
-                    result = worker.monitor_event({}, "main", event, stream,
-                                                  worker.TurnControl(None, 3), False, False, 0)
+                    stream = worker.turn_monitor.MonitorEvents("")
+                    result = worker.turn_monitor.monitor_event({}, "main", event, stream,
+                                                  worker.turn_monitor.TurnControl(None, 3), False, False, 0)
                     self.assertIsNone(result)
                     self.assertEqual(stream.reason, expected_reason)
                     self.assertEqual(stream.authentication_failed, expected_auth)
                     self.assertEqual(stream.capacity_failed, not expected_reason and not expected_auth)
-        self.assertFalse(worker.capacity_error({"type": "turn.completed", "message": "at capacity"}))
-        self.assertFalse(worker.capacity_error({"type": "item.completed", "item": {
+        self.assertFalse(worker.account_rotation.capacity_error({"type": "turn.completed", "message": "at capacity"}))
+        self.assertFalse(worker.account_rotation.capacity_error({"type": "item.completed", "item": {
             "type": "agent_message", "text": "The selected model was at capacity earlier."}}))
 
     def test_capacity_after_thread_started_resumes_and_runs_checks_in_both_languages(self):
@@ -49,7 +49,7 @@ class CapacityRetryTests(RotationTestCase):
                 self.assert_resumed_same_thread(executions[0], executions[1], self.home)
                 worker = self.worker()
                 self.assertEqual(executions[1]["prompt"],
-                                 worker.capacity_resume_prompt(worker.config.accounts_config()))
+                                 worker.prompts.capacity_resume_prompt(worker.config.accounts_config()))
                 for execution in executions:
                     self.assert_output_schema(execution, slug)
                 state = self.state(slug)
@@ -174,7 +174,7 @@ class CapacityRetryTests(RotationTestCase):
         for index in (0, 2, 4, 6):
             self.assert_resumed_same_thread(executions[index], executions[index + 1], self.home)
             self.assertEqual(executions[index + 1]["prompt"],
-                             worker.capacity_resume_prompt({"language": "en"}))
+                             worker.prompts.capacity_resume_prompt({"language": "en"}))
             for execution in executions[index:index + 2]:
                 self.assert_output_schema(execution, "capacity-phases", review=index in (2, 6))
         self.assertEqual(executions[0]["thread"], executions[4]["thread"])

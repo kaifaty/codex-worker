@@ -209,7 +209,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertIn(question, prompt)
         self.assertNotIn("TASK-RULES-MUST-NOT-REACH-SCOUT", prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.scout_prompt(question, worker.config.accounts_config()))
+        self.assertEqual(prompt, worker.prompts.scout_prompt(question, worker.config.accounts_config()))
         self.assertIn(reply, output)
         self.assert_scout_output(output)
         telemetry = self.phase_telemetry_journal()
@@ -306,7 +306,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertIn(question.read_text().strip(), prompt)
         self.assertNotIn("SCOUT-MUST-SKIP-CUSTOM-TASK-RULES", prompt)
         worker = self.worker()
-        self.assertEqual(prompt, worker.scout_prompt(question.read_text(), worker.config.accounts_config()))
+        self.assertEqual(prompt, worker.prompts.scout_prompt(question.read_text(), worker.config.accounts_config()))
         self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
         self.assertEqual(self.git("branch", "--list", "codex/scout-file"), "")
@@ -513,8 +513,8 @@ class ResultScoutConfigTests(RotationTestCase):
                 else:
                     self.assertNotRegex(prompt, "[А-Яа-яЁё]")
                 self.assertIn("git diff", prompt)
-                self.assertEqual(worker.review_prompt(st), worker.review_prompt(st, cfg))
-                self.assertEqual(worker.reset_resume_prompt(), worker.reset_resume_prompt(cfg))
+                self.assertEqual(worker.prompts.review_prompt(st), worker.prompts.review_prompt(st, cfg))
+                self.assertEqual(worker.prompts.reset_resume_prompt(), worker.prompts.reset_resume_prompt(cfg))
 
     def test_rules_override_replaces_both_languages(self):
         worker = self.worker()
@@ -544,7 +544,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertFalse(self.state("single-account")["rotations"])
         self.assertNotRegex(self.invocations()[0]["prompt"], "[А-Яа-яЁё]")
         worker = self.worker()
-        self.assertEqual(self.invocations()[1]["prompt"], worker.review_prompt(
+        self.assertEqual(self.invocations()[1]["prompt"], worker.prompts.review_prompt(
             self.state("single-account"), worker.config.accounts_config()))
         self.assertIn((SKILL / "references" / "rules.md").read_text().splitlines()[0],
                       self.invocations()[0]["prompt"])

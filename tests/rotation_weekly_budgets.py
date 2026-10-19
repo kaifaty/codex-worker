@@ -57,7 +57,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(executions[1]["thread"], executions[0]["thread"])
         self.assert_output_schema(executions[1], "weekly-cap")
         self.assertEqual(executions[1]["prompt"],
-                         self.worker().wrapup_prompt(state, state["turn_stop"], {"language": "ru"}))
+                         self.worker().prompts.wrapup_prompt(state, state["turn_stop"], {"language": "ru"}))
         self.assertFalse(self.review_invocations())
         self.assertIn("== turn stopped: weekly budget 10% exhausted (spent 10.4%)", output)
         self.until(lambda: not self.process_is_live(child))
@@ -187,7 +187,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[0]["thread"], executions[1]["thread"])
         self.assertEqual(executions[1]["prompt"],
-                         self.worker().wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
+                         self.worker().prompts.wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
         self.assertFalse(self.review_invocations())
         self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
         self.assertFalse(state["rotations"])
@@ -244,7 +244,7 @@ class WeeklyBudgetTests(RotationTestCase):
                 "primary": {"used_percent": value, "window_minutes": 10080,
                             "resets_at": self.reset}}}}) + "\n" for value in values))
             st["turns"] = turn
-            with worker.record_phase(st, "work", lambda: False) as phase:
+            with worker.telemetry_log.record_phase(st, "work", lambda: False) as phase:
                 self.record_weekly_phase_usage(worker, st, phase, "main", "thread-%d" % turn, path)
                 phase.finish(outcome="completed")
             worker.task_state.save(st)
@@ -273,7 +273,7 @@ class WeeklyBudgetTests(RotationTestCase):
                 path.write_text("".join(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "rate_limits": {
                     "primary": {"used_percent": value, "window_minutes": 10080,
                                 "resets_at": self.reset}}}}) + "\n" for value in values))
-                with worker.record_phase(st, "work", lambda: False) as phase:
+                with worker.telemetry_log.record_phase(st, "work", lambda: False) as phase:
                     self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path,
                                                    seed_first=False)
                     phase.finish(outcome="completed")
@@ -303,7 +303,7 @@ class WeeklyBudgetTests(RotationTestCase):
                     "primary": {"used_percent": value, "window_minutes": 10080,
                                 "resets_at": reset}}}}) + "\n" for value in (before, after)))
                 st.update(account=account, turns=turn)
-                with worker.record_phase(st, "work", lambda: False) as phase:
+                with worker.telemetry_log.record_phase(st, "work", lambda: False) as phase:
                     self.record_weekly_phase_usage(worker, st, phase, account, "thread-%d" % turn, path)
                     phase.finish(outcome="completed")
                 expected += delta
@@ -433,7 +433,7 @@ class WeeklyBudgetTests(RotationTestCase):
             "type": "token_count", "rate_limits": {"primary": {
                 "used_percent": used, "window_minutes": 10080, "resets_at": reset}}}}) + "\n"
             for used, reset in samples))
-        with worker.record_phase(st, "work", lambda: False) as phase:
+        with worker.telemetry_log.record_phase(st, "work", lambda: False) as phase:
             self.record_weekly_phase_usage(worker, st, phase, "main", "thread", path)
             phase.finish(outcome="completed")
         self.assertEqual(self.phase_telemetry_journal()[0]["usage"][0]["weekly_spent"], 4)
@@ -487,7 +487,7 @@ class WeeklyBudgetTests(RotationTestCase):
                 "primary": {"used_percent": value, "window_minutes": 10080,
                             "resets_at": reset}}}}) + "\n" for value in (before, after)))
             st.update(account="main", turns=turn)
-            with worker.record_phase(st, "work", lambda: False) as phase:
+            with worker.telemetry_log.record_phase(st, "work", lambda: False) as phase:
                 self.record_weekly_phase_usage(worker, st, phase, "main", "thread-%d" % turn, path)
                 phase.finish(outcome="completed")
             worker.task_state.save(st)
@@ -607,13 +607,13 @@ class WeeklyBudgetTests(RotationTestCase):
 
         work = self.root / "work-rollout.jsonl"
         work.write_text(quota(10) + quota(11))
-        with worker.record_phase(st, "work", lambda: False) as phase:
+        with worker.telemetry_log.record_phase(st, "work", lambda: False) as phase:
             self.record_weekly_phase_usage(worker, st, phase, "main", "work-thread", work)
             phase.finish(outcome="completed")
         st["kind"] = "review"
         review = self.root / "review-rollout.jsonl"
         review.write_text(quota(11) + quota(12))
-        with worker.record_phase(st, "review", lambda: False) as phase:
+        with worker.telemetry_log.record_phase(st, "review", lambda: False) as phase:
             self.record_weekly_phase_usage(worker, st, phase, "main", "review-thread", review)
             phase.finish(outcome="completed")
         self.assertEqual(st["weekly_used_percent"], 2)
@@ -671,7 +671,7 @@ class WeeklyBudgetTests(RotationTestCase):
                     len(b'{"type":"turn.completed"}\n').to_bytes(4, sys.byteorder))), \
                 mock.patch.object(worker.threads, "rollout_path", return_value=rollout), \
                 mock.patch.object(worker.threads, "rollout_limits", side_effect=read_limits), \
-                mock.patch.object(worker, "publish_pr") as publish_pr, \
+                mock.patch.object(worker.publishing, "publish_pr") as publish_pr, \
                 mock.patch.object(worker, "wrapup_turn", side_effect=AssertionError("unexpected wrap-up")) as wrapup:
             worker.run_turn(st, {"enabled": False, "accounts": [account]}, "finish the fix", None,
                             False, lambda: False, lambda seconds: None, new_turn=False)
@@ -852,7 +852,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(len(self.invocations()), 2)
         self.assertEqual(self.invocations()[0]["thread"], self.invocations()[1]["thread"])
         self.assertEqual(self.invocations()[1]["prompt"],
-                         self.worker().wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
+                         self.worker().prompts.wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
         self.assertFalse(any(event.get("command") == "app-server" for event in self.trace()))
         self.assertFalse(state["rotations"])
 

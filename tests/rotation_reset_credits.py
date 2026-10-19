@@ -94,7 +94,7 @@ class ResetCreditTests(RotationTestCase):
         self.assertEqual(len(executions), 2)
         self.assert_resumed_same_thread(executions[0], executions[1], self.home)
         worker = self.worker()
-        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.config.accounts_config()))
+        self.assertEqual(executions[1]["prompt"], worker.prompts.reset_resume_prompt(worker.config.accounts_config()))
         self.assertIn("Бесплатный сброс помог", output)
         self.assertEqual(len(self.consume_calls()), 1)
         self.assertFalse(any(entry.get("event") == "sleep"
@@ -164,7 +164,7 @@ class ResetCreditTests(RotationTestCase):
         with mock.patch.dict(os.environ, self.env), \
                 mock.patch.object(worker.credit_resets, "reset_credit_action", side_effect=add_concurrent_attempt):
             infos = worker.accounts.snapshots(cfg, prepare=True)
-            refreshed = worker.try_reset_credit(st, infos, cfg, lambda: False)
+            refreshed = worker.account_rotation.try_reset_credit(st, infos, cfg, lambda: False)
         self.assertEqual(selected, [spare["id"]], "inject the pending attempt after automatic selection")
         self.assertIsNotNone(refreshed)
         self.assertEqual(worker.accounts.available(refreshed, cfg)["name"], "main")

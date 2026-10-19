@@ -129,7 +129,7 @@ state = json.loads(sys.argv[2])
 (worker['config'].TASKS / state['slug']).mkdir(parents=True)
 signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 resource.setrlimit(resource.RLIMIT_FSIZE, (100, 100))
-worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
+worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed')
 """
         result = subprocess.run([PYTHON, "-I", "-c", script, str(SCRIPT), json.dumps(partial)],
                                 cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=5)
@@ -143,7 +143,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
 
         recovered = dict(partial, slug="telemetry-recovered", created=time.time())
         (worker.config.TASKS / recovered["slug"]).mkdir()
-        worker.PhaseTelemetry(recovered, "work").finish(outcome="completed")
+        worker.telemetry_log.PhaseTelemetry(recovered, "work").finish(outcome="completed")
         contents = journal.read_bytes()
         self.assertTrue(contents.startswith(damaged + b"\n"), "repair must only append to the damaged tail")
         lines = contents.splitlines()
@@ -200,7 +200,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         with journal.open("a+b") as held, ThreadPoolExecutor(max_workers=1) as executor:
             flock(held, fcntl.LOCK_EX)
             with mock.patch.object(worker.fcntl, "flock", side_effect=observe_lock):
-                future = executor.submit(worker.PhaseTelemetry(state, "work").finish, outcome="completed")
+                future = executor.submit(worker.telemetry_log.PhaseTelemetry(state, "work").finish, outcome="completed")
                 try:
                     self.assertTrue(blocked.wait(5), "the writer must encounter the held journal lock")
                     time.sleep(0.3)
@@ -222,7 +222,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
             fcntl.flock(held, fcntl.LOCK_EX)
             started = time.monotonic()
             with mock.patch.object(worker.time, "sleep", side_effect=AssertionError("stop must not wait")):
-                worker.PhaseTelemetry(state, "work", stopped=lambda: True).finish(outcome="stopped")
+                worker.telemetry_log.PhaseTelemetry(state, "work", stopped=lambda: True).finish(outcome="stopped")
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(journal.stat().st_size, 0)
         stderr = (worker.config.TASKS / state["slug"] / "stderr.log").read_text()
@@ -247,7 +247,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                         stopped[0] = True
                         return "completed", None
 
-                    with mock.patch.object(worker, "monitor", side_effect=complete_then_stop) as monitor:
+                    with mock.patch.object(worker.turn_monitor, "monitor", side_effect=complete_then_stop) as monitor:
                         worker.wrapup_turn(state, {"language": "en"}, {"name": "main"}, None,
                                            lambda: stopped[0], {"outcome": "budget_exhausted", "minutes": 1})
                     self.assertEqual(monitor.call_count, int(timing == "after"))
@@ -765,7 +765,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         self.assertEqual(last, {"tokens": {"input": 150, "cached_input": 60, "output": 30,
                                             "reasoning": 10}, "weekly": 12})
         self.assertEqual(worker.threads.rollout_usage(self.root / "missing-rollout.jsonl"), (None, None))
-        phase = worker.PhaseTelemetry({"slug": "rollout-fallback"}, "work")
+        phase = worker.telemetry_log.PhaseTelemetry({"slug": "rollout-fallback"}, "work")
         before = {"tokens": {"input": None, "cached_input": None, "output": 5, "reasoning": None},
                   "weekly": 7}
         phase.add_usage("main", "thread", before, path, offset)
