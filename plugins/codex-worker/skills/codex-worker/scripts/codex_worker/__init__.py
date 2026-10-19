@@ -26,22 +26,22 @@ Layer 7:
     prompts (implemented): prompt builders and review angles.
     turn_monitor (implemented): turn control and monitoring.
 Layer 8:
-    turns (planned): work turns, wrap-up turns, and turn execution.
+    turns (implemented): work turns, wrap-up turns, and turn execution.
 Layer 9:
-    review_cycle (planned): review angles, review turns, and automatic fixes.
-    ci_runs (planned): CI waits, failure excerpts, prompts, and fix cycles.
+    review_cycle (implemented): review angles, review turns, and automatic fixes.
+    ci_runs (implemented): CI waits, failure excerpts, prompts, and fix cycles.
 Layer 10:
-    supervisor (planned): detached task supervision and spawning.
-    wait_view (planned): wait output rendering and the wait command.
+    supervisor (implemented): detached task supervision and spawning.
+    wait_view (implemented): wait output rendering and the wait command.
 Layer 11:
-    commands (planned): task commands, descriptions, and main repositories.
+    commands (implemented): task commands, descriptions, and main repositories.
 Layer 12:
-    cli (planned): argument types, option registry, dispatch, and command table.
+    cli (implemented): argument types, option registry, dispatch, and command table.
 
 Import own modules as whole modules at module top, using ``from . import name``
 in the package and ``from codex_worker import name`` in the entrypoint. Access
 owned definitions through their module so patches reach every caller. Lower
 layers never import higher layers, imports remain acyclic, and package modules
 never import the entrypoint. Do not rebind module aliases or use dynamic
-namespaces. Only config.py may use __file__; usage text stays in the entrypoint.
+namespaces. Only config.py may use __file__; usage text stays in cli.py.
 """

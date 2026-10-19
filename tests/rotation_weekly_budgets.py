@@ -539,11 +539,11 @@ class WeeklyBudgetTests(RotationTestCase):
         selector = mock.MagicMock()
         selector.__enter__.return_value = selector
         selector.select.side_effect = lambda timeout: (
-            [(SimpleNamespace(fileobj=proc.stdout), worker.selectors.EVENT_READ)] if exec_chunks else [])
+            [(SimpleNamespace(fileobj=proc.stdout), worker.turn_monitor.selectors.EVENT_READ)] if exec_chunks else [])
         wrap_selector = mock.MagicMock()
         wrap_selector.__enter__.return_value = wrap_selector
         wrap_selector.select.side_effect = lambda timeout: (
-            [(SimpleNamespace(fileobj=wrap.stdout), worker.selectors.EVENT_READ)] if wrap_chunks else [])
+            [(SimpleNamespace(fileobj=wrap.stdout), worker.turn_monitor.selectors.EVENT_READ)] if wrap_chunks else [])
 
         def read(fd, size):
             if fd == 99:
@@ -569,12 +569,12 @@ class WeeklyBudgetTests(RotationTestCase):
 
         with mock.patch.object(worker.accounts, "prepare_home"), \
                 mock.patch.object(worker.procs, "terminate", side_effect=terminate), \
-                mock.patch.object(worker.subprocess, "Popen", side_effect=[proc, wrap]) as popen, \
-                mock.patch.object(worker.selectors, "DefaultSelector", side_effect=[selector, wrap_selector]), \
+                mock.patch.object(worker.turn_monitor.subprocess, "Popen", side_effect=[proc, wrap]) as popen, \
+                mock.patch.object(worker.turn_monitor.selectors, "DefaultSelector", side_effect=[selector, wrap_selector]), \
                 mock.patch.object(worker.os, "read", side_effect=read), \
-                mock.patch.object(worker.fcntl, "ioctl", return_value=bytes(4)), \
+                mock.patch.object(worker.turn_monitor.fcntl, "ioctl", return_value=bytes(4)), \
                 mock.patch.object(worker.threads, "rollout_path", return_value=rollout):
-            worker.run_turn(st, {"enabled": False, "accounts": [account]}, "work", None,
+            worker.turns.run_turn(st, {"enabled": False, "accounts": [account]}, "work", None,
                             False, lambda: False, lambda seconds: None)
         self.assertEqual(observed, ["exec quota 16, no completion", "late quota 17 after exec stopped",
                                     "wrap-up quotas 16, 18"])
@@ -633,7 +633,7 @@ class WeeklyBudgetTests(RotationTestCase):
         selector = mock.MagicMock()
         selector.__enter__.return_value = selector
         selector.select.side_effect = lambda timeout: (
-            [(SimpleNamespace(fileobj=proc.stdout), worker.selectors.EVENT_READ)] if chunks else [])
+            [(SimpleNamespace(fileobj=proc.stdout), worker.turn_monitor.selectors.EVENT_READ)] if chunks else [])
 
         def read(fd, size):
             chunk = chunks.pop(0)
@@ -664,16 +664,16 @@ class WeeklyBudgetTests(RotationTestCase):
 
         with mock.patch.object(worker.accounts, "prepare_home"), \
                 mock.patch.object(worker.procs, "terminate"), \
-                mock.patch.object(worker.subprocess, "Popen", return_value=proc) as popen, \
-                mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
+                mock.patch.object(worker.turn_monitor.subprocess, "Popen", return_value=proc) as popen, \
+                mock.patch.object(worker.turn_monitor.selectors, "DefaultSelector", return_value=selector), \
                 mock.patch.object(worker.os, "read", side_effect=read), \
-                mock.patch.object(worker.fcntl, "ioctl", return_value=(
+                mock.patch.object(worker.turn_monitor.fcntl, "ioctl", return_value=(
                     len(b'{"type":"turn.completed"}\n').to_bytes(4, sys.byteorder))), \
                 mock.patch.object(worker.threads, "rollout_path", return_value=rollout), \
                 mock.patch.object(worker.threads, "rollout_limits", side_effect=read_limits), \
                 mock.patch.object(worker.publishing, "publish_pr") as publish_pr, \
-                mock.patch.object(worker, "wrapup_turn", side_effect=AssertionError("unexpected wrap-up")) as wrapup:
-            worker.run_turn(st, {"enabled": False, "accounts": [account]}, "finish the fix", None,
+                mock.patch.object(worker.turns, "wrapup_turn", side_effect=AssertionError("unexpected wrap-up")) as wrapup:
+            worker.turns.run_turn(st, {"enabled": False, "accounts": [account]}, "finish the fix", None,
                             False, lambda: False, lambda seconds: None, new_turn=False)
         self.assertEqual(observed, ["agent_message", "final quota", "completion fragment", "completion fragment"])
         popen.assert_called_once()

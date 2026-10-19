@@ -142,7 +142,7 @@ class PromptTests(unittest.TestCase):
         for language in ("en", "ru"):
             for sandbox in ("off", "workspace"):
                 with self.subTest(language=language, sandbox=sandbox):
-                    prompt = self.worker.ci_fix_prompt(dict(self.st, sandbox=sandbox), ci, {"language": language})
+                    prompt = self.worker.ci_runs.ci_fix_prompt(dict(self.st, sandbox=sandbox), ci, {"language": language})
                     for part in parts[language][:-1]:
                         self.assertIn(part, prompt)
                     if sandbox == "workspace":

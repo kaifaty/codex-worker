@@ -33,7 +33,7 @@ class LifecycleTests(RotationTestCase):
                      "worker = load_worker(name='prepared_worker', script=script)\n"
                      "print('ready', flush=True)\n"
                      "sys.argv = [script] + json.loads(sys.stdin.readline())\n"
-                     "worker.main()\n")
+                     "worker.cli.main()\n")
         proc = subprocess.Popen([PYTHON, "-I", "-c", bootstrap, str(SCRIPT)],
                                 cwd=self.repo, env=self.env, text=True,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -75,7 +75,7 @@ worker.task_state.save(state)
 observed = {}
 ''' + instrumentation + r'''
 try:
-    worker.cmd__run(SimpleNamespace(slug=state["slug"]))
+    worker.supervisor.cmd__run(SimpleNamespace(slug=state["slug"]))
 finally:
     sys.settrace(None)
 for proc in list(worker.notifications.NOTIFY_PROCESSES):
@@ -152,7 +152,7 @@ worker.task_state.save = fail_once
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": "fixture result"}])
         slug = "signal-before-finalization-freeze"
         observed = self.run_supervisor_fixture(slug, r'''
-real_sigmask = worker.signal.pthread_sigmask
+real_sigmask = worker.supervisor.signal.pthread_sigmask
 stop_signals = {signal.SIGINT, signal.SIGTERM}
 def sigmask(how, requested):
     if how == signal.SIG_BLOCK and stop_signals <= set(requested) and not observed:
@@ -162,7 +162,7 @@ def sigmask(how, requested):
         os.kill(os.getpid(), signal.SIGTERM)
         observed["after"] = time.time()
     return real_sigmask(how, requested)
-worker.signal.pthread_sigmask = sigmask
+worker.supervisor.signal.pthread_sigmask = sigmask
 ''')
         self.assertTrue(observed, "fixture did not reach the finalization freeze")
         state = self.state(slug)
@@ -217,7 +217,7 @@ worker.signal.pthread_sigmask = sigmask
 observed.update(events=[], fired=False, finished_launched=False)
 real_record = worker.telemetry_log.record_turn_result
 real_notify = worker.notifications.notify
-real_popen = worker.subprocess.Popen
+real_popen = worker.supervisor.subprocess.Popen
 real_reap = worker.notifications.reap_notifications
 stop_signals = {signal.SIGINT, signal.SIGTERM}
 def interrupt(current):
@@ -257,7 +257,7 @@ def reap():
     return result
 worker.telemetry_log.record_turn_result = record
 worker.notifications.notify = notify
-worker.subprocess.Popen = popen
+worker.supervisor.subprocess.Popen = popen
 worker.notifications.reap_notifications = reap
 ''')
                 self.assertTrue(observed["fired"], "fixture did not reach the finalization checkpoint")
@@ -522,14 +522,14 @@ worker.notifications.reap_notifications = reap
                     first.append(dict(st["signal"]))
                 self.assertEqual(st["signal"], first[0])
 
-        with mock.patch.object(worker.signal, "signal", side_effect=signal_handler), \
-                mock.patch.object(worker.threading, "Event", return_value=cancellation), \
+        with mock.patch.object(worker.supervisor.signal, "signal", side_effect=signal_handler), \
+                mock.patch.object(worker.supervisor.threading, "Event", return_value=cancellation), \
                 mock.patch.object(worker.config, "accounts_config", return_value={"enabled": False}), \
-                mock.patch.object(worker, "run_turn", side_effect=interrupt), \
+                mock.patch.object(worker.turns, "run_turn", side_effect=interrupt), \
                 mock.patch.object(worker.telemetry_log, "record_turn_result"), \
                 mock.patch.object(worker.notifications, "notify"), \
                 mock.patch.object(worker.checking, "guarded_changes", return_value=[]):
-            worker.cmd__run(SimpleNamespace(slug=slug))
+            worker.supervisor.cmd__run(SimpleNamespace(slug=slug))
         state = worker.task_state.load(slug)
         self.assertEqual(state["outcome"], "interrupted")
         self.assertEqual(state["signal"], first[0])
@@ -554,8 +554,8 @@ worker.notifications.reap_notifications = reap
 
         with mock.patch.object(worker.procs, "alive", side_effect=[True, False]), \
                 mock.patch.object(worker.os, "killpg", side_effect=signal_after_request) as killpg, \
-                mock.patch.object(worker.time, "sleep"), mock.patch("builtins.print"):
-            worker.cmd_stop(SimpleNamespace(slug=slug))
+                mock.patch.object(worker.commands.time, "sleep"), mock.patch("builtins.print"):
+            worker.commands.cmd_stop(SimpleNamespace(slug=slug))
         killpg.assert_called_once()
         self.assertEqual(worker.task_state.load(slug)["checkpoint"], "concurrent supervisor progress")
         self.assertEqual(worker.task_state.stop_outcome(dict(state), lambda: True), "stopped")
@@ -1257,8 +1257,8 @@ worker.notifications.reap_notifications = reap
             clock[0] += seconds
 
         with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
-                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker.time, "sleep", side_effect=sleep), \
+                mock.patch.object(worker.clock.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.clock.time, "sleep", side_effect=sleep), \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", return_value=unknown) as snapshots:
             chosen = worker.account_rotation.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: False)
@@ -1284,8 +1284,8 @@ worker.notifications.reap_notifications = reap
             stopped[0] = True
 
         with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
-                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker.time, "sleep", side_effect=sleep) as sleeper, \
+                mock.patch.object(worker.clock.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.clock.time, "sleep", side_effect=sleep) as sleeper, \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots") as snapshots:
             chosen = worker.account_rotation.wait_for_account(st, unknown, cfg, "temporary account RPC unavailable", lambda: stopped[0])

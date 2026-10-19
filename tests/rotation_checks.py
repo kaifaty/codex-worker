@@ -496,7 +496,7 @@ class CheckGuardTests(RotationTestCase):
                     mock.patch.object(worker.procs, "sh", return_value=""), \
                     mock.patch.object(worker.threads, "last_message", return_value=""), \
                     mock.patch("builtins.print"):
-                worker.cmd_status(SimpleNamespace(slug=state["slug"]))
+                worker.commands.cmd_status(SimpleNamespace(slug=state["slug"]))
         save.assert_not_called()
         self.assertEqual(state, snapshot)
 
@@ -513,7 +513,7 @@ class CheckGuardTests(RotationTestCase):
         script.parent.mkdir()
         script.write_text("exit 0\n")
         new_pid = IMPOSSIBLE_PID
-        original_popen = worker.subprocess.Popen
+        original_popen = worker.supervisor.subprocess.Popen
         original_guarded_changes = worker.checking.guarded_changes
         launches = []
 
@@ -524,18 +524,18 @@ class CheckGuardTests(RotationTestCase):
             return original_popen(command, *args, **kwargs)
 
         def describe_old_state(old_state):
-            worker.cmd_say(SimpleNamespace(
+            worker.commands.cmd_say(SimpleNamespace(
                 slug=slug, file=None, message="Continue working", effort=None, no_check=False,
                 check=None, check_timeout=None, review=False, fix_rounds=None, no_base_check=False))
             return original_guarded_changes(old_state)
 
         with mock.patch.object(worker.config, "accounts_config", return_value={"language": "en"}), \
                 mock.patch.object(worker.procs, "alive", side_effect=lambda pid: pid == new_pid), \
-                mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
+                mock.patch.object(worker.supervisor.subprocess, "Popen", side_effect=popen), \
                 mock.patch.object(worker.checking, "guarded_changes", side_effect=describe_old_state), \
                 mock.patch.object(worker.task_state, "save", wraps=worker.task_state.save) as save, \
                 mock.patch("builtins.print") as printer:
-            worker.cmd_wait(SimpleNamespace(slug=slug, timeout=0, through_sleep=False))
+            worker.wait_view.cmd_wait(SimpleNamespace(slug=slug, timeout=0, through_sleep=False))
         self.assertEqual(len(launches), 1)
         save.assert_called_once()
         current = worker.task_state.load(slug)
