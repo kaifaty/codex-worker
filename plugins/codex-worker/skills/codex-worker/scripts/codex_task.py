@@ -620,6 +620,7 @@ def reset_journal(cancelled=lambda: False):
     path = CODEX_HOME / "codex-worker-resets.jsonl"
     # Parallel tasks must agree on a key, even if one dies during the RPC.
     with path.open("a+", encoding="utf-8") as journal:
+        waiting_logged = False
         while True:
             if cancelled():
                 raise RuntimeError("stopped")
@@ -627,6 +628,9 @@ def reset_journal(cancelled=lambda: False):
                 fcntl.flock(journal, fcntl.LOCK_EX | fcntl.LOCK_NB)
                 break
             except BlockingIOError:
+                if not waiting_logged:
+                    print("reset journal: waiting for lock", file=sys.stderr, flush=True)
+                    waiting_logged = True
                 time.sleep(0.05)
         journal.seek(0)
         entries = []

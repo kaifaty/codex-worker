@@ -100,6 +100,8 @@ class TimeBudgetTests(RotationTestCase):
                                  if event.get("command") == "exec-child")
                     self.extra_pids.add(child)
                     self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
+                    log = self.home / "claude-tasks" / "cap-locked-journal" / "stderr.log"
+                    self.until(lambda: log.exists() and "reset journal: waiting for lock" in log.read_text())
                     clock.sleep(4.1)
                     output = self.wait("cap-locked-journal", timeout=10)
                     state = self.state("cap-locked-journal")
