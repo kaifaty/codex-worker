@@ -10,8 +10,23 @@ Waiting spends no task weekly budget and does not count toward `--max-minutes`; 
 signal interrupts it. A changed PR head also skips the wait.
 
 Passing or skipped checks give `passed`; failed or cancelled checks give `failed`. A remaining CI
-round sends failed-check names and log tails to the same implementation thread. GitHub Actions tails
-are capped at 150 lines per failed check and 400 total; external checks get a link.
+round sends failed-check names and selected log lines to the same implementation thread. GitHub
+Actions excerpts select failure blocks around unittest `FAIL:` / `ERROR:`, Python tracebacks and
+`AssertionError`, `Error:`, pytest `E   ` / `FAILED`, and Actions `##[error]` annotations. They include
+nearby separator/source lines and following context up to a blank line or the next block, plus test
+summaries such as `Ran N tests`, `FAILED (...)`, and `N failed`, in original log order. GitHub's job,
+step and timestamp prefixes do not affect matching; selected lines retain those prefixes.
+Only the last summary of each kind is selected, so intermediate successful runs cannot crowd out
+errors. Python exception-group tracebacks are recognized with their tree prefixes and nested frames.
+Consecutive Python tracebacks form separate blocks even without blank lines between them; a unittest
+failure header stays with its first traceback.
+
+The same excerpt appears in `wait` and the CI repair prompt, stored under the existing `tail` state
+key. Excerpts are capped at 150 lines per failed check and 400 total, including any omission notice.
+If failure blocks exceed the available space, the first complete blocks that fit are kept with
+`… N more failure lines omitted`. Logs with no recognized failure patterns use the original tail
+behavior; external checks get a link. If no complete failure block fits, its beginning is kept within
+the remaining space alongside the final summaries and omission notice.
 
 Codex must fix and push failures caused by the branch, or change nothing and return `blocked` with
 evidence for flaky or unrelated failures. Each CI turn runs the saved local check, publishes again,

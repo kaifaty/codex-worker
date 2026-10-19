@@ -3216,6 +3216,101 @@ def ci_json(st, args, stopped, timeout=60):
     return json.loads(response.stdout)
 
 
+def ci_failure_excerpt(text, limit):
+    """Prefer complete failure blocks and test summaries, or the old unrecognized-log tail."""
+    lines = text.splitlines()
+    # gh prefixes each original line with job, step and timestamp. Match the payload,
+    # but keep the original lines (including prefixes) for wait and the repair prompt.
+    prefix = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d{2}-\d{2}T\S+ ?")
+    payloads = [prefix.sub("", line) for line in lines]
+    traceback_header = re.compile(
+        r"^(?P<prefix>[\s|+]*)(?:Exception Group )?Traceback \(most recent call last\)")
+    failure = re.compile(traceback_header.pattern + r"|^\s*(?:FAIL:|ERROR:|FAILED\b|E {3})"
+                         r"|\bAssertionError\b|\bError:|##\[error\]")
+    summary = re.compile(r"^\s*(?P<ran>Ran \d+ tests?\b)"
+                         r"|^\s*(?P<failed>FAILED(?:\s*\(|\s*$))"
+                         r"|^\s*(?P<pytest>(?:=+\s*)?(?:\d+ \w+,\s*)*\d+ failed\b)")
+    progress = re.compile(r"\.\.\.\s+(?:ok|FAIL|ERROR|skipped\b.*)$"
+                          r"|\bPASSED(?:\s+\[\s*\d+%\])?\s*$")
+    new_block = re.compile(r"^\s*(?:FAIL:|ERROR:|FAILED\b|Error:|##\[error\])")
+    summaries, latest_summaries = set(), {}
+    for index, line in enumerate(payloads):
+        match = summary.search(line)
+        if match:
+            summaries.add(index)
+            latest_summaries[match.lastgroup] = index
+    final_summaries = set(latest_summaries.values())
+    matches = [index for index, line in enumerate(payloads) if failure.search(line)]
+    if not matches:
+        return lines[-limit:]
+
+    blocks = []
+    for index in matches:
+        if index in summaries or (blocks and index < blocks[-1][1]):
+            continue
+        start = index
+        # A nearby separator/source line gives context without pulling successful tests
+        # or a preceding failure block into this one.
+        for previous in range(index - 1, max(-1, index - 3), -1):
+            if blocks and previous < blocks[-1][1]:
+                break
+            line = payloads[previous].strip()
+            if (not line or previous in summaries or failure.search(payloads[previous])
+                    or progress.search(line)):
+                break
+            start = previous
+            if re.fullmatch(r"[-=_]{3,}", line):
+                break
+        end = index + 1
+        header = traceback_header.match(payloads[index])
+        traceback_depth = None
+        if header:
+            traceback_depth = len(header["prefix"]) if header["prefix"].strip() else 0
+        while end < len(lines):
+            line = payloads[end].strip()
+            header = traceback_header.match(payloads[end])
+            new_traceback = (header is not None and traceback_depth is not None
+                            and (traceback_depth == 0 or len(header["prefix"]) <= traceback_depth))
+            if (not line or end in summaries or progress.search(line) or new_block.search(line)
+                    or new_traceback
+                    or line.startswith(("===", "___"))
+                    or ("AssertionError" in payloads[index] and "AssertionError" in line)):
+                break
+            # Keep the first traceback with its unittest header, and nested group
+            # tracebacks with their parent. Adjacent top-level tracebacks stay separate.
+            if header and traceback_depth is None:
+                traceback_depth = len(header["prefix"]) if header["prefix"].strip() else 0
+            end += 1
+        blocks.append((start, end))
+
+    total = sum(end - start for start, end in blocks) + len(final_summaries)
+    if total <= limit:
+        selected = set(final_summaries)
+        for start, end in blocks:
+            selected.update(range(start, end))
+        return [lines[index] for index in sorted(selected)]
+
+    # Only final summaries compete with errors; intermediate successful runs do not.
+    # Leave at least one failure line beside the notice when the budget permits it.
+    summary_budget = max(0, limit - (2 if blocks else 1))
+    selected = set(sorted(final_summaries, reverse=True)[:summary_budget])
+    available = limit - len(selected) - 1
+    kept_block = False
+    for start, end in blocks:
+        if end - start > available:
+            break
+        selected.update(range(start, end))
+        available -= end - start
+        kept_block = True
+    if blocks and not kept_block:
+        # An oversized first block must still expose the beginning of the failure.
+        start, end = blocks[0]
+        selected.update(range(start, min(end, start + available)))
+    excerpt = [lines[index] for index in sorted(selected)]
+    excerpt.append(f"… {total - len(selected)} more failure lines omitted")
+    return excerpt
+
+
 def ci_failure_logs(st, gh, stopped, deadline):
     remaining = 400
     for check in st["ci"]["checks"]:
@@ -3241,7 +3336,7 @@ def ci_failure_logs(st, gh, stopped, deadline):
                     text = "Failed job log unavailable"
         except (OSError, subprocess.TimeoutExpired) as exc:
             text = "Failed job log unavailable: " + str(exc)
-        lines = text.splitlines()[-min(150, remaining):]
+        lines = ci_failure_excerpt(text, min(150, remaining))
         check["tail"] = "\n".join(lines)
         remaining -= len(lines)
 
