@@ -6,7 +6,8 @@ base revision is origin/main. No tests are imported or executed.
 Assertion comparisons cover changed tests and existing helpers, retain every
 argument and ignore AST locations. --strip-module-hops also ignores package
 module hops at the known loaded-worker expressions during a module split,
-including Python scripts embedded in string literals.
+including Python scripts embedded in string literals. Assertion data literals
+remain unchanged; known Python-code arguments can still be normalized.
 """
 
 import argparse
@@ -30,6 +31,24 @@ WORKER_ASTS = frozenset(
     for expression in WORKER_EXPRESSIONS
 )
 SCRIPTS = ROOT / "plugins/codex-worker/skills/codex-worker/scripts"
+# Within assertions, only these known code inputs may bypass literal comparison.
+# Unknown wrappers keep their strings as data, even when the text parses as Python.
+SCRIPT_INPUTS = {
+    "run_script": (0, "script"),
+    "self.run_supervisor_fixture": (1, "instrumentation"),
+    "exec": (0, "source"),
+    "eval": (0, "source"),
+    "compile": (0, "source"),
+}
+
+
+def is_assertion_call(node):
+    if not isinstance(node, ast.Call):
+        return False
+    function = node.func
+    name = (function.attr if isinstance(function, ast.Attribute)
+            else function.id if isinstance(function, ast.Name) else "")
+    return name.startswith("assert")
 
 
 class StripModuleHops(ast.NodeTransformer):
@@ -50,11 +69,11 @@ class StripModuleHops(ast.NodeTransformer):
         return node
 
 
-def normalize_embedded_scripts(before, after, modules):
-    """Normalize paired literals only when either contains a worker module hop."""
+def normalize_embedded_scripts(before, after, modules, assertion_value=False):
+    """Normalize paired scripts with module hops while preserving assertion data."""
     if (isinstance(before, ast.Constant) and isinstance(after, ast.Constant)
             and isinstance(before.value, str) and isinstance(after.value, str)):
-        if before.value == after.value:
+        if assertion_value or before.value == after.value:
             return
         try:
             scripts = [ast.parse(node.value) for node in (before, after)]
@@ -69,11 +88,29 @@ def normalize_embedded_scripts(before, after, modules):
                 node.value = ("embedded Python", ast.dump(script, include_attributes=False))
         return
     if isinstance(before, ast.AST) and type(before) is type(after):
+        if isinstance(before, ast.Assert):
+            assertion_value = True
+        elif isinstance(before, ast.Call):
+            assertion_value = (assertion_value or is_assertion_call(before)
+                               or is_assertion_call(after))
+            if assertion_value:
+                code_input = (SCRIPT_INPUTS.get(ast.unparse(before.func))
+                              if ast.dump(before.func) == ast.dump(after.func) else None)
+                normalize_embedded_scripts(before.func, after.func, modules, True)
+                for index, (original, current) in enumerate(zip(before.args, after.args)):
+                    normalize_embedded_scripts(original, current, modules,
+                                               not code_input or index != code_input[0])
+                for original, current in zip(before.keywords, after.keywords):
+                    code_keyword = (code_input and original.arg == current.arg == code_input[1])
+                    normalize_embedded_scripts(original.value, current.value, modules,
+                                               not code_keyword)
+                return
         for field in before._fields:
-            normalize_embedded_scripts(getattr(before, field), getattr(after, field), modules)
+            normalize_embedded_scripts(getattr(before, field), getattr(after, field),
+                                       modules, assertion_value)
     elif isinstance(before, list) and isinstance(after, list):
         for original, current in zip(before, after):
-            normalize_embedded_scripts(original, current, modules)
+            normalize_embedded_scripts(original, current, modules, assertion_value)
 
 
 def git_show(spec):
@@ -109,12 +146,7 @@ def working_sources():
 def assertion_calls(node):
     calls = Counter()
     for child in ast.walk(node):
-        if not isinstance(child, ast.Call):
-            continue
-        function = child.func
-        name = (function.attr if isinstance(function, ast.Attribute)
-                else function.id if isinstance(function, ast.Name) else "")
-        if name.startswith("assert"):
+        if is_assertion_call(child):
             calls[ast.dump(child, include_attributes=False)] += 1
     return calls
 

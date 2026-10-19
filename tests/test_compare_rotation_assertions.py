@@ -183,6 +183,93 @@ class Example:
         self.assertEqual(len(result["changed_tests"]), 1)
         self.assertEqual(len(result["changed_tests"][0]["added_assertions"]), 1)
 
+    def test_changed_parseable_assertion_literal_remains_visible(self):
+        before = '''\
+class Example(unittest.TestCase):
+    def test_message(self):
+        self.assertEqual("worker.save()", "worker.save()")
+'''
+        after = before.replace('self.assertEqual("worker.save()",',
+                               'self.assertEqual("worker.task_state.save()",')
+        for source, failures in ((before, 0), (after, 1)):
+            with self.subTest(failures=failures):
+                namespace = {"unittest": unittest}
+                exec(source, namespace)
+                result = unittest.TestResult()
+                unittest.defaultTestLoader.loadTestsFromTestCase(
+                    namespace["Example"]).run(result)
+                self.assertEqual(result.testsRun, 1)
+                self.assertEqual(len(result.failures), failures)
+                self.assertEqual(result.errors, [])
+
+        self.set_sources(before, after)
+        for strip in (False, True):
+            with self.subTest(strip=strip):
+                code, result = self.compare(strip=strip)
+                self.assertEqual(code, 1)
+                self.assertEqual(len(result["changed_tests"]), 1)
+                self.assertEqual(len(result["changed_tests"][0]["removed_assertions"]), 1)
+                self.assertEqual(len(result["changed_tests"][0]["added_assertions"]), 1)
+
+    def test_changed_parseable_assertion_data_remains_visible(self):
+        cases = (
+            ('"worker.save()", "worker.save()"',
+             '"worker.save()", "worker.task_state.save()"'),
+            ('first="worker.save()", second="worker.save()"',
+             'first="worker.save()", second="worker.task_state.save()"'),
+            ('1, 1, msg="worker.save()"',
+             '1, 1, msg="worker.task_state.save()"'),
+            ('["worker.save()"], ["worker.save()"]',
+             '["worker.task_state.save()"], ["worker.save()"]'),
+            ('{"key": ("worker.save()",)}, {"key": ("worker.save()",)}',
+             '{"key": ("worker.task_state.save()",)}, {"key": ("worker.save()",)}'),
+            ('{"worker.save()"}, {"worker.save()"}',
+             '{"worker.task_state.save()"}, {"worker.save()"}'),
+        )
+        before, after = ["class Example:\n"], ["class Example:\n"]
+        for index, (original, current) in enumerate(cases):
+            template = ("    def test_message_{}(self):\n"
+                        "        self.assertEqual({{}})\n").format(index)
+            before.append(template.format(original))
+            after.append(template.format(current))
+        self.set_sources("".join(before), "".join(after))
+        code, result = self.compare()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["changed_tests"]), len(cases))
+        for changed in result["changed_tests"]:
+            with self.subTest(name=changed["name"]):
+                self.assertEqual(len(changed["removed_assertions"]), 1)
+                self.assertEqual(len(changed["added_assertions"]), 1)
+
+    def test_changed_parseable_bare_assert_literal_remains_visible(self):
+        before = '''\
+class Example:
+    def test_message(self):
+        assert "worker.save()" == "worker.save()"
+'''
+        self.set_sources(before, before.replace('assert "worker.save()"',
+                                               'assert "worker.task_state.save()"'))
+        _, result = self.compare()
+        self.assertEqual(len(result["changed_tests"]), 1)
+
+    def test_changed_wrapped_assertion_data_remains_visible(self):
+        before, after = ["class Example:\n"], ["class Example:\n"]
+        for index, function in enumerate(("str", "format_text")):
+            template = ("    def test_wrapped_message_{index}(self):\n"
+                        "        self.assertEqual({function}({value!r}), 'worker.save()')\n")
+            before.append(template.format(index=index, function=function,
+                                          value="worker.save()"))
+            after.append(template.format(index=index, function=function,
+                                         value="worker.task_state.save()"))
+        self.set_sources("".join(before), "".join(after))
+        code, result = self.compare()
+        self.assertEqual(code, 1)
+        self.assertEqual(len(result["changed_tests"]), 2)
+        for changed in result["changed_tests"]:
+            with self.subTest(name=changed["name"]):
+                self.assertEqual(len(changed["removed_assertions"]), 1)
+                self.assertEqual(len(changed["added_assertions"]), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
