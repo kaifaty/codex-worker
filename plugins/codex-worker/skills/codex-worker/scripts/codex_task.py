@@ -3223,15 +3223,23 @@ def ci_failure_excerpt(text, limit):
     # but keep the original lines (including prefixes) for wait and the repair prompt.
     prefix = re.compile(r"^[^\t]*\t[^\t]*\t\d{4}-\d{2}-\d{2}T\S+ ?")
     payloads = [prefix.sub("", line) for line in lines]
-    failure = re.compile(r"^\s*(?:FAIL:|ERROR:|Traceback \(most recent call last\)|FAILED\b|E {3})"
+    traceback_header = re.compile(
+        r"^(?P<prefix>[\s|+]*)(?:Exception Group )?Traceback \(most recent call last\)")
+    failure = re.compile(traceback_header.pattern + r"|^\s*(?:FAIL:|ERROR:|FAILED\b|E {3})"
                          r"|\bAssertionError\b|\bError:|##\[error\]")
-    summary = re.compile(r"^\s*(?:Ran \d+ tests?\b|FAILED(?:\s*\(|\s*$))"
-                         r"|^\s*(?:=+\s*)?(?:\d+ \w+,\s*)*\d+ failed\b")
+    summary = re.compile(r"^\s*(?P<ran>Ran \d+ tests?\b)"
+                         r"|^\s*(?P<failed>FAILED(?:\s*\(|\s*$))"
+                         r"|^\s*(?P<pytest>(?:=+\s*)?(?:\d+ \w+,\s*)*\d+ failed\b)")
     progress = re.compile(r"\.\.\.\s+(?:ok|FAIL|ERROR|skipped\b.*)$"
                           r"|\bPASSED(?:\s+\[\s*\d+%\])?\s*$")
-    new_block = re.compile(r"^\s*(?:FAIL:|ERROR:|FAILED\b)|\bError:|##\[error\]")
-    traceback_header = re.compile(r"^\s*Traceback \(most recent call last\)")
-    summaries = {index for index, line in enumerate(payloads) if summary.search(line)}
+    new_block = re.compile(r"^\s*(?:FAIL:|ERROR:|FAILED\b|Error:|##\[error\])")
+    summaries, latest_summaries = set(), {}
+    for index, line in enumerate(payloads):
+        match = summary.search(line)
+        if match:
+            summaries.add(index)
+            latest_summaries[match.lastgroup] = index
+    final_summaries = set(latest_summaries.values())
     matches = [index for index, line in enumerate(payloads) if failure.search(line)]
     if not matches:
         return lines[-limit:]
@@ -3254,30 +3262,38 @@ def ci_failure_excerpt(text, limit):
             if re.fullmatch(r"[-=_]{3,}", line):
                 break
         end = index + 1
-        seen_traceback = bool(traceback_header.match(payloads[index]))
+        header = traceback_header.match(payloads[index])
+        traceback_depth = None
+        if header:
+            traceback_depth = len(header["prefix"]) if header["prefix"].strip() else 0
         while end < len(lines):
             line = payloads[end].strip()
-            starts_traceback = bool(traceback_header.match(line))
+            header = traceback_header.match(payloads[end])
+            new_traceback = (header is not None and traceback_depth is not None
+                            and (traceback_depth == 0 or len(header["prefix"]) <= traceback_depth))
             if (not line or end in summaries or progress.search(line) or new_block.search(line)
-                    or (seen_traceback and starts_traceback)
+                    or new_traceback
                     or line.startswith(("===", "___"))
                     or ("AssertionError" in payloads[index] and "AssertionError" in line)):
                 break
-            # Keep a unittest header with its first traceback; subsequent tracebacks
-            # start independent blocks even when print_exc() emits no blank separator.
-            seen_traceback = seen_traceback or starts_traceback
+            # Keep the first traceback with its unittest header, and nested group
+            # tracebacks with their parent. Adjacent top-level tracebacks stay separate.
+            if header and traceback_depth is None:
+                traceback_depth = len(header["prefix"]) if header["prefix"].strip() else 0
             end += 1
         blocks.append((start, end))
 
-    total = sum(end - start for start, end in blocks) + len(summaries)
+    total = sum(end - start for start, end in blocks) + len(final_summaries)
     if total <= limit:
-        selected = set(summaries)
+        selected = set(final_summaries)
         for start, end in blocks:
             selected.update(range(start, end))
         return [lines[index] for index in sorted(selected)]
 
-    # Reserve the omission notice and summaries before accepting the first whole blocks.
-    selected = set(sorted(summaries)[:max(0, limit - 1)])
+    # Only final summaries compete with errors; intermediate successful runs do not.
+    # Leave at least one failure line beside the notice when the budget permits it.
+    summary_budget = max(0, limit - (2 if blocks else 1))
+    selected = set(sorted(final_summaries, reverse=True)[:summary_budget])
     available = limit - len(selected) - 1
     kept_block = False
     for start, end in blocks:

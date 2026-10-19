@@ -1,4 +1,5 @@
 """Workspace, pull request and CI tests."""
+import builtins
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import shutil
 import signal
 import subprocess
 import traceback
+import unittest
 from pathlib import Path
 from unittest import mock
 
@@ -1349,6 +1351,126 @@ class WorkspaceTests(RotationTestCase):
         self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
         self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
         self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_intermediate_summaries_do_not_displace_failure_and_final_summary(self):
+        intermediate = ["Ran 1 test in 0.001s"] * 149
+        failure = ["=" * 70, "FAIL: test_example (tests.ExampleTests)", "-" * 70,
+                   "Traceback (most recent call last):",
+                   '  File "example.py", line 12, in test_example',
+                   "    self.assertEqual(actual, expected)", "AssertionError: actual != expected"]
+        summary = ["Ran 150 tests in 0.123s", "FAILED (failures=1)"]
+        for prefix in ("", "tests\tRun tests\t2026-10-19T12:00:00.0000000Z "):
+            with self.subTest(prefix=bool(prefix)):
+                log = "\n".join(prefix + line for line in intermediate + failure + [""] + summary)
+                st, ci, calls, waits = self.run_ci_wait_fixture(
+                    [[self.ci_check("fail")]], jobs={"123": log})
+                tail = ci["checks"][0]["tail"]
+                selected = tail.splitlines()
+                expected = [prefix + line for line in failure + summary]
+                self.assertTrue(all(line in selected for line in expected))
+                self.assertEqual([line for line in selected if line in expected], expected)
+                self.assertNotIn(prefix + intermediate[0], selected)
+                self.assertLessEqual(len(selected), 150)
+                worker = self.worker()
+                self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+                self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_error_text_in_exception_keeps_complete_unittest_tracebacks(self):
+        class FixtureTests(unittest.TestCase):
+            def test_failure(self):
+                self.fail("Error: invalid configuration")
+
+        buffer = io.StringIO()
+        result = unittest.TextTestRunner(stream=buffer).run(
+            unittest.TestSuite(FixtureTests("test_failure") for _ in range(40)))
+        self.assertEqual(len(result.failures), 40)
+        annotation = ["##[error]unittest failed", "failure detail 1",
+                      "failure detail 2", "failure detail 3", ""]
+        failure_lines = buffer.getvalue().splitlines()
+        summary = [line for line in failure_lines if line.startswith(("Ran ", "FAILED ("))]
+        self.assertEqual(len(summary), 2)
+        for prefix in ("", "tests\tRun tests\t2026-10-19T12:00:00.0000000Z "):
+            with self.subTest(prefix=bool(prefix)):
+                log = "\n".join(prefix + line for line in annotation + failure_lines)
+                st, ci, calls, waits = self.run_ci_wait_fixture(
+                    [[self.ci_check("fail")]], jobs={"123": log})
+                tail = ci["checks"][0]["tail"]
+                selected = tail.splitlines()
+                headings = [line for line in selected if line.startswith(prefix + "FAIL:")]
+                assertions = [line for line in selected
+                              if line == prefix + "AssertionError: Error: invalid configuration"]
+                self.assertGreater(len(headings), 0)
+                self.assertLess(len(headings), 40)
+                self.assertEqual(len(headings), len(assertions))
+                self.assertEqual(len(headings), selected.count(prefix + "Traceback (most recent call last):"))
+                self.assertEqual(selected[-4], assertions[-1])
+                self.assertEqual(selected[-3:-1], [prefix + line for line in summary])
+                self.assertRegex(selected[-1], r"^… \d+ more failure lines omitted$")
+                self.assertLessEqual(len(selected), 150)
+                worker = self.worker()
+                self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+                self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                self.assertEqual(waits, [])
+
+    def test_ci_failure_logs_exception_group_traceback_survives_successful_progress(self):
+        for nested in (False, True):
+            group_type = getattr(builtins, "ExceptionGroup", None)
+            if group_type is not None:
+                member = ValueError("fixture group failure")
+                if nested:
+                    try:
+                        raise group_type("nested fixture group", [member])
+                    except Exception as inner:
+                        member = inner
+                buffer = io.StringIO()
+                try:
+                    raise group_type("fixture group", [member]) from None
+                except Exception:
+                    traceback.print_exc(file=buffer)
+                failure = buffer.getvalue().splitlines()
+            else:
+                failure = ["  + Exception Group Traceback (most recent call last):",
+                           '  |   File "example.py", line 12, in example',
+                           "  | ExceptionGroup: fixture group (1 sub-exception)",
+                           "  +-+---------------- 1 ----------------"]
+                if nested:
+                    failure += ["    | Exception Group Traceback (most recent call last):",
+                                '    |   File "example.py", line 10, in example',
+                                "    | ExceptionGroup: nested fixture group (1 sub-exception)",
+                                "    +-+---------------- 1 ----------------",
+                                "      | ValueError: fixture group failure",
+                                "      +------------------------------------"]
+                else:
+                    failure += ["    | ValueError: fixture group failure",
+                                "    +------------------------------------"]
+            self.assertIn("Exception Group Traceback", failure[0])
+            self.assertTrue(any("ValueError: fixture group failure" in line for line in failure))
+            self.assertEqual(sum("Exception Group Traceback" in line for line in failure),
+                             2 if nested else 1)
+            for prefix in ("", "tests\tRun tests\t2026-10-19T12:00:00.0000000Z "):
+                for count in (1, 40):
+                    with self.subTest(nested=nested, prefix=bool(prefix), groups=count):
+                        progress = ["test_%03d ... ok" % index for index in range(300)]
+                        log = "\n".join(prefix + line for line in failure * count + progress)
+                        st, ci, calls, waits = self.run_ci_wait_fixture(
+                            [[self.ci_check("fail")]], jobs={"123": log})
+                        tail = ci["checks"][0]["tail"]
+                        if count == 1:
+                            expected = [prefix + line for line in failure]
+                        else:
+                            retained_count = 149 // len(failure)
+                            self.assertGreater(retained_count, 0)
+                            self.assertLess(retained_count, count)
+                            expected = ([prefix + line for line in failure * retained_count] +
+                                        ["… %d more failure lines omitted" %
+                                         ((count - retained_count) * len(failure))])
+                        self.assertEqual(tail.splitlines(), expected)
+                        self.assertLessEqual(len(tail.splitlines()), 150)
+                        worker = self.worker()
+                        self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
+                        self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                        self.assertEqual(waits, [])
 
     def test_ci_failure_logs_select_pytest_assertion_failed_test_and_summary(self):
         prefix = "pytest\tRun tests\t2026-10-19T12:00:00.0000000Z "
