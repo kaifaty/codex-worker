@@ -46,7 +46,7 @@ clock = time
 if os.environ.get("CODEX_TASK_CLOCK_FILE"):
 ''' + "\n".join("    " + line for line in WORKER_BOOTSTRAP.splitlines()) + r'''
     worker = load_worker(name="fake_clock_worker", script=os.environ["CODEX_FAKE_WORKER_SCRIPT"])
-    clock = worker.CLOCK
+    clock = worker.clock.CLOCK
 
 home = Path(os.environ["CODEX_HOME"])
 fixture_path = home / "fixture.json"
@@ -608,7 +608,7 @@ class RotationTestCase(unittest.TestCase):
         path.write_text(json.dumps({"wall": time.time(), "monotonic": time.monotonic()}))
         self.env["CODEX_TASK_CLOCK_FILE"] = str(path)
         self.env["CODEX_FAKE_WORKER_SCRIPT"] = str(SCRIPT)
-        return self.worker().CLOCK
+        return self.worker().clock.CLOCK
 
     @property
     def repo(self):
@@ -701,7 +701,7 @@ class RotationTestCase(unittest.TestCase):
     def reset_after_ready(self, command, reset, delay, after_exec=False):
         # Arm before the first exec publication, or the initial quota request
         # when no account can run, after expensive subprocess startup.
-        clock = self.worker().CLOCK if self.env.get("CODEX_TASK_CLOCK_FILE") else time
+        clock = self.worker().clock.CLOCK if self.env.get("CODEX_TASK_CLOCK_FILE") else time
         gate = self.root / ("quota-ready-" + uuid.uuid4().hex)
         for home in (self.home, self.other):
             path = home / "fixture.json"

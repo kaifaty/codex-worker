@@ -488,13 +488,13 @@ class CheckGuardTests(RotationTestCase):
                  "account": "main", "turns": 1, "pid": None,
                  "check": "sh scripts/verify.sh", "check_paths": []}
         snapshot = json.loads(json.dumps(state))
-        with mock.patch.object(worker, "save") as save:
+        with mock.patch.object(worker.task_state, "save") as save:
             self.assertEqual([change["path"] for change in worker.guarded_changes(state)],
                              ["scripts/verify.sh"])
             self.assertIn("scripts/verify.sh", worker.review_prompt(state, {"language": "en"}))
-            with mock.patch.object(worker, "load", return_value=state), \
-                    mock.patch.object(worker, "sh", return_value=""), \
-                    mock.patch.object(worker, "last_message", return_value=""), \
+            with mock.patch.object(worker.task_state, "load", return_value=state), \
+                    mock.patch.object(worker.procs, "sh", return_value=""), \
+                    mock.patch.object(worker.threads, "last_message", return_value=""), \
                     mock.patch("builtins.print"):
                 worker.cmd_status(SimpleNamespace(slug=state["slug"]))
         save.assert_not_called()
@@ -503,12 +503,12 @@ class CheckGuardTests(RotationTestCase):
     def test_wait_does_not_overwrite_a_concurrent_say_when_discovering_check_paths(self):
         worker = self.worker()
         slug = "guarded-wait-say-race"
-        (worker.TASKS / slug).mkdir(parents=True)
+        (worker.config.TASKS / slug).mkdir(parents=True)
         state = {"slug": slug, "worktree": str(self.repo), "branch": "test-branch",
                  "base": self.git("rev-parse", "HEAD"), "account": "main", "thread": "existing-thread",
                  "rotations": [], "turns": 1, "pid": None, "outcome": "completed",
                  "check": "sh scripts/verify.sh", "check_paths": []}
-        worker.save(state)
+        worker.task_state.save(state)
         script = self.repo / "scripts/verify.sh"
         script.parent.mkdir()
         script.write_text("exit 0\n")
@@ -529,16 +529,16 @@ class CheckGuardTests(RotationTestCase):
                 check=None, check_timeout=None, review=False, fix_rounds=None, no_base_check=False))
             return original_guarded_changes(old_state)
 
-        with mock.patch.object(worker, "accounts_config", return_value={"language": "en"}), \
-                mock.patch.object(worker, "alive", side_effect=lambda pid: pid == new_pid), \
+        with mock.patch.object(worker.config, "accounts_config", return_value={"language": "en"}), \
+                mock.patch.object(worker.procs, "alive", side_effect=lambda pid: pid == new_pid), \
                 mock.patch.object(worker.subprocess, "Popen", side_effect=popen), \
                 mock.patch.object(worker, "guarded_changes", side_effect=describe_old_state), \
-                mock.patch.object(worker, "save", wraps=worker.save) as save, \
+                mock.patch.object(worker.task_state, "save", wraps=worker.task_state.save) as save, \
                 mock.patch("builtins.print") as printer:
             worker.cmd_wait(SimpleNamespace(slug=slug, timeout=0, through_sleep=False))
         self.assertEqual(len(launches), 1)
         save.assert_called_once()
-        current = worker.load(slug)
+        current = worker.task_state.load(slug)
         self.assertEqual((current["turns"], current["pid"], current["outcome"]),
                          (2, new_pid, "running"))
         self.assertEqual(current["check_paths"], [], "only the supervisor may save newly found paths")

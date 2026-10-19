@@ -126,7 +126,7 @@ class TelemetryReportTests(RotationTestCase):
 import json, resource, runpy, signal, sys
 worker = runpy.run_path(sys.argv[1])
 state = json.loads(sys.argv[2])
-(worker['TASKS'] / state['slug']).mkdir(parents=True)
+(worker['config'].TASKS / state['slug']).mkdir(parents=True)
 signal.signal(signal.SIGXFSZ, signal.SIG_IGN)
 resource.setrlimit(resource.RLIMIT_FSIZE, (100, 100))
 worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
@@ -142,7 +142,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         self.assertIn("telemetry unavailable", stderr.read_text())
 
         recovered = dict(partial, slug="telemetry-recovered", created=time.time())
-        (worker.TASKS / recovered["slug"]).mkdir()
+        (worker.config.TASKS / recovered["slug"]).mkdir()
         worker.PhaseTelemetry(recovered, "work").finish(outcome="completed")
         contents = journal.read_bytes()
         self.assertTrue(contents.startswith(damaged + b"\n"), "repair must only append to the damaged tail")
@@ -185,7 +185,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
     def test_telemetry_retries_a_briefly_busy_journal_without_losing_the_record(self):
         worker = self.worker()
         state = {"slug": "telemetry-brief-lock", "repo": str(self.repo), "account": "main"}
-        (worker.TASKS / state["slug"]).mkdir(parents=True)
+        (worker.config.TASKS / state["slug"]).mkdir(parents=True)
         journal = self.home / "codex-worker-log.jsonl"
         blocked = threading.Event()
         flock = fcntl.flock
@@ -211,12 +211,12 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                 future.result(timeout=3)
         self.assertEqual([(row["slug"], row["phase"], row["outcome"]) for row in self.telemetry_journal()],
                          [(state["slug"], "work", "completed")])
-        self.assertFalse((worker.TASKS / state["slug"] / "stderr.log").exists())
+        self.assertFalse((worker.config.TASKS / state["slug"] / "stderr.log").exists())
 
     def test_telemetry_skips_lock_retry_when_stop_is_already_requested(self):
         worker = self.worker()
         state = {"slug": "telemetry-stopped-lock", "repo": str(self.repo), "account": "main"}
-        (worker.TASKS / state["slug"]).mkdir(parents=True)
+        (worker.config.TASKS / state["slug"]).mkdir(parents=True)
         journal = self.home / "codex-worker-log.jsonl"
         with journal.open("a+b") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
@@ -225,7 +225,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                 worker.PhaseTelemetry(state, "work", stopped=lambda: True).finish(outcome="stopped")
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(journal.stat().st_size, 0)
-        stderr = (worker.TASKS / state["slug"] / "stderr.log").read_text()
+        stderr = (worker.config.TASKS / state["slug"] / "stderr.log").read_text()
         self.assertIn("telemetry unavailable", stderr)
         self.assertNotIn("stop must not wait", stderr)
 
@@ -240,7 +240,7 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
                              "pid": IMPOSSIBLE_PID, "created": time.time()}
                     if outcome == "stopped":
                         state["stop_request"] = {"at": time.time(), "pid": state["pid"]}
-                    (worker.TASKS / state["slug"]).mkdir(parents=True)
+                    (worker.config.TASKS / state["slug"]).mkdir(parents=True)
 
                     def complete_then_stop(*args, **kwargs):
                         state["wrapup"]["result"] = self.work_result("partial")
@@ -759,12 +759,12 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         with path.open("a") as stream:
             stream.write("{unreadable JSON\n")
             stream.write("\n".join(json.dumps(record) for record in records) + "\n")
-        first, last = worker.rollout_usage(path, offset)
+        first, last = worker.threads.rollout_usage(path, offset)
         self.assertEqual(first, {"tokens": {"input": 100, "cached_input": 40, "output": 10,
                                              "reasoning": 5}, "weekly": 10})
         self.assertEqual(last, {"tokens": {"input": 150, "cached_input": 60, "output": 30,
                                             "reasoning": 10}, "weekly": 12})
-        self.assertEqual(worker.rollout_usage(self.root / "missing-rollout.jsonl"), (None, None))
+        self.assertEqual(worker.threads.rollout_usage(self.root / "missing-rollout.jsonl"), (None, None))
         phase = worker.PhaseTelemetry({"slug": "rollout-fallback"}, "work")
         before = {"tokens": {"input": None, "cached_input": None, "output": 5, "reasoning": None},
                   "weekly": 7}
@@ -791,12 +791,12 @@ worker['PhaseTelemetry'](state, 'work').finish(outcome='completed')
         entries = state["threads"] + state["reviews"]
         homes = {"main": self.home, "second": self.other}
         worker = self.worker()
-        self.assertEqual(worker.STATS, SCRIPT.with_name("codex-stats.py"))
+        self.assertEqual(worker.config.STATS, SCRIPT.with_name("codex-stats.py"))
         with mock.patch.object(worker.subprocess, "run") as run, mock.patch("builtins.print") as printer:
             worker.cmd_stats(SimpleNamespace(slug="all-threads"))
         files = []
         for call in run.call_args_list:
-            self.assertEqual(call.args[0][:3], [PYTHON, "-I", str(worker.STATS)])
+            self.assertEqual(call.args[0][:3], [PYTHON, "-I", str(worker.config.STATS)])
             files.append(Path(call.args[0][3]))
         output = "\n".join(str(call.args[0]) for call in printer.call_args_list)
         self.assertEqual(len(files), 3)

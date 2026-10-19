@@ -39,7 +39,7 @@ class ResetCreditTests(RotationTestCase):
 
     def test_reset_credit_settings_default_to_manual_use_and_twelve_hours(self):
         self.configure()
-        cfg = self.worker().accounts_config()
+        cfg = self.worker().config.accounts_config()
         self.assertIs(cfg["use_reset_credits"], False)
         self.assertEqual(cfg["reset_credit_min_hours"], 12)
 
@@ -94,7 +94,7 @@ class ResetCreditTests(RotationTestCase):
         self.assertEqual(len(executions), 2)
         self.assert_resumed_same_thread(executions[0], executions[1], self.home)
         worker = self.worker()
-        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.accounts_config()))
+        self.assertEqual(executions[1]["prompt"], worker.reset_resume_prompt(worker.config.accounts_config()))
         self.assertIn("Бесплатный сброс помог", output)
         self.assertEqual(len(self.consume_calls()), 1)
         self.assertFalse(any(entry.get("event") == "sleep"
@@ -148,10 +148,10 @@ class ResetCreditTests(RotationTestCase):
                   "idempotencyKey": key, "at": time.time()}
         journal = [dict(intent, event="attempt"), dict(intent, event="result", outcome="unknown")]
         worker = self.worker()
-        cfg = worker.accounts_config()
+        cfg = worker.config.accounts_config()
         st = {"slug": "concurrent-pending-reset", "account": "main", "rotations": []}
-        (worker.TASKS / st["slug"]).mkdir(parents=True)
-        reset_credit_action = worker.reset_credit_action
+        (worker.config.TASKS / st["slug"]).mkdir(parents=True)
+        reset_credit_action = worker.credit_resets.reset_credit_action
         selected = []
 
         def add_concurrent_attempt(account, credit_id=None, *args, **kwargs):
@@ -162,12 +162,12 @@ class ResetCreditTests(RotationTestCase):
             return reset_credit_action(account, credit_id, *args, **kwargs)
 
         with mock.patch.dict(os.environ, self.env), \
-                mock.patch.object(worker, "reset_credit_action", side_effect=add_concurrent_attempt):
-            infos = worker.snapshots(cfg, prepare=True)
+                mock.patch.object(worker.credit_resets, "reset_credit_action", side_effect=add_concurrent_attempt):
+            infos = worker.accounts.snapshots(cfg, prepare=True)
             refreshed = worker.try_reset_credit(st, infos, cfg, lambda: False)
         self.assertEqual(selected, [spare["id"]], "inject the pending attempt after automatic selection")
         self.assertIsNotNone(refreshed)
-        self.assertEqual(worker.available(refreshed, cfg)["name"], "main")
+        self.assertEqual(worker.accounts.available(refreshed, cfg)["name"], "main")
         calls = self.consume_calls()
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["params"], {"creditId": pending["id"], "idempotencyKey": key})
@@ -467,9 +467,9 @@ with open(sys.argv[1], "a+") as journal:
 
             with mock.patch.dict(os.environ, self.env), \
                     mock.patch.object(worker.time, "sleep", side_effect=cancel_while_waiting), \
-                    mock.patch.object(worker, "account_rpc") as account_rpc:
+                    mock.patch.object(worker.accounts, "account_rpc") as account_rpc:
                 with self.assertRaisesRegex(RuntimeError, "stopped"):
-                    worker.reset_credit_action({"name": "main", "home": str(self.home)},
+                    worker.credit_resets.reset_credit_action({"name": "main", "home": str(self.home)},
                                                credit_id="RateLimitResetCredit_cancelled",
                                                slug="cancelled-reset", cancelled=lambda: cancelled[0],
                                                confirmed=True)
@@ -516,7 +516,7 @@ with open(sys.argv[1], "a+") as journal:
         self.reset_credits(self.home, *credits)
         worker = self.worker()
         with mock.patch.dict(os.environ, self.env):
-            info = worker.account_read({"name": "main", "home": str(self.home)})
+            info = worker.accounts.account_read({"name": "main", "home": str(self.home)})
         self.assertEqual(info["reset_credits"], {"availableCount": 2, "credits": credits})
         output = self.cli("accounts")
         lines = output.splitlines()

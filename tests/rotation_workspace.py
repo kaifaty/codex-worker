@@ -123,7 +123,7 @@ class WorkspaceTests(RotationTestCase):
 
     def test_workspace_settings_validate_values_and_default_to_off(self):
         worker = self.worker()
-        config = worker.accounts_config()
+        config = worker.config.accounts_config()
         self.assertEqual(config["sandbox"], "off")
         self.assertEqual(config["writable_dirs"], [])
         invalid = {"sandbox": (None, False, "workspace-write"),
@@ -133,7 +133,7 @@ class WorkspaceTests(RotationTestCase):
                 with self.subTest(key=key, value=value):
                     (self.home / "codex-worker.json").write_text(json.dumps({key: value}))
                     with self.assertRaises(SystemExit) as raised:
-                        worker.accounts_config()
+                        worker.config.accounts_config()
                     self.assertIn(key, str(raised.exception))
 
     def test_workspace_rules_are_localized_and_off_has_no_sandbox_flags_or_section(self):
@@ -673,14 +673,14 @@ class WorkspaceTests(RotationTestCase):
                  ("clean", "git lfs clean -- %f", None),
                  ("smudge", "git-lfs smudge\n--skip", None))
         with mock.patch.dict(os.environ, self.env):
-            self.assertIsNone(worker.unsafe_filter_driver(self.repo))
+            self.assertIsNone(worker.sandboxing.unsafe_filter_driver(self.repo))
             for scope in ("--system", "--global", "--local"):
                 for operation, command, expected in cases:
                     with self.subTest(scope=scope, operation=operation, command=command):
                         key = "filter.project.nested." + operation
                         self.git("config", scope, key, command)
                         try:
-                            self.assertEqual(worker.unsafe_filter_driver(self.repo), expected)
+                            self.assertEqual(worker.sandboxing.unsafe_filter_driver(self.repo), expected)
                         finally:
                             self.git("config", scope, "--unset-all", key)
 
@@ -965,7 +965,7 @@ class WorkspaceTests(RotationTestCase):
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
         worker = self.worker()
-        expected = worker.ci_fix_prompt(state, state["ci"], worker.accounts_config())
+        expected = worker.ci_fix_prompt(state, state["ci"], worker.config.accounts_config())
         self.assertEqual(executions[1]["prompt"].partition("\n\n")[0],
                          expected.partition("\n\n")[0])
         for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
@@ -988,7 +988,7 @@ class WorkspaceTests(RotationTestCase):
                                  "Python 3.9"):
                         self.assertIn(text, prompt)
                     self.assertEqual(prompt, worker.ci_fix_prompt({"sandbox": sandbox}, ci,
-                                                                 worker.accounts_config()))
+                                                                 worker.config.accounts_config()))
                     if sandbox == "workspace":
                         self.assertNotEqual(prompt, worker.ci_fix_prompt({"sandbox": "off"}, ci,
                                                                         {"language": language}))
@@ -1049,7 +1049,7 @@ class WorkspaceTests(RotationTestCase):
 
     def test_ci_flags_and_config_defaults_apply_to_start(self):
         self.configure(language="en", sandbox="workspace")
-        defaults = self.worker().accounts_config()
+        defaults = self.worker().config.accounts_config()
         self.assertFalse(defaults["ci"])
         self.assertEqual(defaults["ci_timeout_minutes"], 30)
         self.configure_ci([[self.ci_check()]])
@@ -1274,10 +1274,10 @@ class WorkspaceTests(RotationTestCase):
             waits.append(seconds)
             clock[0] += seconds
 
-        with mock.patch.object(worker, "save"), mock.patch.object(worker, "ci_command", side_effect=command), \
+        with mock.patch.object(worker.task_state, "save"), mock.patch.object(worker, "ci_command", side_effect=command), \
                 mock.patch.object(worker.shutil, "which", return_value=str(self.root / "gh")), \
                 mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker, "MINUTE_SECONDS", 60), mock.patch.object(worker, "CI_POLL_SECONDS", 30):
+                mock.patch.object(worker.config, "MINUTE_SECONDS", 60), mock.patch.object(worker.config, "CI_POLL_SECONDS", 30):
             result = worker.wait_ci(st, lambda: False, sleep)
         self.assertEqual(st["ci"], result)
         return st, result, calls, waits
