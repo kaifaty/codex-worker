@@ -87,6 +87,9 @@ class _Reads(ast.NodeVisitor):
         self.used = set()
         self.annotations = {}
         self.class_name = None
+        self.class_scopes = {}
+        self.comprehension_locals = []
+        self.class_comprehension_reads = {}
         self._index(table)
 
     def _index(self, table):
@@ -123,13 +126,21 @@ class _Reads(ast.NodeVisitor):
                 self.annotations[id(self.table)] = annotation
         self._visit_in(annotation, nodes)
 
+    def _name(self, name):
+        if (self.class_name and name.startswith("__") and not name.endswith("__")
+                and self.class_name.lstrip("_")):
+            name = "_" + self.class_name.lstrip("_") + name
+        return name
+
     def visit_Name(self, node):
         if isinstance(node.ctx, ast.Load):
-            name = node.id
-            if (self.class_name and name.startswith("__") and not name.endswith("__")
-                    and self.class_name.lstrip("_")):
-                name = "_" + self.class_name.lstrip("_") + name
+            name = self._name(node.id)
             self.positions[id(self.table)].setdefault(name, node.lineno)
+            if self.comprehension_locals and self.table is self.comprehension_locals[-1][0]:
+                local = any(name in names for table, names in self.comprehension_locals
+                            if table is self.table)
+                if not local:
+                    self.class_comprehension_reads.setdefault(id(self.table), {}).setdefault(name, node.lineno)
 
     def visit_FunctionDef(self, node):
         args = node.args
@@ -151,7 +162,10 @@ class _Reads(ast.NodeVisitor):
             self.visit(keyword.value)
         previous_class = self.class_name
         self.class_name = node.name
-        self._visit_in(self._child("class", node.name, node.lineno), node.body)
+        table = self._child("class", node.name, node.lineno)
+        if table is not None:
+            self.class_scopes[(node.lineno, node.col_offset)] = id(table)
+        self._visit_in(table, node.body)
         self.class_name = previous_class
 
     def visit_AnnAssign(self, node):
@@ -172,7 +186,15 @@ class _Reads(ast.NodeVisitor):
         inner = [first.target] + first.ifs
         for generator in rest:
             inner += [generator.iter, generator.target] + generator.ifs
-        self._visit_in(self._child("function", name, node.lineno), inner + values)
+        table = self._child("function", name, node.lineno)
+        inlined_class = table is None and self.table.get_type() == "class"
+        if inlined_class:
+            targets = {self._name(target.id) for generator in node.generators
+                       for target in ast.walk(generator.target) if isinstance(target, ast.Name)}
+            self.comprehension_locals.append((self.table, targets))
+        self._visit_in(table, inner + values)
+        if inlined_class:
+            self.comprehension_locals.pop()
 
     def visit_ListComp(self, node):
         self._comprehension(node, "listcomp", [node.elt])
@@ -185,6 +207,45 @@ class _Reads(ast.NodeVisitor):
 
     def visit_GeneratorExp(self, node):
         self._comprehension(node, "genexpr", [node.elt])
+
+    def class_comprehension_globals(self, source):
+        # Python 3.12+ inlines list/set/dict comprehensions and merges their
+        # symbols into the class table, even though their bodies skip class
+        # bindings. Ask symtable about equivalent method reads to retain the
+        # distinction between globals and captures from enclosing functions.
+        if not self.class_comprehension_reads:
+            return {}
+        tree = ast.parse(source)
+        used_names = {symbol.get_name() for table in self.tables for symbol in table.get_symbols()}
+        probes = {}
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.ClassDef):
+                continue
+            scope = self.class_scopes.get((node.lineno, node.col_offset))
+            positions = self.class_comprehension_reads.get(scope)
+            if not positions:
+                continue
+            name = "_layout_comprehension_probe"
+            while name in used_names:
+                name += "_"
+            used_names.add(name)
+            node.body.append(ast.parse("def %s():\n    return %s\n"
+                                       % (name, ", ".join(positions))).body[0])
+            probes[name] = (scope, positions)
+        table = symtable.symtable(ast.unparse(tree), "<class-comprehensions>", "exec")
+        globals_by_scope = {}
+
+        def collect(table):
+            if table.get_type() == "function" and table.get_name() in probes:
+                scope, positions = probes[table.get_name()]
+                globals_by_scope[scope] = {symbol.get_name(): positions[symbol.get_name()]
+                                          for symbol in table.get_symbols()
+                                          if symbol.is_global() and symbol.is_referenced()}
+            for child in table.get_children():
+                collect(child)
+
+        collect(table)
+        return globals_by_scope
 
 
 def check_layout(scripts):
@@ -215,11 +276,13 @@ def check_layout(scripts):
         # __file__ is injected by Python's module loader. Package modules have
         # a separate prohibition below; entrypoint path constants may use it.
         available = set(bindings.names) | set(dir(builtins)) | {"__file__"}
+        class_globals = reads.class_comprehension_globals(source)
         for scope in reads.tables:
             for symbol in scope.get_symbols():
-                if (symbol.is_global() and symbol.is_referenced()
+                class_line = class_globals.get(id(scope), {}).get(symbol.get_name())
+                if ((symbol.is_global() and symbol.is_referenced() or class_line is not None)
                         and symbol.get_name() not in available):
-                    line = reads.positions[id(scope)].get(symbol.get_name(), syntax_reads.get(symbol.get_name()))
+                    line = class_line or reads.positions[id(scope)].get(symbol.get_name(), syntax_reads.get(symbol.get_name()))
                     # Some Python versions add referenced compiler symbols
                     # (e.g. __conditional_annotations__) with no source read.
                     if line is not None:
@@ -335,6 +398,33 @@ class ModuleLayoutTests(unittest.TestCase):
                 findings = self.check_tree({"codex_worker/a.py": source})
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:%s: undefined-global: missing" % line, findings[0])
+
+    def test_class_comprehension_bodies_skip_class_bindings(self):
+        for expression in (
+            "[missing for item in (0,)]",
+            "{missing for item in (0,)}",
+            "{missing: item for item in (0,)}",
+            "{item: missing for item in (0,)}",
+            "[item for item in (0,) if missing]",
+            "[item for first in (0,) for item in missing]",
+            "[[missing for item in (0,)] for first in (0,)]",
+        ):
+            with self.subTest(expression=expression):
+                source = "class Example:\n    missing = (1,)\n    values = %s\n" % expression
+                findings = self.check_tree({"codex_worker/a.py": source})
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn("a.py:3: undefined-global: missing", findings[0])
+
+    def test_class_comprehension_locals_and_enclosing_captures_pass(self):
+        for source in (
+            "class Example:\n    items = (1,)\n    values = [item for item in items]\n",
+            "class Example:\n    value = 1\n    values = [value for value in (2,)]\n",
+            "class Example:\n    values = [[value for item in (0,)] for value in (1,)]\n",
+            "class Example:\n    values = [item for value in ((1,),) for item in value if value]\n",
+            "def outer():\n    value = 1\n    class Example:\n        value = 2\n        values = [value for item in (0,)]\n    return Example\nouter()\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
 
     def test_private_class_global_has_its_read_line(self):
         findings = self.check_tree({
