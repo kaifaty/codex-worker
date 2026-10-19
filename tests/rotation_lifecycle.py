@@ -7,6 +7,7 @@ import selectors
 import shlex
 import signal
 import subprocess
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -14,7 +15,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
 from rotation_support import IMPOSSIBLE_PID, PYTHON, SCRIPT, RotationTestCase
+from worker_loader import WORKER_BOOTSTRAP
 
 
 class LifecycleTests(RotationTestCase):
@@ -22,12 +28,12 @@ class LifecycleTests(RotationTestCase):
     def prepared_cli(self):
         # Import the real command before a short observation window begins.
         # Arguments still pass through its public parser in a separate process.
-        bootstrap = ("import json, runpy, sys\n"
+        bootstrap = (WORKER_BOOTSTRAP + "import json, sys\n"
                      "script = sys.argv[1]\n"
-                     "namespace = runpy.run_path(script)\n"
+                     "worker = load_worker(name='prepared_worker', script=script)\n"
                      "print('ready', flush=True)\n"
                      "sys.argv = [script] + json.loads(sys.stdin.readline())\n"
-                     "namespace['main']()\n")
+                     "worker.main()\n")
         proc = subprocess.Popen([PYTHON, "-I", "-c", bootstrap, str(SCRIPT)],
                                 cwd=self.repo, env=self.env, text=True,
                                 stdin=subprocess.PIPE, stdout=subprocess.PIPE,
@@ -58,13 +64,11 @@ class LifecycleTests(RotationTestCase):
                  "created": time.time(), "turns": 1, "turn_started": time.time(),
                  "outcome": "running", "pending": {"prompt": "fixture turn", "effort": None}}
         (self.home / "claude-tasks" / slug).mkdir(parents=True)
-        bootstrap = r'''
-import importlib.util, json, os, signal, sys, time
+        bootstrap = WORKER_BOOTSTRAP + r'''
+import json, os, signal, sys, time
 from pathlib import Path
 from types import SimpleNamespace
-spec = importlib.util.spec_from_file_location("fixture_worker", sys.argv[1])
-worker = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(worker)
+worker = load_worker(name="fixture_worker", script=sys.argv[1])
 state = json.loads(sys.argv[2])
 state["pid"] = os.getpid()
 worker.save(state)

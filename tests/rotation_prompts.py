@@ -1,12 +1,15 @@
 """Text contracts for generated prompts, exercised without CLI subprocesses."""
-import importlib.util
-import os
 from pathlib import Path
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
-from rotation_support import SCRIPT, worker_code
+
+# Isolated Python omits the script directory from its import path.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from worker_loader import load_worker
 
 
 class PromptTests(unittest.TestCase):
@@ -14,10 +17,7 @@ class PromptTests(unittest.TestCase):
         temporary = tempfile.TemporaryDirectory(prefix="codex-prompt-contract-")
         self.addCleanup(temporary.cleanup)
         self.root = Path(temporary.name)
-        with mock.patch.dict(os.environ, {"CODEX_TASK_HOME": str(self.root)}):
-            spec = importlib.util.spec_from_file_location("prompt_worker", str(SCRIPT))
-            self.worker = importlib.util.module_from_spec(spec)
-            exec(worker_code(), self.worker.__dict__)
+        self.worker = load_worker({"CODEX_TASK_HOME": str(self.root)}, name="prompt_worker")
         self.task = self.worker.TASKS / "prompt-contract"
         self.task.mkdir(parents=True)
         (self.task / "brief.md").write_text("Implement the requested change.\n")

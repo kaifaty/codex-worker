@@ -102,13 +102,17 @@ class Clock:
 CLOCK = Clock(os.environ.get("CODEX_TASK_CLOCK_FILE"))
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
-CODEX = os.environ.get("CODEX_TASK_CODEX")
+CODEX = {"path": os.environ.get("CODEX_TASK_CODEX")}
 CODEX_HOME = Path(os.environ.get("CODEX_TASK_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
 TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
-SKILL = Path(__file__).resolve().parent.parent
-STATS = Path(__file__).resolve().parent / "codex-stats.py"
-ROLLOUT = runpy.run_path(str(Path(__file__).with_name("rollout.py")))
+SCRIPT = Path(__file__)
+SCRIPT_RESOLVED = SCRIPT.resolve()
+SKILL = SCRIPT_RESOLVED.parent.parent
+STATS = SCRIPT_RESOLVED.parent / "codex-stats.py"
+ROLLOUT = runpy.run_path(str(SCRIPT.with_name("rollout.py")))
+REPORT = SCRIPT.with_name("task_report.py")
+HELP_TEXT = __doc__
 # Tests can shorten polling without changing the default CLI intervals.
 RATE_POLL_SECONDS = float(os.environ.get("CODEX_TASK_RATE_POLL_SECONDS", "30"))
 ROLLOUT_SEARCH_SECONDS = float(os.environ.get("CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "5"))
@@ -235,7 +239,7 @@ def resolve_codex():
 
 
 def codex_binary():
-    return CODEX or resolve_codex()
+    return CODEX["path"] or resolve_codex()
 
 
 def sh(cmd, cwd=None, check=True, errors="strict"):
@@ -1017,7 +1021,7 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
         st.pop("publish", None)
         st["result"] = None
     with (d / "stderr.log").open("a") as errors:
-        proc = subprocess.Popen([sys.executable, "-I", str(Path(__file__).resolve()), "_run", st["slug"]],
+        proc = subprocess.Popen([sys.executable, "-I", str(SCRIPT_RESOLVED), "_run", st["slug"]],
                                 cwd=st["worktree"], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors,
                                 start_new_session=True)
     st["pid"] = proc.pid
@@ -3768,7 +3772,7 @@ def cmd_start(a):
             break
         time.sleep(0.1)
     print(f"started {a.slug}: account {st['account']}, thread {st['thread'] or '?'}, pid {st.get('pid')}\n  worktree {wt}\n  branch {branch}")
-    print(f"  wait: {Path(__file__)} wait {a.slug}   (run it as a background command)")
+    print(f"  wait: {SCRIPT} wait {a.slug}   (run it as a background command)")
 
 
 def require_idle(st):
@@ -3805,7 +3809,7 @@ def cmd_scout(a):
             break
         time.sleep(0.1)
     print(f"started scout {a.slug}: account {st['account']}, thread {st['thread'] or '?'}, pid {st.get('pid')}\n  directory {directory}")
-    print(f"  wait: {Path(__file__)} wait {a.slug}   (run it as a background command)")
+    print(f"  wait: {SCRIPT} wait {a.slug}   (run it as a background command)")
 
 
 def cmd_say(a):
@@ -4120,7 +4124,7 @@ def cmd_stats(a):
 
 
 def cmd_report(a):
-    report = runpy.run_path(str(Path(__file__).with_name("task_report.py")))
+    report = runpy.run_path(str(REPORT))
     try:
         data = report["build_report"](CODEX_HOME / "codex-worker-log.jsonl", a.since, a.repo, a.slug)
     except ValueError as exc:
@@ -4408,8 +4412,26 @@ def command_synopsis(command):
     return synopsis
 
 
+COMMAND_HANDLERS = {
+    "start": cmd_start,
+    "scout": cmd_scout,
+    "say": cmd_say,
+    "review": cmd_review,
+    "wait": cmd_wait,
+    "status": cmd_status,
+    "stats": cmd_stats,
+    "report": cmd_report,
+    "stop": cmd_stop,
+    "clean": cmd_clean,
+    "accounts": cmd_accounts,
+    "reset-credit": cmd_reset_credit,
+    "login": cmd_login,
+    "_run": cmd__run,
+}
+
+
 def main():
-    p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(description=HELP_TEXT, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = p.add_subparsers(dest="cmd", required=True)
     s = sub.add_parser("start")
     s.add_argument("slug")
@@ -4467,9 +4489,8 @@ def main():
     if a.cmd in ("start", "say") and a.fix_rounds is not None and not a.review:
         p.error("--fix-rounds requires --review")
     if a.cmd in ("start", "scout", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):
-        global CODEX
-        CODEX = resolve_codex()
-    globals()["cmd_" + a.cmd.replace("-", "_")](a)
+        CODEX["path"] = resolve_codex()
+    COMMAND_HANDLERS[a.cmd](a)
 
 
 if __name__ == "__main__":
