@@ -35,6 +35,7 @@ import test_state_fields
 import test_capacity_report
 import test_clock
 import test_module_layout
+import test_worker_loader
 from test_runner import RunnerTests
 from test_stress_selection import StressSelectionTests
 from test_process_cleanup import ProcessCleanupTests
@@ -44,6 +45,7 @@ from test_state_fields import StateFieldRegistryTests
 from test_capacity_report import CapacityReportTests
 from test_clock import ClockTests
 from test_module_layout import ModuleLayoutTests
+from test_worker_loader import WorkerLoaderTests
 from rotation_prompts import PromptTests
 
 
@@ -68,7 +70,7 @@ class RotationTests(
 TEST_MODULES = (tuple(sys.modules[cls.__module__] for cls in RotationTests.__bases__)
                 + (rotation_prompts, test_runner, test_stress_selection, test_process_cleanup,
                    test_rollout, test_options, test_state_fields, test_capacity_report,
-                   test_clock, test_module_layout))
+                   test_clock, test_module_layout, test_worker_loader))
 
 
 if __name__ == "__main__":
