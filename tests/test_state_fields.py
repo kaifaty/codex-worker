@@ -152,12 +152,12 @@ st[dynamic_key] = 1
         return st
 
     def spawn(self, st, kind):
-        with mock.patch.object(self.worker.subprocess, "Popen") as popen, \
-                mock.patch.object(self.worker.time, "time", return_value=1234567), \
+        with mock.patch.object(self.worker.supervisor.subprocess, "Popen") as popen, \
+                mock.patch.object(self.worker.clock.time, "time", return_value=1234567), \
                 mock.patch.object(self.worker.threads, "events", return_value=[{}] * 5), \
                 mock.patch.object(self.worker.task_state, "save") as save:
             popen.return_value.pid = 200
-            self.worker.spawn(st, "new-prompt", effort="medium", current_message=True,
+            self.worker.supervisor.spawn(st, "new-prompt", effort="medium", current_message=True,
                               kind=kind, review_after=True, fix_rounds=4)
             popen.assert_called_once()
             save.assert_called_once_with(st)

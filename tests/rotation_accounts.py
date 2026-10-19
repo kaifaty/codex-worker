@@ -220,7 +220,7 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.turn_monitor, "monitor", side_effect=monitor) as attempts, \
                 mock.patch.object(worker.threads, "handoff", return_value="handoff with the original task"), \
                 mock.patch.object(worker.task_state, "save"):
-            worker.run_turn(st, cfg, "original prompt", None, False, lambda: False, lambda seconds: None)
+            worker.turns.run_turn(st, cfg, "original prompt", None, False, lambda: False, lambda seconds: None)
         self.assertEqual(st["outcome"], "failed")
         self.assertLessEqual(attempts.call_count, 1 + 2 * len(cfg["accounts"]))
         self.assertLessEqual(len([entry for entry in st["rotations"] if "from" in entry]),
@@ -331,8 +331,8 @@ class AccountAuthTests(RotationTestCase):
 
                 with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
                         mock.patch.object(worker.config, "RESET_MARGIN", 0), \
-                        mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
-                        mock.patch.object(worker.time, "sleep", side_effect=sleep), \
+                        mock.patch.object(worker.clock.time, "time", side_effect=lambda: clock[0]), \
+                        mock.patch.object(worker.clock.time, "sleep", side_effect=sleep), \
                         mock.patch.object(worker.task_state, "save"), \
                         mock.patch.object(worker.accounts, "snapshots", return_value=[ready]) as snapshots:
                     chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
@@ -360,9 +360,9 @@ class AccountAuthTests(RotationTestCase):
 
         with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
                 mock.patch.object(worker.config, "RESET_MARGIN", 120), \
-                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker.time, "monotonic", side_effect=AssertionError("use wall time")), \
-                mock.patch.object(worker.time, "sleep", side_effect=mac_sleep) as sleeper, \
+                mock.patch.object(worker.clock.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.clock.time, "monotonic", side_effect=AssertionError("use wall time")), \
+                mock.patch.object(worker.clock.time, "sleep", side_effect=mac_sleep) as sleeper, \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", return_value=[other, current]):
             chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
@@ -390,8 +390,8 @@ class AccountAuthTests(RotationTestCase):
 
         with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
                 mock.patch.object(worker.config, "RESET_MARGIN", 0), \
-                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker.time, "sleep", side_effect=sleep), \
+                mock.patch.object(worker.clock.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.clock.time, "sleep", side_effect=sleep), \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", return_value=[limited]) as snapshots:
             chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
@@ -417,11 +417,11 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.threads, "events", return_value=[]), \
                 mock.patch.object(worker.procs, "sh", return_value=""), \
                 mock.patch("builtins.print") as printer:
-            worker.cmd_status(SimpleNamespace(slug=st["slug"]))
+            worker.commands.cmd_status(SimpleNamespace(slug=st["slug"]))
             status = "\n".join(str(call.args[0]) for call in printer.call_args_list)
             self.assertIn("paused, supervisor gone; continue with say", status)
             printer.reset_mock()
-            worker.cmd_wait(SimpleNamespace(slug=st["slug"], timeout=0, through_sleep=False))
+            worker.wait_view.cmd_wait(SimpleNamespace(slug=st["slug"], timeout=0, through_sleep=False))
             output = "\n".join(str(call.args[0]) for call in printer.call_args_list)
         self.assertIn("== paused, supervisor gone; continue with say", output)
         self.assertNotIn("auto-continue at", output)
@@ -449,8 +449,8 @@ class AccountAuthTests(RotationTestCase):
 
         with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
                 mock.patch.object(worker.config, "RESET_MARGIN", 0), \
-                mock.patch.object(worker.time, "time", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker.time, "sleep", side_effect=sleep), \
+                mock.patch.object(worker.clock.time, "time", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.clock.time, "sleep", side_effect=sleep), \
                 mock.patch.object(worker.task_state, "save"), \
                 mock.patch.object(worker.accounts, "snapshots", side_effect=snapshots):
             chosen = worker.account_rotation.wait_for_account(st, [limited], cfg, "quota", lambda: False)
@@ -478,7 +478,7 @@ class AccountAuthTests(RotationTestCase):
                 selector = mock.MagicMock()
                 selector.__enter__.return_value = selector
                 selector.select.return_value = [(SimpleNamespace(fileobj=proc.stdout),
-                                                 worker.selectors.EVENT_READ)]
+                                                 worker.turn_monitor.selectors.EVENT_READ)]
 
                 def on_limit(local, reason, allow_credits, cancelled):
                     self.assertFalse(cancelled())
@@ -496,11 +496,11 @@ class AccountAuthTests(RotationTestCase):
                         mock.patch.object(worker.task_state, "save"), \
                         mock.patch.object(worker.threads, "events", return_value=[]), \
                         mock.patch.object(worker.procs, "terminate") as terminate, \
-                        mock.patch.object(worker.subprocess, "Popen", return_value=proc), \
-                        mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
+                        mock.patch.object(worker.turn_monitor.subprocess, "Popen", return_value=proc), \
+                        mock.patch.object(worker.turn_monitor.selectors, "DefaultSelector", return_value=selector), \
                         mock.patch.object(worker.os, "read", return_value=(
                             b'{"type":"turn.failed","error":{"message":"You\'ve hit your usage limit."}}\n')), \
-                        mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]):
+                        mock.patch.object(worker.turn_monitor.time, "monotonic", side_effect=lambda: clock[0]):
                     args = (st, {"enabled": True, "switch_at": 99},
                             {"name": "main", "home": str(self.home)}, "prompt", None,
                             lambda: stopped[0], on_limit)
@@ -542,7 +542,7 @@ class AccountAuthTests(RotationTestCase):
                 def select(timeout):
                     clock[0] += timeout
                     if not emitted[0] or clock[0] >= duration:
-                        return [(SimpleNamespace(fileobj=proc.stdout), worker.selectors.EVENT_READ)]
+                        return [(SimpleNamespace(fileobj=proc.stdout), worker.turn_monitor.selectors.EVENT_READ)]
                     return []
 
                 def read(fd, size):
@@ -570,10 +570,10 @@ class AccountAuthTests(RotationTestCase):
                         mock.patch.object(worker.task_state, "save"), \
                         mock.patch.object(worker.threads, "events", return_value=[]), \
                         mock.patch.object(worker.procs, "terminate"), \
-                        mock.patch.object(worker.subprocess, "Popen", return_value=proc), \
-                        mock.patch.object(worker.selectors, "DefaultSelector", return_value=selector), \
+                        mock.patch.object(worker.turn_monitor.subprocess, "Popen", return_value=proc), \
+                        mock.patch.object(worker.turn_monitor.selectors, "DefaultSelector", return_value=selector), \
                         mock.patch.object(worker.os, "read", side_effect=read), \
-                        mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+                        mock.patch.object(worker.turn_monitor.time, "monotonic", side_effect=lambda: clock[0]), \
                         mock.patch.object(worker.threads, "rollout_path", side_effect=find_rollout), \
                         mock.patch.object(worker.threads, "rollout_limits", side_effect=read_limits):
                     result = worker.turn_monitor.monitor(st, {"enabled": True, "switch_at": 99},
@@ -606,13 +606,13 @@ class AccountAuthTests(RotationTestCase):
 
         with mock.patch.object(worker.task_state, "load", side_effect=lambda slug: dict(st)), \
                 mock.patch.object(worker.procs, "alive", side_effect=lambda pid: bool(pid) and running[0]), \
-                mock.patch.object(worker.time, "sleep", side_effect=sleep) as sleeper, \
+                mock.patch.object(worker.wait_view.time, "sleep", side_effect=sleep) as sleeper, \
                 mock.patch.object(worker.task_state, "save") as save, \
                 mock.patch.object(worker.threads, "last_message", return_value=""), \
                 mock.patch.object(worker.threads, "events", return_value=[]), \
                 mock.patch.object(worker.procs, "sh", return_value=""), \
                 mock.patch("builtins.print"):
-            worker.cmd_wait(SimpleNamespace(slug=st["slug"], timeout=0))
+            worker.wait_view.cmd_wait(SimpleNamespace(slug=st["slug"], timeout=0))
         sleeper.assert_called_once_with(1)
         save.assert_called_once()
         self.assertIsNone(save.call_args[0][0].get("pid"))

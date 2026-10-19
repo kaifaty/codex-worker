@@ -228,16 +228,16 @@ class ReviewFixTests(RotationTestCase):
         state = {"review_angles": "auto", "base": "origin/main", "worktree": str(self.repo)}
         config = {"review_angles_min_lines": 3}
         expected = ["correctness", "concurrency", "tests"]
-        self.assertEqual(worker.selected_review_angles(state, config), expected)
+        self.assertEqual(worker.review_cycle.selected_review_angles(state, config), expected)
         self.assertFalse(marker.exists(), "counting a diff must not execute repository Git drivers")
         (self.repo / "tracked.txt").write_text("initial\n")
         (self.repo / "binary.bin").write_bytes(b"\0" + b"binary line\n" * 20)
         outside = self.root / "outside.txt"
         outside.write_text("outside line\n" * 20)
         (self.repo / "outside-link.txt").symlink_to(outside)
-        self.assertEqual(worker.selected_review_angles(state, config), [])
+        self.assertEqual(worker.review_cycle.selected_review_angles(state, config), [])
         (self.repo / "new.txt").write_text("one\ntwo\nthree")
-        self.assertEqual(worker.selected_review_angles(state, config), expected)
+        self.assertEqual(worker.review_cycle.selected_review_angles(state, config), expected)
         self.assertFalse(marker.exists())
 
     def test_say_and_standalone_review_accept_explicit_angles_and_keep_working_thread(self):

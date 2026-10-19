@@ -466,7 +466,7 @@ with open(sys.argv[1], "a+") as journal:
                 cancelled[0] = True
 
             with mock.patch.dict(os.environ, self.env), \
-                    mock.patch.object(worker.time, "sleep", side_effect=cancel_while_waiting), \
+                    mock.patch.object(worker.credit_resets.time, "sleep", side_effect=cancel_while_waiting), \
                     mock.patch.object(worker.accounts, "account_rpc") as account_rpc:
                 with self.assertRaisesRegex(RuntimeError, "stopped"):
                     worker.credit_resets.reset_credit_action({"name": "main", "home": str(self.home)},

@@ -121,7 +121,7 @@ class NotificationTests(RotationTestCase):
                                          "launched": {json.loads(proc.args[-1])["event"]
                                                       for proc in worker.notifications.NOTIFY_PROCESSES}})
                     try:
-                        worker.cmd_clean(SimpleNamespace(slug=slug, keep_branch=False))
+                        worker.commands.cmd_clean(SimpleNamespace(slug=slug, keep_branch=False))
                     finally:
                         gate.touch()
 
@@ -131,11 +131,11 @@ class NotificationTests(RotationTestCase):
                         mock.patch.object(worker.sys, "stderr", errors), \
                         mock.patch.object(worker.sys, "stdout", io.StringIO()), \
                         mock.patch.dict(os.environ, self.env), \
-                        mock.patch.object(worker.signal, "signal"), \
-                        mock.patch.object(worker, "run_turn", side_effect=completed_turn), \
+                        mock.patch.object(worker.supervisor.signal, "signal"), \
+                        mock.patch.object(worker.turns, "run_turn", side_effect=completed_turn), \
                         mock.patch.object(worker.task_state, "save", side_effect=save_and_clean):
                     try:
-                        worker.cmd__run(SimpleNamespace(slug=slug))
+                        worker.supervisor.cmd__run(SimpleNamespace(slug=slug))
                     finally:
                         gate.touch()
                         self.extra_pids.update(proc.pid for proc in worker.notifications.NOTIFY_PROCESSES)
@@ -315,7 +315,7 @@ class NotificationTests(RotationTestCase):
         state = {"slug": "notify-macos", "repo": str(self.repo),
                  "branch": "codex/notify-macos", "account": "main", "worktree": str(self.repo)}
         (self.home / "claude-tasks" / state["slug"]).mkdir(parents=True)
-        with mock.patch.object(worker.subprocess, "Popen") as popen:
+        with mock.patch.object(worker.notifications.subprocess, "Popen") as popen:
             worker.notifications.notify(state, {"notify": "macos"}, "turn_finished",
                           'completed "quoted" C:\\tmp\nwith newline')
         popen.assert_called_once()

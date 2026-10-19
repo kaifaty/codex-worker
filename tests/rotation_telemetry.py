@@ -199,7 +199,7 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
 
         with journal.open("a+b") as held, ThreadPoolExecutor(max_workers=1) as executor:
             flock(held, fcntl.LOCK_EX)
-            with mock.patch.object(worker.fcntl, "flock", side_effect=observe_lock):
+            with mock.patch.object(worker.telemetry_log.fcntl, "flock", side_effect=observe_lock):
                 future = executor.submit(worker.telemetry_log.PhaseTelemetry(state, "work").finish, outcome="completed")
                 try:
                     self.assertTrue(blocked.wait(5), "the writer must encounter the held journal lock")
@@ -221,7 +221,7 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         with journal.open("a+b") as held:
             fcntl.flock(held, fcntl.LOCK_EX)
             started = time.monotonic()
-            with mock.patch.object(worker.time, "sleep", side_effect=AssertionError("stop must not wait")):
+            with mock.patch.object(worker.telemetry_log.time, "sleep", side_effect=AssertionError("stop must not wait")):
                 worker.telemetry_log.PhaseTelemetry(state, "work", stopped=lambda: True).finish(outcome="stopped")
             self.assertLess(time.monotonic() - started, 1)
             self.assertEqual(journal.stat().st_size, 0)
@@ -248,7 +248,7 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
                         return "completed", None
 
                     with mock.patch.object(worker.turn_monitor, "monitor", side_effect=complete_then_stop) as monitor:
-                        worker.wrapup_turn(state, {"language": "en"}, {"name": "main"}, None,
+                        worker.turns.wrapup_turn(state, {"language": "en"}, {"name": "main"}, None,
                                            lambda: stopped[0], {"outcome": "budget_exhausted", "minutes": 1})
                     self.assertEqual(monitor.call_count, int(timing == "after"))
                     self.assertEqual(state["wrapup"]["outcome"], "not_run" if timing == "before" else "completed")
@@ -376,7 +376,7 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.start("report-wrapup-stop", "--max-minutes", "10")
         self.until(lambda: len(self.invocations()) == 2, timeout=8)
         with mock.patch("sys.stdout", new=io.StringIO()):
-            worker.cmd_stop(SimpleNamespace(slug="report-wrapup-stop"))
+            worker.commands.cmd_stop(SimpleNamespace(slug="report-wrapup-stop"))
         self.wait("report-wrapup-stop", timeout=12)
         self.until(lambda: len(self.phase_telemetry_journal()) == 2)
         self.assertEqual(self.state("report-wrapup-stop")["outcome"], "stopped")
@@ -792,8 +792,8 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         homes = {"main": self.home, "second": self.other}
         worker = self.worker()
         self.assertEqual(worker.config.STATS, SCRIPT.with_name("codex-stats.py"))
-        with mock.patch.object(worker.subprocess, "run") as run, mock.patch("builtins.print") as printer:
-            worker.cmd_stats(SimpleNamespace(slug="all-threads"))
+        with mock.patch.object(worker.commands.subprocess, "run") as run, mock.patch("builtins.print") as printer:
+            worker.commands.cmd_stats(SimpleNamespace(slug="all-threads"))
         files = []
         for call in run.call_args_list:
             self.assertEqual(call.args[0][:3], [PYTHON, "-I", str(worker.config.STATS)])

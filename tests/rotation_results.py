@@ -461,7 +461,7 @@ class ResultScoutConfigTests(RotationTestCase):
         bundle.write_text("fixture")
         with mock.patch.dict(os.environ, self.env), \
                 mock.patch.object(worker.config, "CHATGPT_CODEX", bundle), \
-                mock.patch.object(worker.shutil, "which", return_value="/opt/bin/codex") as which:
+                mock.patch.object(worker.config.shutil, "which", return_value="/opt/bin/codex") as which:
             self.assertEqual(worker.config.resolve_codex(), str(self.fake))
             which.assert_not_called()
             os.environ.pop("CODEX_TASK_CODEX")
@@ -562,7 +562,7 @@ class ResultScoutConfigTests(RotationTestCase):
         with mock.patch.object(worker.accounts, "prepare_home"), \
                 mock.patch.object(worker.os, "execvpe") as execute, \
                 mock.patch("builtins.print"):
-            worker.cmd_login(SimpleNamespace(name="second", browser=False))
+            worker.commands.cmd_login(SimpleNamespace(name="second", browser=False))
         self.assertEqual(legacy.read_bytes(), old)
         saved = json.loads((self.home / "codex-worker.json").read_text())
         self.assertEqual(saved["switch_at"], 97)

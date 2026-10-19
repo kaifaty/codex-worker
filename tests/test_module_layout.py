@@ -372,6 +372,7 @@ def check_layout(scripts):
     for module, path in modules.items():
         source, tree, bindings, reads = analyses[module]
         aliases = {}
+        imports_to_check = []
         for node, top in _imports(tree):
             if isinstance(node, ast.ImportFrom):
                 internal = bool(node.level) or (node.module or "").split(".")[0] in {"codex_task", "codex_worker"}
@@ -384,6 +385,15 @@ def check_layout(scripts):
                 imports = [(alias, alias.name) for alias in node.names
                            if alias.name.split(".")[0] in {"codex_task", "codex_worker"}]
                 internal = bool(imports)
+            for alias in node.names:
+                # The entrypoint exposes package modules for callers and tests.
+                reexport = (module == "codex_task" and any(
+                    alias is own_alias and target in modules
+                    and target.startswith("codex_worker.")
+                    for own_alias, target in imports or []))
+                if top and not reexport:
+                    imports_to_check.append((_import_name(node, alias),
+                                             getattr(alias, "lineno", node.lineno)))
             if internal and not top:
                 report(path, node.lineno, "module-import-top", "import own modules at module level")
             if imports is None:
@@ -409,16 +419,21 @@ def check_layout(scripts):
         class_globals = reads.class_comprehension_globals(source)
         for scope, positions in reads.class_fallbacks.items():
             class_globals.setdefault(scope, {}).update(positions)
+        global_reads = {name for positions in class_globals.values() for name in positions}
         for scope in reads.tables:
             for symbol in scope.get_symbols():
                 class_line = class_globals.get(id(scope), {}).get(symbol.get_name())
-                if ((symbol.is_global() and symbol.is_referenced() or class_line is not None)
-                        and symbol.get_name() not in available):
+                if symbol.is_global() and symbol.is_referenced() or class_line is not None:
                     line = class_line or reads.positions[id(scope)].get(symbol.get_name(), syntax_reads.get(symbol.get_name()))
                     # Some Python versions add referenced compiler symbols
                     # (e.g. __conditional_annotations__) with no source read.
                     if line is not None:
-                        report(path, line, "undefined-global", symbol.get_name())
+                        global_reads.add(symbol.get_name())
+                        if symbol.get_name() not in available:
+                            report(path, line, "undefined-global", symbol.get_name())
+        for name, line in imports_to_check:
+            if name not in global_reads:
+                report(path, line, "unused-import", name)
         for name, line in bindings.nonimports.items():
             if name in definitions:
                 other_path, other_line = definitions[name]
@@ -484,7 +499,7 @@ class ModuleLayoutTests(unittest.TestCase):
              "a.py:3: undefined-global"),
             ({"codex_worker/a.py": "def function(value=missing):\n    return value\n"},
              "a.py:1: undefined-global"),
-            ({"codex_worker/a.py": "value = 1\n", "codex_worker/b.py": "from .a import value\n"},
+            ({"codex_worker/a.py": "value = 1\n", "codex_worker/b.py": "from .a import value\nvalue\n"},
              "b.py:1: module-import-only"),
             ({"codex_worker/a.py": "def function():\n    global value\n"},
              "a.py:2: no-global"),
@@ -492,8 +507,10 @@ class ModuleLayoutTests(unittest.TestCase):
              "a.py:1: no-dynamic-namespace"),
             ({"codex_worker/a.py": "value = 1\n", "codex_worker/b.py": "value = 2\n"},
              "b.py:1: duplicate-name"),
-            ({"codex_worker/a.py": "from . import b\n", "codex_worker/b.py": "from . import a\n"},
+            ({"codex_worker/a.py": "from . import b\nb\n", "codex_worker/b.py": "from . import a\na\n"},
              "b.py:1: acyclic-imports"),
+            ({"codex_worker/a.py": "import math\n"},
+             "a.py:1: unused-import: math"),
             ({"codex_worker/a.py": "path = __file__\n"},
              "a.py:1: no-package-file"),
             ({"codex_worker/config.py": "config_path = __file__\n",
@@ -511,13 +528,13 @@ class ModuleLayoutTests(unittest.TestCase):
             ({"codex_worker/a.py": "from . import b\nb.name += 1\n",
               "codex_worker/b.py": "name = 1\n"},
              "a.py:2: module-attribute: b.name"),
-            ({"codex_worker/a.py": "from . import b\nb = object()\n",
+            ({"codex_worker/a.py": "from . import b\nb = object()\nb\n",
               "codex_worker/b.py": ""},
              "a.py:2: module-alias-shadowed: b"),
-            ({"codex_worker/a.py": "from . import b\ndef f(b):\n    return b.x\n",
+            ({"codex_worker/a.py": "from . import b\ndef f(b):\n    return b.x\nb\n",
               "codex_worker/b.py": "x = 1\n"},
              "a.py:2: module-alias-shadowed: b"),
-            ({"codex_worker/a.py": "from . import b\nvalues = [b for b in ()]\n",
+            ({"codex_worker/a.py": "from . import b\nvalues = [b for b in ()]\nb\n",
               "codex_worker/b.py": ""},
              "a.py:2: module-alias-shadowed: b"),
             ({"codex_worker/a.py": "def f():\n    from . import b\n",
@@ -613,7 +630,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "value = 1\nclass Example:\n    value = value\n",
             "class Example:\n    len = len\n",
             "class Example:\n    __module__ = __module__\n    __qualname__ = __qualname__\n",
-            "from __future__ import annotations\nclass Example:\n    value: int\n    __annotations__ = __annotations__\n",
+            "from __future__ import annotations\nclass Example:\n    value: int\n    __annotations__ = __annotations__\nannotations\n",
             "class Example:\n    value: int = 1\n    first = value\n",
             "class Example:\n    first = (value := 1)\n    second = value\n",
             "class Example:\n    value = 1\n    value += 1\n    first = value\n",
@@ -655,13 +672,13 @@ class ModuleLayoutTests(unittest.TestCase):
     def test_entrypoint_imports_are_own_imports(self):
         findings = self.check_tree({
             "codex_task.py": "value = 1\n",
-            "codex_worker/a.py": "from codex_task import value\n",
+            "codex_worker/a.py": "from codex_task import value\nvalue\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: module-import-only", findings[0])
         findings = self.check_tree({
             "codex_task.py": "import codex_worker.a as worker\n",
-            "codex_worker/a.py": "import codex_task as entry\n",
+            "codex_worker/a.py": "import codex_task as entry\nentry\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: acyclic-imports", findings[0])
@@ -669,16 +686,16 @@ class ModuleLayoutTests(unittest.TestCase):
     def test_known_module_import_forms_pass(self):
         self.assertEqual(self.check_tree({
             "codex_task.py": "import codex_worker.a as worker\n",
-            "codex_worker/a.py": "from codex_worker import b\n",
-            "codex_worker/b.py": "import codex_worker.c as other\n",
+            "codex_worker/a.py": "from codex_worker import b\nb\n",
+            "codex_worker/b.py": "import codex_worker.c as other\nother\n",
             "codex_worker/c.py": "name = 1\n",
         }), [])
         self.assertEqual(self.check_tree({
             "codex_worker/a.py": "import codex_worker.b\nvalue = codex_worker.b.name\n",
-            "codex_worker/__init__.py": "from . import b\n",
+            "codex_worker/__init__.py": "from . import b\nb\n",
             "codex_worker/b.py": "name = 1\n",
         }), [])
-        findings = self.check_tree({"codex_worker/a.py": "from . import missing\n"})
+        findings = self.check_tree({"codex_worker/a.py": "from . import missing\nmissing\n"})
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: module-import-only: unknown own module", findings[0])
 
@@ -696,6 +713,46 @@ class ModuleLayoutTests(unittest.TestCase):
             "codex_worker/b.py": "name = 1\n",
         })
         self.assertEqual(findings, [])
+
+    def test_unused_top_level_imports_are_rejected(self):
+        for source, line, name in (
+            ("import math\n", 1, "math"),
+            ("import math as number\n", 1, "number"),
+            ("from math import pi\n", 1, "pi"),
+            ("from math import pi as number\n", 1, "number"),
+            ("if True:\n    import math\n", 2, "math"),
+            ("import math\nvalue = 'math'\n", 1, "math"),
+            ("import math\ndef function(math):\n    return math\n", 1, "math"),
+            ("import math\nclass Example:\n    math = 1\n    value = math\n", 1, "math"),
+            ("import math\nvalues = [math for math in ()]\n", 1, "math"),
+            ("from . import b\n", 1, "b"),
+        ):
+            with self.subTest(source=source):
+                findings = self.check_tree({"codex_worker/a.py": source, "codex_worker/b.py": ""})
+                self.assertEqual(len(findings), 1, findings)
+                self.assertIn("a.py:%s: unused-import: %s" % (line, name), findings[0])
+
+    def test_used_and_nested_imports_pass(self):
+        for source in (
+            "import math\nvalue = math.pi\n",
+            "from math import pi as number\nvalue = number\n",
+            "import math\ndef function():\n    return math.pi\n",
+            "import math\ndef function(value=math.pi):\n    return value\n",
+            "import math\nclass Example:\n    math = math\n",
+            "import math\nclass Example:\n    math = 1\n    values = [math for item in ()]\n",
+            "def function():\n    import math\n",
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+
+    def test_only_entrypoint_package_module_imports_are_reexports(self):
+        self.assertEqual(self.check_tree({
+            "codex_task.py": "from codex_worker import a\n",
+            "codex_worker/a.py": "",
+        }), [])
+        findings = self.check_tree({"codex_task.py": "import math\n"})
+        self.assertEqual(len(findings), 1, findings)
+        self.assertIn("codex_task.py:1: unused-import: math", findings[0])
 
     def test_module_attribute_import_forms_and_nested_reads(self):
         for statement, alias in (
@@ -724,7 +781,7 @@ class ModuleLayoutTests(unittest.TestCase):
                                   "    def inner():\n"
                                   "        return b.name\n"
                                   "    return inner\n"),
-            "codex_worker/b.py": "import math\nname = 1\nholder = {}\n",
+            "codex_worker/b.py": "import math\nname = math.pi\nholder = {}\n",
         }), [])
 
     def test_module_aliases_cannot_be_bound_in_any_scope(self):
@@ -765,7 +822,7 @@ class ModuleLayoutTests(unittest.TestCase):
         ):
             with self.subTest(statement=statement):
                 findings = self.check_tree({
-                    "codex_worker/a.py": "from . import b\n" + statement,
+                    "codex_worker/a.py": "from . import b\n" + statement + "b\n",
                     "codex_worker/b.py": "",
                 })
                 self.assertEqual(len(findings), 1, findings)
@@ -810,7 +867,7 @@ class ModuleLayoutTests(unittest.TestCase):
         for pattern in ("b", "[*b]", "{'key': value, **b}"):
             with self.subTest(pattern=pattern):
                 findings = self.check_tree({
-                    "codex_worker/a.py": "from . import b\nmatch ():\n    case " + pattern + ":\n        pass\n",
+                    "codex_worker/a.py": "from . import b\nmatch ():\n    case " + pattern + ":\n        pass\nb\n",
                     "codex_worker/b.py": "",
                 })
                 self.assertEqual(len(findings), 1, findings)

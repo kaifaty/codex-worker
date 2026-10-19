@@ -965,7 +965,7 @@ class WorkspaceTests(RotationTestCase):
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
         worker = self.worker()
-        expected = worker.ci_fix_prompt(state, state["ci"], worker.config.accounts_config())
+        expected = worker.ci_runs.ci_fix_prompt(state, state["ci"], worker.config.accounts_config())
         self.assertEqual(executions[1]["prompt"].partition("\n\n")[0],
                          expected.partition("\n\n")[0])
         for text in (failed_check["name"], failed_check["link"]) + tuple(log.splitlines()):
@@ -983,14 +983,14 @@ class WorkspaceTests(RotationTestCase):
             self.configure(language=language)
             for sandbox in ("off", "workspace"):
                 with self.subTest(language=language, sandbox=sandbox):
-                    prompt = worker.ci_fix_prompt({"sandbox": sandbox}, ci, {"language": language})
+                    prompt = worker.ci_runs.ci_fix_prompt({"sandbox": sandbox}, ci, {"language": language})
                     for text in (check["name"], check["link"], "fixture failed job evidence",
                                  "Python 3.9"):
                         self.assertIn(text, prompt)
-                    self.assertEqual(prompt, worker.ci_fix_prompt({"sandbox": sandbox}, ci,
+                    self.assertEqual(prompt, worker.ci_runs.ci_fix_prompt({"sandbox": sandbox}, ci,
                                                                  worker.config.accounts_config()))
                     if sandbox == "workspace":
-                        self.assertNotEqual(prompt, worker.ci_fix_prompt({"sandbox": "off"}, ci,
+                        self.assertNotEqual(prompt, worker.ci_runs.ci_fix_prompt({"sandbox": "off"}, ci,
                                                                         {"language": language}))
 
     def test_ci_starts_after_review_auto_fix_and_its_second_local_check(self):
@@ -1274,11 +1274,11 @@ class WorkspaceTests(RotationTestCase):
             waits.append(seconds)
             clock[0] += seconds
 
-        with mock.patch.object(worker.task_state, "save"), mock.patch.object(worker, "ci_command", side_effect=command), \
-                mock.patch.object(worker.shutil, "which", return_value=str(self.root / "gh")), \
-                mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
+        with mock.patch.object(worker.task_state, "save"), mock.patch.object(worker.ci_runs, "ci_command", side_effect=command), \
+                mock.patch.object(worker.ci_runs.shutil, "which", return_value=str(self.root / "gh")), \
+                mock.patch.object(worker.ci_runs.time, "monotonic", side_effect=lambda: clock[0]), \
                 mock.patch.object(worker.config, "MINUTE_SECONDS", 60), mock.patch.object(worker.config, "CI_POLL_SECONDS", 30):
-            result = worker.wait_ci(st, lambda: False, sleep)
+            result = worker.ci_runs.wait_ci(st, lambda: False, sleep)
         self.assertEqual(st["ci"], result)
         return st, result, calls, waits
 
@@ -1348,8 +1348,8 @@ class WorkspaceTests(RotationTestCase):
         self.assertLessEqual(len(selected), 150)
         self.assertEqual(ci["outcome"], "failed")
         worker = self.worker()
-        self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-        self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+        self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+        self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
         self.assertEqual(waits, [])
 
     def test_ci_failure_logs_intermediate_summaries_do_not_displace_failure_and_final_summary(self):
@@ -1372,8 +1372,8 @@ class WorkspaceTests(RotationTestCase):
                 self.assertNotIn(prefix + intermediate[0], selected)
                 self.assertLessEqual(len(selected), 150)
                 worker = self.worker()
-                self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-                self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+                self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
                 self.assertEqual(waits, [])
 
     def test_ci_failure_logs_error_text_in_exception_keeps_complete_unittest_tracebacks(self):
@@ -1409,8 +1409,8 @@ class WorkspaceTests(RotationTestCase):
                 self.assertRegex(selected[-1], r"^… \d+ more failure lines omitted$")
                 self.assertLessEqual(len(selected), 150)
                 worker = self.worker()
-                self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-                self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+                self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
                 self.assertEqual(waits, [])
 
     def test_ci_failure_logs_exception_group_traceback_survives_successful_progress(self):
@@ -1468,8 +1468,8 @@ class WorkspaceTests(RotationTestCase):
                         self.assertEqual(tail.splitlines(), expected)
                         self.assertLessEqual(len(tail.splitlines()), 150)
                         worker = self.worker()
-                        self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-                        self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                        self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+                        self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
                         self.assertEqual(waits, [])
 
     def test_ci_failure_logs_select_pytest_assertion_failed_test_and_summary(self):
@@ -1601,8 +1601,8 @@ class WorkspaceTests(RotationTestCase):
                     if unittest_header:
                         self.assertIn(prefix + "FAIL: test_example (tests.ExampleTests)", selected)
                     worker = self.worker()
-                    self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-                    self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                    self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+                    self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
                     self.assertEqual(waits, [])
 
     def test_ci_failure_logs_adjacent_real_tracebacks_keep_complete_first_blocks(self):
@@ -1638,8 +1638,8 @@ class WorkspaceTests(RotationTestCase):
                                  (len(prefixed_lines) - len(retained)))
                 self.assertLessEqual(len(selected), 150)
                 worker = self.worker()
-                self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-                self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+                self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
                 self.assertEqual(waits, [])
 
     def test_ci_failure_logs_unittest_header_stays_with_its_first_real_traceback(self):
@@ -1679,8 +1679,8 @@ class WorkspaceTests(RotationTestCase):
                                          for line in selected[:-1]))
                     self.assertLessEqual(len(selected), 150)
                     worker = self.worker()
-                    self.assertIn(tail, "\n".join(worker.ci_lines(ci)))
-                    self.assertIn(tail, worker.ci_fix_prompt(st, ci, {"language": "en"}))
+                    self.assertIn(tail, "\n".join(worker.ci_runs.ci_lines(ci)))
+                    self.assertIn(tail, worker.ci_runs.ci_fix_prompt(st, ci, {"language": "en"}))
                     self.assertEqual(waits, [])
 
     def test_ci_failure_logs_two_failed_jobs_each_keep_their_first_blocks(self):
@@ -1769,9 +1769,9 @@ class WorkspaceTests(RotationTestCase):
             clock[0] += timeout
             raise subprocess.TimeoutExpired(args, timeout)
 
-        with mock.patch.object(worker.time, "monotonic", side_effect=lambda: clock[0]), \
-                mock.patch.object(worker, "ci_command", side_effect=timeout) as command:
-            worker.ci_failure_logs(st, str(self.root / "gh"), lambda: False, deadline=101)
+        with mock.patch.object(worker.ci_runs.time, "monotonic", side_effect=lambda: clock[0]), \
+                mock.patch.object(worker.ci_runs, "ci_command", side_effect=timeout) as command:
+            worker.ci_runs.ci_failure_logs(st, str(self.root / "gh"), lambda: False, deadline=101)
         self.assertEqual(command.call_count, 1)
         self.assertEqual(clock[0], 101)
         tails = [check.get("tail", "").splitlines() for check in checks]

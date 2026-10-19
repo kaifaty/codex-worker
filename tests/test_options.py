@@ -26,15 +26,15 @@ class OptionRegistryTests(unittest.TestCase):
     def test_docstring_synopses_match_option_registry(self):
         for command in COMMANDS:
             with self.subTest(command=command):
-                expected = self.worker.command_synopsis(command)
-                lines = [line.strip() for line in self.worker.__doc__.splitlines()
+                expected = self.worker.cli.command_synopsis(command)
+                lines = [line.strip() for line in self.worker.cli.__doc__.splitlines()
                          if line.strip().startswith("codex_task.py " + command + " ")]
                 self.assertEqual(lines, [expected], "Expected synopsis: " + expected)
 
     def test_registered_flags_are_documented(self):
         paths = [SKILL / "SKILL.md"] + sorted((SKILL / "references").glob("*.md"))
         documentation = "\n".join(path.read_text(encoding="utf-8") for path in paths)
-        for option in self.worker.OPTION_REGISTRY:
+        for option in self.worker.cli.OPTION_REGISTRY:
             for command in COMMANDS:
                 if command not in option["commands"]:
                     continue
