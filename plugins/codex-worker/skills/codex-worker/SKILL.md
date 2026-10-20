@@ -23,6 +23,7 @@ Reference detail lives in `references/`. Read a file only when its topic comes u
 | [accounts.md](references/accounts.md) | subscriptions and rotation, `auto-continue at`, `needs login`, reset credits |
 | [notifications.md](references/notifications.md) | the user asks about task notifications |
 | [telemetry.md](references/telemetry.md) | `report`, or deciding whether fix rounds or review angles pay off |
+| [reflection.md](references/reflection.md) | after `clean` of a task that escalated, needed a corrective `say` or failed a check; before changing `AGENTS.md` or standing rules |
 | [desktop-threads.md](references/desktop-threads.md) | the thread runs in the Codex desktop app, not under this skill |
 
 ## Delegate or do it yourself
@@ -154,7 +155,8 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
    separate task, and record deferred work in issues when appropriate.
 5. For a GitHub PR, merge only when `wait` reports `CI … passed`; `failed`, `timeout`, `none`, and
    `skipped` need resolution first. Immediately before merging, run `gh pr checks <url>` again and
-   verify all checks pass or skip. Merge per the repo's rules, then `clean`. Report to the user: what Codex did, what you
+   verify all checks pass or skip. Merge per the repo's rules, then `clean`, and
+   [reflect](references/reflection.md) on its record if the task showed a signal. Report to the user: what Codex did, what you
    checked, what is still open, the PR link, and any account switch `wait` reported.
 
 ## Stop rules
