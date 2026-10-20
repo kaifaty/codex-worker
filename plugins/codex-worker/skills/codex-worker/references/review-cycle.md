@@ -35,9 +35,15 @@ the others, and the verdict uses the other results.
 
 Each round sends the review's findings straight to the implementation thread, with the same account
 rotation and reset waiting as `say`. Codex must verify each finding against the code, fix real defects
-(with tests where useful), reject incorrect findings with a one-line reason, then commit and push. A
-finding that needs disproportionate complexity for a case outside "Done when" is rejected as
-`out of scope`, with the reason in its finding decision and the deferred work in `remaining`.
+(with tests where useful), reject incorrect findings with a one-line reason, then commit and push.
+
+Severity follows a realistic trigger: P1/P2 require behavior reachable with inputs or states from this
+repository, the brief or normal use; hypothetical or synthetic inputs are P3. Unrequested scope is a
+finding too: options, settings, abstractions, files or generality that "Done when" does not need are P2
+when they add an unrequested interface or behavior, otherwise P3; say what to remove. Fixes use the
+smallest change and narrow the solution: if a fix needs a new mechanism, make the unsupported case
+fail loudly or reject the finding as `out of scope`, with the reason in its finding decision and the
+work in `remaining`. Fix unrequested-scope findings by deleting the extra code.
 
 The saved check runs before the next review, which starts in a fresh thread. That review receives the
 rejected findings and their reasons, with an instruction to explain any disagreement before raising one
