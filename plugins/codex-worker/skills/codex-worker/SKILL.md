@@ -98,7 +98,7 @@ Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolate
 | Accounts | `accounts` — logins, plans, limits, reset times and credits; `reset-credit <account> [--credit ID] [--yes]` |
 | Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser |
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
-| Finish | `clean <slug>` after the PR is merged: removes the worktree and logs, deletes the local branch, archives every thread |
+| Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock` |
 
 The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug>`; state and logs are in
 `~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only
@@ -107,7 +107,7 @@ new session `status` and `wait` pick it up again.
 
 Scouts need no `--parallel`: run several at once, one question each, alongside tasks. `say` continues a
 scout's read-only thread; `--check`, `--review`, `--review-angles`, `--fix-rounds` and `review` don't
-apply to scouts. `clean` on a scout removes only its state and logs, never the inspected directory.
+apply to scouts. `clean` on a scout archives its record the same way, never the inspected directory.
 
 ## Budgets and checks
 
@@ -174,4 +174,4 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
   the brief and follow the repository's rules.
 - Do not add accounts or enable rotation unless the user tells you to
   ([accounts.md](references/accounts.md)).
-- `clean` removes the task worktree and logs; run it only after reviewing and merging the result.
+- `clean` removes the task worktree and saves its record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock`; run it only after reviewing and merging the result.
