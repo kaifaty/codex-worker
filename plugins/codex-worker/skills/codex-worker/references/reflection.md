@@ -61,7 +61,9 @@ Replay a recorded task under matched conditions:
 
 - the same brief verbatim, the same base commit, the same flags and reviewer;
 - a clone whose `origin` is a local bare repository, so nothing is published; start it with
-  `--base origin/<branch>` and without `--ci`.
+  `--base origin/<branch>` and without `--ci`;
+- in that bare repository, point every branch the brief names, usually `main`, at the base commit and
+  delete the others. A brief that compares against `origin/main` otherwise sees today's code.
 
 Compare the replay with the record: file and diff sizes per round, findings by severity, rounds and stop
 reason, active minutes and weekly percent (`report --slug`). One replay is one sample: a large difference
