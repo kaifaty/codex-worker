@@ -310,7 +310,16 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertEqual(self.git("branch", "--format=%(refname)"), branches)
         self.assertEqual(self.git("worktree", "list", "--porcelain"), worktrees)
         self.assertEqual(self.git("branch", "--list", "codex/scout-file"), "")
-        self.cli("clean", "scout-file")
+        record = self.home / "claude-tasks" / "scout-file"
+        contents = {path.relative_to(record): path.read_bytes() for path in record.rglob("*")
+                    if path.is_file() and path.name not in ("events.jsonl", "state.lock")}
+        output = self.cli("clean", "scout-file")
+        archives = list((record.parent / ".archive").glob("scout-file-*"))
+        self.assertEqual(len(archives), 1)
+        archive = archives[0]
+        self.assertEqual(output, "cleaned scout-file; record in %s\n" % archive)
+        self.assertEqual({path.relative_to(archive): path.read_bytes() for path in archive.rglob("*")
+                          if path.is_file()}, contents)
         self.assertTrue((self.home / "claude-tasks" / "scout-owner").is_dir())
         self.assertTrue(target.is_dir())
         self.assertEqual((target / "tracked.txt").read_text(), "Uncommitted work in the other task\n")

@@ -11,6 +11,7 @@ JSON task records retain the `created` timestamp.
 
 The supervisor appends numeric counters and identifiers to `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
 (by default `~/.codex/`), without prompts, messages, or command output; `clean` preserves this journal.
+`clean` also saves task and scout records in `~/.codex/claude-tasks/.archive/<slug>-YYYYmmddTHHMMSSZ` (UTC), except `events.jsonl` and `state.lock`.
 Journal errors, including a busy lock, go to the task's `stderr.log` without blocking execution.
 Creation time identifies each task, so reusing a slug after `clean` produces a separate report row.
 

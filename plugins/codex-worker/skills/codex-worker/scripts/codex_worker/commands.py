@@ -283,8 +283,19 @@ def cmd_clean(a):
         account = accounts.account_named(cfg, entry["account"])
         accounts.prepare_home(account)
         subprocess.run([config.codex_binary(), "archive", entry["thread"]], env=accounts.account_env(account), capture_output=True)
-    shutil.rmtree(config.TASKS / a.slug)
-    print(f"cleaned {a.slug}")
+    record = config.TASKS / a.slug
+    stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime(clock.CLOCK.time()))
+    archive = config.TASKS / ".archive" / f"{a.slug}-{stamp}"
+    if archive.exists():
+        procs.die(f"task record archive already exists: {archive}")
+    try:
+        archive.parent.mkdir(parents=True, exist_ok=True)
+        (record / "events.jsonl").unlink(missing_ok=True)
+        (record / "state.lock").unlink(missing_ok=True)
+        record.rename(archive)
+    except OSError as exc:
+        procs.die(f"could not archive task record to {archive}: {exc}; record kept at {record}")
+    print(f"cleaned {a.slug}; record in {archive}")
 
 
 def cmd_accounts(a):

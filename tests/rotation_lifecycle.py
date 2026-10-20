@@ -24,6 +24,96 @@ from worker_loader import WORKER_BOOTSTRAP
 
 
 class LifecycleTests(RotationTestCase):
+    def test_clean_keeps_reviewed_task_record_and_allows_reusing_slug(self):
+        self.configure()
+        clock = self.enable_fake_clock()
+        slug = "clean-reviewed-record"
+        review = self.review_result()
+        decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed the reported code."}
+                     for finding in review["findings"]]
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": review},
+            {"mode": "complete", "reply": self.work_result(findings=decisions)}])
+        self.start(slug, "--review", "--check", "true")
+        self.wait(slug)
+        self.cli("say", slug, "Fix the review findings and retain the decisions.")
+        self.wait(slug)
+        record = self.home / "claude-tasks" / slug
+        state = self.state(slug)
+        self.assertEqual(state["reviews"][0]["result"], review)
+        self.assertEqual(state["result"]["findings"], decisions)
+        self.assertTrue(state["checks"])
+        self.assertTrue((record / "events.jsonl").is_file())
+        self.assertTrue((record / "state.lock").is_file())
+        contents = {path.relative_to(record): path.read_bytes() for path in record.rglob("*")
+                    if path.is_file() and path.name not in ("events.jsonl", "state.lock")}
+        self.assertTrue({Path(name) for name in ("brief.md", "state.json", "last.md", "messages.jsonl")}
+                        <= contents.keys())
+        stamp = datetime.datetime.fromtimestamp(clock.time(), datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        archive = record.parent / ".archive" / (slug + "-" + stamp)
+
+        self.assertEqual(self.cli("clean", slug), "cleaned %s; record in %s\n" % (slug, archive))
+        self.assertFalse(record.exists())
+        self.assertEqual({path.relative_to(archive): path.read_bytes() for path in archive.rglob("*")
+                          if path.is_file()}, contents)
+        status = self.cli("status")
+        self.assertNotIn(slug, status)
+        self.assertNotIn(".archive", status)
+
+        clock.sleep(1)
+        self.start(slug)
+        self.wait(slug)
+        self.cli("clean", slug)
+        archives = list(archive.parent.iterdir())
+        self.assertEqual(len(archives), 2)
+        self.assertIn(archive, archives)
+        self.assertTrue(all(path.name.startswith(slug + "-") for path in archives))
+        self.assertEqual({path.relative_to(archive): path.read_bytes() for path in archive.rglob("*")
+                          if path.is_file()}, contents)
+        self.assertFalse(record.exists())
+        self.assertNotIn(slug, self.cli("status"))
+
+    def test_clean_archive_failures_keep_record_without_overwriting_destination(self):
+        self.configure()
+        worker = self.worker()
+        timestamp = 1_800_000_000
+        stamp = datetime.datetime.fromtimestamp(timestamp, datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        for failure in ("collision", "rename"):
+            with self.subTest(failure=failure):
+                slug = "clean-archive-" + failure
+                record = worker.config.TASKS / slug
+                record.mkdir(parents=True)
+                worker.task_state.write_state({"slug": slug, "kind": "scout", "pid": None,
+                                               "threads": [], "reviews": []})
+                (record / "brief.md").write_bytes(b"fixture brief\n")
+                (record / "last.md").write_bytes(b"fixture final message\n")
+                (record / "events.jsonl").write_bytes(b"fixture events\n")
+                (record / "state.lock").touch()
+                contents = {path.name: path.read_bytes() for path in record.iterdir()}
+                archive = worker.config.TASKS / ".archive" / (slug + "-" + stamp)
+                if failure == "collision":
+                    archive.mkdir(parents=True)
+                with mock.patch.object(worker.clock.CLOCK, "time", return_value=timestamp), \
+                        mock.patch.object(Path, "rename", side_effect=OSError("fixture rename denied")):
+                    with self.assertRaises(SystemExit) as raised:
+                        worker.commands.cmd_clean(SimpleNamespace(slug=slug, keep_branch=False))
+                message = str(raised.exception)
+                self.assertIn(str(archive), message)
+                self.assertTrue(record.is_dir())
+                if failure == "collision":
+                    self.assertIn("archive already exists", message)
+                    self.assertEqual(list(archive.iterdir()), [])
+                    self.assertEqual({path.name: path.read_bytes() for path in record.iterdir()}, contents)
+                else:
+                    self.assertIn("could not archive task record", message)
+                    self.assertIn("fixture rename denied", message)
+                    self.assertIn(str(record), message)
+                    self.assertFalse(archive.exists())
+                    self.assertEqual({path.name: path.read_bytes() for path in record.iterdir()},
+                                     {name: value for name, value in contents.items()
+                                      if name not in ("events.jsonl", "state.lock")})
+
     @contextmanager
     def prepared_cli(self):
         # Import the real command before a short observation window begins.
