@@ -37,6 +37,13 @@ Keep it yourself when:
 - it needs the user's live systems you are trusted with and Codex is not (accounts, publishing, uploads);
 - the spec is still fuzzy: settle it first (with the user if needed), then delegate.
 
+Visual and 3D work stays with Claude Opus 5.5: textures, image-generation prompts, models, materials,
+animations, scenes, rendering and shader code, and any review of them. Do it yourself, or through an Opus
+subagent when you run on another model. Codex gets no task, scout or review of it; split a mixed task and
+delegate only the rest. The one exception is image generation: a scout in an empty directory may run
+Codex's `image_gen` tool with the prompt you wrote. Ask it only for the file paths, not for an
+assessment, and judge each image yourself.
+
 ## The brief
 
 A task costs what its turns last, not its reasoning level: a sprawling multi-hour thread with
