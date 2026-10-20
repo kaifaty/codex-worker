@@ -33,6 +33,9 @@ A task that finished `done` with a passing check and at most P3 findings needs n
    earlier: <an earlier lesson this task tested>: helped | hurt | no observed effect | confounded
    ```
 
+   Write one `earlier` line for each earlier lesson the task tested, and add a `caveats` line for
+   anything that weakens the evidence.
+
    If the record names no concrete moment, write `NO_ENTRY` and stop. A merged result is not evidence that
    a rule helped. When several changes could explain a difference, the verdict is `confounded`.
 4. Append one line to `.archive/INDEX.md`: date, entry, scope, cue, and status (`proposed`,
