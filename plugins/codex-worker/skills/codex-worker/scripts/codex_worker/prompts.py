@@ -86,6 +86,12 @@ def review_prompt(st, cfg=None):
                 f"Бриф задачи — в файле {brief}. Прочитай его и сверяйся с разделом «Готово, когда».\n"
                 "Ищи только реальные дефекты: неверное поведение, невыполненные пункты брифа, "
                 "сломанные или фиктивные проверки, опасные побочные эффекты, гонки.\n"
+                "Серьёзность — по реальному триггеру: P1 или P2 только для поведения, достижимого на входах "
+                "и состояниях, которые встречаются в этом репозитории, в брифе или при обычном использовании; "
+                "дефект, которому нужен гипотетический или синтетический вход, — P3. Лишний объём — тоже дефект: "
+                "новые опции, настройки, абстракции, файлы или обобщения, которые не нужны для «Готово, когда». "
+                "Ставь P2, если они добавляют интерфейс или поведение, которого не просили, иначе P3, "
+                "и укажи, что убрать.\n"
                 "Для каждого дефекта укажи файл:строка, что не так и как это проверить. "
                 "Без замечаний по стилю.\n"
                 + context +
@@ -96,6 +102,11 @@ def review_prompt(st, cfg=None):
             f"Read the task brief at {brief} and check its acceptance criteria.\n"
             "Look only for real defects: incorrect behavior, unmet brief requirements, "
             "broken or ineffective checks, dangerous side effects, and races.\n"
+            "Severity follows a realistic trigger: P1 or P2 only for behavior reachable with inputs or states "
+            "that occur in this repository, the brief or normal use; a defect that needs a hypothetical or "
+            "synthetic input is P3. Unrequested scope is a defect too: new options, settings, abstractions, "
+            'files or generality that "Done when" does not need. Rate it P2 when it adds an interface or '
+            "behavior nobody asked for, otherwise P3, and say what to remove.\n"
             "For each defect, give file:line, explain what is wrong and how to verify it. "
             "Do not comment on style.\n"
             + context +
@@ -117,15 +128,19 @@ def fix_prompt(st, review, check, cfg):
             prompt += (f"\n{finding['id']} [{finding['severity']}] {finding['file']}:{finding['line']} "
                        f"— {finding['title']}\n{finding['detail']}\nverify: {finding['verify']}\n")
     prompt += (("\n\nПроверь каждую находку по коду. Настоящие дефекты исправь, где разумно — с тестом. "
-                "Неверные отклони с причиной в одну строку. Если находка требует непропорциональной "
-                "сложности ради случая вне «Готово, когда», отклони её с причиной out of scope "
-                "и вынеси в remaining. Закоммить и запушь изменения. "
+                "Неверные отклони с причиной в одну строку. Исправляй каждую находку самым маленьким изменением. "
+                "Если исправлению нужен новый механизм (новый анализ, опция, абстракция или обработка входов, "
+                "которых в этом репозитории не бывает), сузь решение: пусть неподдерживаемый случай падает явно, "
+                "или отклони находку с причиной out of scope и вынеси её в remaining. "
+                "Находки о лишнем объёме исправляй удалением лишнего кода. Закоммить и запушь изменения. "
                 "Верни итог по схеме работы; в findings укажи для каждой находки id, "
                 "decision fixed или rejected и note с пояснением. Если находок нет, findings пуст.\n") if ru else
                ("\n\nVerify every finding against the code. Fix real defects, adding a test where reasonable. "
-                "Reject incorrect findings with a one-line reason. If a finding requires disproportionate "
-                "complexity for a case outside the acceptance criteria (Done when), reject it with the reason "
-                "out of scope and list it in remaining. Commit and push the changes. "
+                "Reject incorrect findings with a one-line reason. Fix each finding with the smallest change. "
+                "If a fix would need a new mechanism (a new analysis, option, abstraction, or handling of inputs "
+                "that do not occur in this repository), narrow instead: make the unsupported case fail loudly, "
+                "or reject the finding with the reason out of scope and list it in remaining. "
+                "Fix unrequested-scope findings by deleting the extra code. Commit and push the changes. "
                 "Return the work result schema; in findings give each finding's id, decision fixed or rejected, "
                 "and an explanatory note. When there are no findings, use an empty findings array.\n"))
     return prompt

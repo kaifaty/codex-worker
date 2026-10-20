@@ -84,13 +84,21 @@ class PromptTests(unittest.TestCase):
                    "Fix the saved check failure after the previous fix.",
                    "Verify every finding against the code.", "Fix real defects, adding a test where reasonable.",
                    "Reject incorrect findings with a one-line reason.", "out of scope", "remaining",
-                   "disproportionate", "acceptance criteria (Done when)", "Commit and push the changes.",
+                   "Fix each finding with the smallest change. If a fix would need a new mechanism (a new analysis, "
+                   "option, abstraction, or handling of inputs that do not occur in this repository), narrow instead: "
+                   "make the unsupported case fail loudly, or reject the finding with the reason out of scope and "
+                   "list it in remaining. Fix unrequested-scope findings by deleting the extra code.",
+                   "Commit and push the changes.",
                    "Return the work result schema", "decision fixed or rejected", "empty findings array"),
             "ru": ("Проверь находки ревью по коду:",
                    "Исправь сбой сохранённой проверки после предыдущего исправления.",
                    "Проверь каждую находку по коду.", "Настоящие дефекты исправь, где разумно — с тестом.",
                    "Неверные отклони с причиной в одну строку.", "out of scope", "remaining",
-                   "непропорциональной", "вне «Готово, когда»", "Закоммить и запушь изменения.",
+                   "Исправляй каждую находку самым маленьким изменением. Если исправлению нужен новый механизм "
+                   "(новый анализ, опция, абстракция или обработка входов, которых в этом репозитории не бывает), "
+                   "сузь решение: пусть неподдерживаемый случай падает явно, или отклони находку с причиной "
+                   "out of scope и вынеси её в remaining. Находки о лишнем объёме исправляй удалением лишнего кода.",
+                   "Закоммить и запушь изменения.",
                    "Верни итог по схеме работы", "decision fixed или rejected", "findings пуст"),
         }
         finding = {"id": "F1", "severity": "P2", "file": "worker.py", "line": 42,
@@ -223,7 +231,12 @@ class PromptTests(unittest.TestCase):
                    "Read these guarded files in full", "removed assertions", "skips", "widened tolerances",
                    "The saved check already passed:", "Do not rerun the full test suite.", "only targeted checks",
                    "The worker rejected these findings.", "explain why its rejection reason is wrong.", "Rejection reason: fixture reason",
-                   "mocks replacing the code under test"),
+                   "mocks replacing the code under test",
+                   "Severity follows a realistic trigger: P1 or P2 only for behavior reachable with inputs or states "
+                   "that occur in this repository, the brief or normal use; a defect that needs a hypothetical or "
+                   "synthetic input is P3. Unrequested scope is a defect too: new options, settings, abstractions, "
+                   'files or generality that "Done when" does not need. Rate it P2 when it adds an interface or '
+                   "behavior nobody asked for, otherwise P3, and say what to remove."),
             "ru": ("Проведи ревью изменений задачи: git diff origin/main.", "разделом «Готово, когда».",
                    "Ищи только реальные дефекты:", "неверное поведение", "невыполненные пункты брифа",
                    "сломанные или фиктивные проверки", "опасные побочные эффекты", "гонки", "файл:строка",
@@ -233,7 +246,13 @@ class PromptTests(unittest.TestCase):
                    "Прочитай эти охраняемые файлы целиком", "убранные утверждения", "пропуски", "расширенные допуски",
                    "Сохранённая проверка уже прошла:", "Не перезапускай весь набор проверок.", "только точечные проверки",
                    "Исполнитель отклонил следующие находки.", "объясни, чем она неверна.", "Причина отклонения: fixture reason",
-                   "моки вместо проверяемого кода"),
+                   "моки вместо проверяемого кода",
+                   "Серьёзность — по реальному триггеру: P1 или P2 только для поведения, достижимого на входах "
+                   "и состояниях, которые встречаются в этом репозитории, в брифе или при обычном использовании; "
+                   "дефект, которому нужен гипотетический или синтетический вход, — P3. Лишний объём — тоже дефект: "
+                   "новые опции, настройки, абстракции, файлы или обобщения, которые не нужны для «Готово, когда». "
+                   "Ставь P2, если они добавляют интерфейс или поведение, которого не просили, иначе P3, "
+                   "и укажи, что убрать."),
         }
         finding = {"id": "F1", "severity": "P2", "file": "worker.py", "line": 42,
                    "title": "Missing result", "detail": "A result can be lost.", "verify": "Run the focused test."}
@@ -245,7 +264,7 @@ class PromptTests(unittest.TestCase):
             with self.subTest(language=language, context="none"):
                 with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
                     prompt = self.worker.prompts.review_prompt(self.st, cfg)
-                for part in parts[language][:17] + (str(self.task / "brief.md"),):
+                for part in parts[language][:17] + (parts[language][-1], str(self.task / "brief.md")):
                     self.assertIn(part, prompt)
                 for part in ("severity", "file, line, title, detail", "verify", "findings", "summary"):
                     self.assertIn(part, prompt)
@@ -256,6 +275,18 @@ class PromptTests(unittest.TestCase):
                 if language == "en":
                     self.assertNotIn("passed", prompt)
                     self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+            with self.subTest(language=language, context="angles"):
+                angles = list(self.worker.prompts.REVIEW_ANGLES)
+                with mock.patch.object(self.worker.task_state, "save"), \
+                        mock.patch.object(self.worker.budgets, "stop_at_weekly_budget", return_value=False), \
+                        mock.patch.object(self.worker.notifications, "notify"), \
+                        mock.patch.object(self.worker.turns, "run_turn", side_effect=lambda st, *a, **kw:
+                                          st.update(outcome="completed")) as run_turn:
+                    self.worker.review_cycle.review_turn(dict(self.st), cfg, prompt, None,
+                                                         lambda: False, mock.Mock(), angles=angles)
+                self.assertEqual(run_turn.call_count, len(angles))
+                for call in run_turn.call_args_list:
+                    self.assertIn(parts[language][-1], call.args[2])
             for base in (None, {"outcome": "skipped", "reason": "fixture base skipped"},
                          {"outcome": "failed", "exit": 9, "seconds": 2.2, "tail": "fixture base output"}):
                 with self.subTest(language=language, context="saved", base=base):
