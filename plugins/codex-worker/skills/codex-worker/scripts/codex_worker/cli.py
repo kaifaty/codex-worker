@@ -1,9 +1,9 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
-  codex_task.py review <slug> [--effort E] [--max-weekly P] [--review-angles LIST]  fresh review (task must be idle)
+  codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py review <slug> [--effort E] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
@@ -17,7 +17,7 @@
 All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
 credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
-review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
+reviewer (codex), claude (isolated reviewer settings), review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
 start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
 say --ci/--no-ci enables/disables CI; --ci-rounds N replaces the saved round limit. ci_timeout_minutes defaults to 30.
 Legacy claude-accounts.json is a fallback.
@@ -121,6 +121,10 @@ OPTION_REGISTRY = (
     {"names": ("--review",),
      "argparse": {"action": "store_true", "help": "review in a fresh thread after successful completion"},
      "synopsis": "[--review]", "commands": {"start": {}, "say": {}}},
+    {"names": ("--reviewer",),
+     "argparse": {"choices": ("codex", "claude"), "default": None,
+                  "help": "review provider (default: saved reviewer or reviewer setting, codex)"},
+     "synopsis": "[--reviewer codex|claude]", "commands": {"start": {}, "say": {}, "review": {}}},
     {"names": ("--review-angles",),
      "argparse": {"type": review_angles, "metavar": "LIST",
                   "help": "review with comma-separated presets or auto (implies --review)"},

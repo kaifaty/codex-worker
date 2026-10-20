@@ -30,6 +30,27 @@ subscriptions, the settings can contain:
 }
 ```
 
+## Claude reviewer account
+
+`--reviewer claude` reviews through a separate Anthropic subscription. Install Claude Code CLI, then
+have the user create a token while signed in to the reviewer subscription in an isolated config:
+
+```sh
+env -i HOME="$HOME" USER="$USER" PATH="$PATH" LANG=en_US.UTF-8 \
+  CLAUDE_CONFIG_DIR="$HOME/.claude-accounts/reviewer" claude setup-token
+security add-generic-password -U -s codex-worker-claude-reviewer -a "$USER" -w
+```
+
+Paste the issued token at the Keychain password prompt. The supervisor reads it with
+`security find-generic-password` immediately before each review and passes it only through the child
+environment. Do not put it in settings, command arguments, or task files. The `claude.config_dir` and
+`claude.token_keychain` settings replace these defaults; see [settings.md](settings.md#claude-reviewer).
+
+`accounts` adds a `claude reviewer` line with utilization percentages and local reset times for the
+five-hour and seven-day windows from the last Claude rate-limit event. Before the first event, it
+prints `unknown`. The cache is `~/.codex/claude-tasks/claude-limits.json`. Claude review costs and
+tokens appear separately in telemetry and `report`.
+
 ## Rotation
 
 With `accounts` configured, `start` chooses an available account whose longest window resets first;

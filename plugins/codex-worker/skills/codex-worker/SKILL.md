@@ -76,6 +76,7 @@ T=${CLAUDE_SKILL_DIR}/scripts/codex_task.py
 Run every command below as `python3 -I "$T" …`. The CLI is resolved from `CODEX_TASK_CODEX`, then the
 ChatGPT.app bundle if present, then `codex` on `PATH`. Model and reasoning defaults come from the user's
 Codex configuration; `--effort` overrides reasoning effort for a task.
+Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolated Anthropic subscription; Codex still implements and fixes ([setup](references/accounts.md#claude-reviewer-account)).
 
 | Step | Command arguments |
 |---|---|

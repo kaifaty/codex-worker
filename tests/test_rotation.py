@@ -20,6 +20,7 @@ import rotation_results
 import rotation_checks
 import rotation_notifications
 import rotation_reviews
+import test_claude_review
 import rotation_lifecycle
 import rotation_reset_credits
 import rotation_accounts
@@ -64,6 +65,7 @@ class RotationTests(
         rotation_checks.CheckGuardTests,
         rotation_notifications.NotificationTests,
         rotation_reviews.ReviewFixTests,
+        test_claude_review.ClaudeReviewTests,
         rotation_lifecycle.LifecycleTests,
         rotation_reset_credits.ResetCreditTests,
         rotation_accounts.AccountAuthTests,

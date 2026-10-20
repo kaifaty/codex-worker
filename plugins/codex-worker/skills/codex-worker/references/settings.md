@@ -8,6 +8,7 @@ that file is absent.
 | `language` | `"en"` | brief language (`"ru"` for Russian) and the language of the scout, handoff, review, fix, wrap-up and reset-continuation prompts the script writes; account status output is always English |
 | `max_turn_minutes` | none | `--max-minutes` default for implementation turns; with neither set, a turn has no time cap |
 | `max_review_minutes` | `30` | cap for reviews and scouts, separate from implementation time |
+| `reviewer` | `"codex"` | default review provider: `"codex"` or `"claude"`; saved per task and overridden by `--reviewer` |
 | `max_task_weekly_percent` | none | task weekly budget in percentage points (0 < P ≤ 100); `start --max-weekly P` overrides it, and `say` and `review` inherit or replace the saved task budget |
 | `repeat_limit` | `3` | identical failures before a `stuck` stop ([results.md](results.md)) |
 | `review_angles_min_lines` | `400` | changed lines from which `--review-angles auto` runs angles |
@@ -16,6 +17,34 @@ that file is absent.
 | `sandbox`, `writable_dirs` | `"off"`, `[]` | [sandbox.md](sandbox.md) |
 | `accounts`, `switch_at`, `credits`, `wait_for_reset`, `use_reset_credits`, `reset_credit_min_hours` | | [accounts.md](accounts.md) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
+
+## Claude reviewer
+
+`--reviewer claude` uses an isolated Claude Code CLI account for reviews. Work and fix rounds still
+run in Codex. Settings belong in the `claude` object:
+
+```json
+{
+  "reviewer": "claude",
+  "claude": {
+    "config_dir": "~/.claude-accounts/reviewer",
+    "token_keychain": "codex-worker-claude-reviewer",
+    "max_turns": 40
+  }
+}
+```
+
+| `claude` key | Default | Effect |
+|---|---|---|
+| `config_dir` | `"~/.claude-accounts/reviewer"` | isolated `CLAUDE_CONFIG_DIR` |
+| `token_keychain` | `"codex-worker-claude-reviewer"` | macOS Keychain service; account is `$USER` |
+| `model` | omitted | optional Claude `--model` |
+| `effort` | omitted | optional Claude `--effort`; independent of Codex `--effort` |
+| `max_turns` | `40` | positive integer passed as Claude `--max-turns` |
+
+The executable is `CODEX_TASK_CLAUDE`, or `claude` on `PATH`. `start` and `review` fail before
+launching when Claude is selected but its CLI is missing. See [accounts.md](accounts.md#claude-reviewer-account)
+for token setup and [review-cycle.md](review-cycle.md#review-provider) for fallback behavior.
 
 ## Task CI options
 

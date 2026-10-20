@@ -200,3 +200,18 @@ def available(infos, cfg, exclude=()):
     choices = [i for i in infos if i["logged_in"] and not i.get("duplicate")
                and i["name"] not in exclude and not exhausted(i, cfg)]
     return min(choices, key=lambda i: longest_window(i).get("reset") or float("inf")) if choices else None
+
+
+def claude_reviewer_line():
+    try:
+        limits = json.loads((config.TASKS / "claude-limits.json").read_text(encoding="utf-8"))
+        windows = limits.get("unifiedWindows") or {}
+    except (OSError, ValueError, AttributeError):
+        return "claude reviewer: unknown"
+    parts = []
+    for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        window = windows.get(name) or {}
+        used = window.get("utilization")
+        percent = f"{used * 100:g}%" if type(used) in (int, float) else "unknown"
+        parts.append(f"{label} {percent} (reset {config.local_time(window.get('resetsAt'))})")
+    return "claude reviewer: " + "; ".join(parts)

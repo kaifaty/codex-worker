@@ -17,6 +17,7 @@ Layer 3:
 Layer 4:
     task_state (implemented): task state fields, persistence, and locks.
 Layer 5:
+    claude_review (implemented): isolated Claude Code review execution and limits.
     telemetry_log (implemented): journal rows and phase telemetry.
     publishing (implemented): completed turns and work or pull request publishing.
 Layer 6:

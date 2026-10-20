@@ -122,6 +122,10 @@ def wait_review_lines(st, slug):
             yield (f"== auto-fix: stop: escalate — {finding['id']} {finding['file']}:{finding['line']} "
                    f"targets code from fix round {finding['round']} ({finding['commit']})")
     reviews = st.get("reviews", [])[st.get("review_start", 0):]
+    for entry in reviews:
+        if entry.get("unavailable"):
+            yield f"== reviewer claude unavailable: {entry['unavailable']}; review by codex"
+    reviews = [entry for entry in reviews if not entry.get("unavailable")]
     if not (st.get("kind") == "review" or st.get("rounds") or reviews):
         return
     aggregate = st.get("review_result")

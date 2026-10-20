@@ -109,7 +109,7 @@ st[dynamic_key] = 1
         unused = registered - used
         self.assertFalse(missing, "Unregistered state keys: " + ", ".join(sorted(missing)))
         self.assertFalse(unused, "Unused state registry keys: " + ", ".join(sorted(unused)))
-        self.assertEqual(len(registered), 72)
+        self.assertEqual(len(registered), 73)
         for key, field in self.worker.task_state.STATE_FIELDS.items():
             with self.subTest(key=key):
                 self.assertIn(field.lifetime, {"task", "history", "cursor", "turn", "attempt", "runtime"})
@@ -136,6 +136,7 @@ st[dynamic_key] = 1
             "result": {"status": "done", "summary": "old-result"},
             "review_account": "old-review", "review_angle": "correctness",
             "review_angles": ["tests"], "review_result": {"verdict": "clean"},
+            "reviewer": "claude",
             "review_skipped": "old-skip", "review_start": 17, "reviews": [{}, {}],
             "rotation_start": 16, "rotations": [{}, {}, {}, {}], "rounds": [{"round": 1}],
             "sandbox": "workspace", "signal": {"name": "SIGTERM", "at": 1001},
@@ -215,7 +216,8 @@ st[dynamic_key] = 1
     def test_load_keeps_the_same_defaults_and_insertion_order(self):
         expected = {"account": "main", "threads": [], "rotations": [], "reviews": [],
                     "checks": [], "result": None, "fix_rounds": 0, "rounds": [],
-                    "guards": [], "base_check": False, "sandbox": "off", "writable_dirs": []}
+                    "guards": [], "base_check": False, "sandbox": "off", "writable_dirs": [],
+                    "reviewer": "codex"}
         loaded = self.load_state({})
         self.assertEqual(loaded, expected)
         self.assertEqual(list(loaded), list(expected))

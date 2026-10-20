@@ -11,6 +11,33 @@ check, or after an unstructured result, for compatibility. Every review prompt n
 result of the passing saved check and tells the reviewer not to rerun the full suite; only focused
 checks that confirm a specific finding run again.
 
+## Review provider
+
+`start`, `say`, and `review` accept `--reviewer codex|claude`. The default is the `reviewer` setting
+(`codex`); the task saves the selection, and follow-ups and standalone reviews inherit it unless
+overridden. `--reviewer` selects the provider; `--review` still enables automatic review.
+
+With `--reviewer claude`, each review uses a fresh Claude Code CLI process with the same review prompt
+and result schema. Work and fix rounds remain in Codex. The reviewer uses its isolated Anthropic
+subscription; its usage does not add to the task's Codex weekly percentage. `wait` prints
+`== review by claude (N min)` or `== review angle X by claude (N min)`.
+
+The supervisor removes inherited `CLAUDE*` and `ANTHROPIC*` environment variables, reads the reviewer
+token from macOS Keychain immediately before launch, and supplies the isolated config directory and
+token through the environment. Claude runs with `--permission-mode dontAsk`, allows
+`Read,Grep,Glob,Bash`, and disallows `Edit,Write,NotebookEdit`. The supervisor compares `HEAD` and
+`git status --porcelain` before and after review: any change fails with `reviewer modified the
+worktree`, preserving the worktree for inspection.
+
+A rejected rate limit, 401/403 authentication failure, missing executable during the cycle, error
+result, or invalid structured output falls back to an ordinary Codex review. `wait` reports
+`== reviewer claude unavailable: <reason>; review by codex`. Review timeouts, `stop`, and external
+signals keep their usual outcomes and do not fall back. Cancellation sends SIGINT to Claude's
+process group, waits up to 10 seconds, then sends SIGTERM if needed.
+
+Account setup is in [accounts.md](accounts.md#claude-reviewer-account); optional model, effort and turn
+limits are in [settings.md](settings.md#claude-reviewer).
+
 ## Angles
 
 `--review-angles auto` runs `correctness,concurrency,tests` when the diff from base, including
@@ -24,8 +51,9 @@ review. For a specific risk, pass a comma-separated list instead:
 
 On `start` and `say`, `--review-angles` implies `--review`.
 
-Angles run one after another in fresh threads, with ordinary account rotation and reset waiting. Each
-angle gets its own review record. The supervisor combines the findings, merges duplicate locations and
+Angles run one after another in fresh Codex threads, with ordinary account rotation and reset waiting,
+or in separate Claude CLI processes with `--reviewer claude`. Each angle gets its own review record.
+The supervisor combines the findings, merges duplicate locations and
 titles, and labels each finding with its angles. A refused angle is marked `refused` without stopping
 the others, and the verdict uses the other results.
 

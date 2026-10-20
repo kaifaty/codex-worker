@@ -58,6 +58,17 @@ def codex_binary():
     return CODEX["path"] or resolve_codex()
 
 
+def claude_binary():
+    override = os.environ.get("CODEX_TASK_CLAUDE")
+    return shutil.which(str(Path(override).expanduser()) if override else "claude")
+
+
+def require_claude():
+    if not claude_binary():
+        procs.die("Claude Code CLI was not found. Install Claude Code or set "
+                  "CODEX_TASK_CLAUDE to its executable path to use --reviewer claude.")
+
+
 def accounts_config():
     p = CODEX_HOME / "codex-worker.json"
     if not p.exists():
@@ -76,12 +87,33 @@ def accounts_config():
     cfg.setdefault("max_turn_minutes", None)
     cfg.setdefault("max_task_weekly_percent", None)
     cfg.setdefault("max_review_minutes", 30)
+    cfg.setdefault("reviewer", "codex")
+    cfg.setdefault("claude", {})
     cfg.setdefault("ci", False)
     cfg.setdefault("ci_timeout_minutes", 30)
     cfg.setdefault("review_angles_min_lines", 400)
     cfg.setdefault("repeat_limit", 3)
     cfg.setdefault("sandbox", "off")
     cfg.setdefault("writable_dirs", [])
+    if cfg["reviewer"] not in ("codex", "claude"):
+        procs.die('reviewer must be "codex" or "claude"')
+    claude = cfg["claude"]
+    if not isinstance(claude, dict):
+        procs.die("claude must be an object")
+    claude.setdefault("config_dir", "~/.claude-accounts/reviewer")
+    claude.setdefault("token_keychain", "codex-worker-claude-reviewer")
+    claude.setdefault("model", None)
+    claude.setdefault("effort", None)
+    claude.setdefault("max_turns", 40)
+    for key in ("config_dir", "token_keychain"):
+        if not isinstance(claude[key], str) or not claude[key]:
+            procs.die("claude." + key + " must be a nonempty string")
+    claude["config_dir"] = str(Path(claude["config_dir"]).expanduser().resolve())
+    for key in ("model", "effort"):
+        if claude[key] is not None and (not isinstance(claude[key], str) or not claude[key]):
+            procs.die("claude." + key + " must be a nonempty string or null")
+    if type(claude["max_turns"]) is not int or claude["max_turns"] < 1:
+        procs.die("claude.max_turns must be a positive integer")
     if cfg["sandbox"] not in ("off", "workspace"):
         procs.die('sandbox must be "off" or "workspace"')
     if not isinstance(cfg["writable_dirs"], list) or not all(
