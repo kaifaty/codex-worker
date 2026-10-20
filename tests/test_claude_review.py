@@ -5,6 +5,7 @@ import shlex
 import subprocess
 import sys
 from pathlib import Path
+from unittest import mock
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -373,8 +374,39 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(marker.read_text(), "untouched\n")
         self.assertEqual((Path(state["worktree"]) / "tracked.txt").read_text(), "worker change\n")
 
+    def test_claude_review_accepts_uninitialized_local_submodule(self):
+        source = self.root / "submodule-source"
+        source.mkdir()
+        self.git("-C", str(source), "init", "--quiet")
+        (source / "module.txt").write_text("submodule contents\n")
+        self.git("-C", str(source), "add", "module.txt")
+        self.git("-C", str(source), "commit", "--quiet", "-m", "Add submodule contents")
+        self.git("-c", "protocol.file.allow=always", "submodule", "add", str(source), "local-submodule")
+        self.git("commit", "--quiet", "-m", "Add local submodule")
+        self.git("push", "--quiet", "origin", "main")
+        self.claude_fixture()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+        self.start("claude-submodule", "--review", "--reviewer", "claude")
+        output = self.wait("claude-submodule")
+        state = self.state("claude-submodule")
+        worktree = Path(state["worktree"])
+        self.assertFalse((worktree / "local-submodule" / ".git").exists())
+        self.assertTrue(self.git("-C", str(worktree), "submodule", "status").startswith("-"))
+        self.assertEqual(state["outcome"], "completed")
+        self.assertIn("== review by claude", output)
+        self.assertNotIn("review by codex", output)
+        self.assertEqual(len(self.claude_invocations()), 1)
+        self.assertFalse(self.review_invocations())
+
+    def test_claude_snapshot_hashes_no_files_in_clean_worktree(self):
+        worker = self.worker()
+        with mock.patch.object(worker.claude_review.hashlib, "sha256",
+                               wraps=worker.claude_review.hashlib.sha256) as sha256:
+            worker.claude_review.worktree_snapshot({"worktree": str(self.repo)})
+        sha256.assert_not_called()
+
     def test_claude_overwriting_dirty_or_untracked_contents_fails(self):
-        for path in ("tracked.txt", "reviewer-change.txt"):
+        for path in ("tracked.txt", "reviewer-change.txt", "nested/reviewer-change.txt"):
             with self.subTest(path=path):
                 self.claude_fixture(runs=[{"mode": "modify", "path": path,
                                            "reply": self.review_result(False)}])
@@ -382,7 +414,7 @@ class ClaudeReviewTests(RotationTestCase):
                 self.account(self.home, "A", self.reset, runs=[{
                     "mode": "complete", "write_files": {path: "Codex work must be preserved.\n"},
                     "reply": self.work_result()}])
-                slug = "claude-dirty-" + path.replace(".txt", "")
+                slug = "claude-dirty-" + path.replace("/", "-").replace(".txt", "")
                 self.start(slug)
                 self.wait(slug)
                 worktree = self.state(slug)["worktree"]

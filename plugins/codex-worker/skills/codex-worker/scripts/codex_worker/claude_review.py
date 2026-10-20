@@ -27,16 +27,22 @@ def worktree_snapshot(st):
         for command in ("clean=", "smudge=", "process=", "required=false"):
             snapshot_git += ["-c", f"filter.{driver}.{command}"]
     head, status = (procs.sh(snapshot_git + args, cwd=st["worktree"], errors="surrogateescape")
-                    for args in (["rev-parse", "HEAD"], ["status", "--porcelain", "-z"]))
-    names = procs.sh(snapshot_git + ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
-                    cwd=st["worktree"], errors="surrogateescape")
+                    for args in (["rev-parse", "HEAD"],
+                                 ["status", "--porcelain", "-z", "--untracked-files=all"]))
+    names = set()
+    records = iter(status.split("\0"))
+    for record in records:
+        if not record:
+            continue
+        names.add(record[3:])
+        if "R" in record[:2] or "C" in record[:2]:
+            names.add(next(records))  # Porcelain -z gives destination, then source.
     files = []
-    for name in sorted(set(names.split("\0")) - {""}):
+    for name in sorted(names):
         path = Path(st["worktree"]) / name
         try:
             mode = path.lstat().st_mode
         except FileNotFoundError:
-            files.append((name, None, None))
             continue
         if stat.S_ISLNK(mode):
             contents = os.readlink(path)
@@ -47,7 +53,7 @@ def worktree_snapshot(st):
                     digest.update(chunk)
             contents = digest.digest()
         else:
-            raise RuntimeError("unsupported worktree file type: " + name)
+            continue  # Directories, including submodules, are covered by status.
         files.append((name, mode, contents))
     return head, status, files
 
