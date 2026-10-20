@@ -23,6 +23,9 @@ def cmd_start(a):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
         procs.die("slug: 2-41 chars of a-z, 0-9 and '-'")
     cfg = config.accounts_config()
+    reviewer = getattr(a, "reviewer", None) or cfg["reviewer"]
+    if reviewer == "claude":
+        config.require_claude()
     if (config.TASKS / a.slug).exists():
         procs.die(f"task {a.slug!r} exists; pick another slug or clean it")
     busy = task_state.running_tasks()
@@ -55,6 +58,7 @@ def cmd_start(a):
           "guards": a.guard, "base_check": a.base_check,
           "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"],
           "review_angles": a.review_angles,
+          "reviewer": reviewer,
           "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
           "ci_enabled": a.ci or cfg["ci"], "ci_rounds": a.ci_rounds if a.ci_rounds is not None else 1,
           "ci_timeout_minutes": cfg["ci_timeout_minutes"],
@@ -113,9 +117,11 @@ def cmd_say(a):
     st = task_state.load(a.slug)
     scouting = st.get("kind") == "scout"
     angles = getattr(a, "review_angles", None)
+    reviewer = getattr(a, "reviewer", None)
     if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
-                     or a.no_base_check or angles is not None or a.ci or a.no_ci or a.ci_rounds is not None):
-        procs.die("scout is read-only; say --check, --check-timeout, --review, --review-angles, --fix-rounds, --ci, --no-ci, --ci-rounds and --no-base-check are not supported")
+                     or a.no_base_check or angles is not None or reviewer is not None
+                     or a.ci or a.no_ci or a.ci_rounds is not None):
+        procs.die("scout is read-only; say --check, --check-timeout, --review, --reviewer, --review-angles, --fix-rounds, --ci, --no-ci, --ci-rounds and --no-base-check are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -132,6 +138,8 @@ def cmd_say(a):
         st["ci_rounds"] = a.ci_rounds
     st["ci_timeout_minutes"] = cfg.get("ci_timeout_minutes", 30)
     st["review_angles"] = angles
+    if reviewer is not None:
+        st["reviewer"] = reviewer
     if a.no_check:
         st["check"] = None
         st["check_paths"] = []
@@ -154,6 +162,10 @@ def cmd_review(a):
         procs.die("scout is read-only; review is not supported")
     require_idle(st)
     cfg = config.accounts_config()
+    reviewer = getattr(a, "reviewer", None) or st["reviewer"]
+    if reviewer == "claude":
+        config.require_claude()
+    st["reviewer"] = reviewer
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     st["review_angles"] = a.review_angles
     supervisor.spawn(st, prompts.review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
@@ -207,6 +219,8 @@ def cmd_stats(a):
     st = task_state.load(a.slug)
     cfg = config.accounts_config()
     for entry in st["threads"] + st["reviews"]:
+        if entry.get("reviewer") == "claude":
+            continue
         account = accounts.account_named(cfg, entry["account"])
         path = threads.rollout_path(account["home"], entry["thread"])
         print(f"== {entry['account']}: {entry['thread']}", flush=True)
@@ -264,6 +278,8 @@ def cmd_clean(a):
             subprocess.run(config.GIT + ["branch", "-D", st["branch"]], cwd=repo, capture_output=True)
     cfg = config.accounts_config()
     for entry in st["threads"] + st["reviews"]:
+        if entry.get("reviewer") == "claude":
+            continue
         account = accounts.account_named(cfg, entry["account"])
         accounts.prepare_home(account)
         subprocess.run([config.codex_binary(), "archive", entry["thread"]], env=accounts.account_env(account), capture_output=True)
@@ -274,6 +290,7 @@ def cmd_clean(a):
 def cmd_accounts(a):
     cfg = config.accounts_config()
     print_accounts(accounts.snapshots(cfg), cfg)
+    print(accounts.claude_reviewer_line())
 
 
 def print_accounts(infos, cfg):

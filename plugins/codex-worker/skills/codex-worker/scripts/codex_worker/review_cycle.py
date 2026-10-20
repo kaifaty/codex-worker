@@ -1,9 +1,10 @@
 """Review angles, review turns and automatic fixes."""
+import json
 import re
 import subprocess
 from pathlib import Path
 
-from . import budgets, checking, clock, config, notifications, procs, prompts, task_state, threads, turns
+from . import budgets, checking, claude_review, clock, config, notifications, procs, prompts, task_state, telemetry_log, threads, turns
 
 
 def selected_review_angles(st, cfg):
@@ -73,6 +74,34 @@ def merge_reviews(angles):
     return {"verdict": verdict, "findings": findings, "summary": summary, "angles": angles}
 
 
+def claude_review_turn(st, cfg, prompt, stopped):
+    """Record one Claude attempt; only unavailability permits a Codex fallback."""
+    st["review_account"] = "claude"
+    with telemetry_log.record_phase(st, "review", stopped) as phase:
+        phase.reviewer = "claude"
+        entry = {"reviewer": "claude", "account": "claude", "thread": "",
+                 "started": clock.CLOCK.time(), "finished": None, "result": None,
+                 "round": len(st.get("rounds", [])),
+                 "angle": st.get("review_angle") or "correctness", "outcome": "running"}
+        st.setdefault("reviews", []).append(entry)
+        task_state.save(st)
+        last = config.TASKS / st["slug"] / "review.md"
+        last.unlink(missing_ok=True)
+        response = claude_review.run(st, cfg, prompt, stopped)
+        if response["outcome"] == "completed":
+            last.write_text(json.dumps(response["result"], ensure_ascii=False, indent=2), encoding="utf-8")
+        st["outcome"] = response["outcome"]
+        entry.update(result=response["result"], outcome=response["outcome"],
+                     finished=clock.CLOCK.time(), thread=response["telemetry"].get("session_id") or "")
+        phase.add_claude_usage(response["telemetry"])
+        if response["outcome"] == "unavailable":
+            entry["unavailable"] = response["reason"]
+        elif response.get("reason"):
+            st["error"] = response["reason"]
+        task_state.save(st)
+    return response["outcome"]
+
+
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
     st["review_account"] = None
     records = []
@@ -93,8 +122,16 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             started = clock.CLOCK.time()
             st.update(review_angle=angle, outcome="running")
             focused = prompt + f"\n\nReview angle: {angle}. {prompts.REVIEW_ANGLES[angle]}" if angle else prompt
-            turns.run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
-            reviews = st.get("reviews", [])[start:]
+            reviewer = st.get("reviewer", "codex")
+            if reviewer == "claude":
+                outcome = claude_review_turn(st, cfg, focused, stopped)
+                if outcome == "unavailable" and not stopped():
+                    reviewer = "codex"
+                    st["review_account"] = None
+                    turns.run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
+            else:
+                turns.run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
+            reviews = [entry for entry in st.get("reviews", [])[start:] if not entry.get("unavailable")]
             outcome = task_state.stop_outcome(st, stopped) or st["outcome"]
             result = reviews[-1].get("result") if reviews else None
             if reviews:
@@ -103,6 +140,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
                 reviews[-1]["outcome"] = outcome
             record = {"angle": angle or "correctness", "outcome": outcome, "result": result,
                       "account": notifications.current_turn_account(st),
+                      "reviewer": reviewer,
                       "started": started, "finished": clock.CLOCK.time()}
             if outcome == "refused":
                 record["refusal"] = st.get("refusal", "")

@@ -92,6 +92,8 @@ class PhaseTelemetry:
         self.rotation_start = len(st.get("rotations", []))
         self.capacity_start = st.get("capacity_retries", 0)
         self.check = None
+        self.reviewer = "codex"
+        self.cost_usd = None
 
     def add_usage(self, account, thread, before, path, offset, weekly_spent=0):
         if not thread:
@@ -114,6 +116,19 @@ class PhaseTelemetry:
                            "weekly_used_after": ((last or {}).get("weekly")
                                                  if (last or {}).get("weekly") is not None else weekly_before),
                            "weekly_spent": weekly_spent})
+
+    def add_claude_usage(self, telemetry):
+        self.reviewer = "claude"
+        self.cost_usd = telemetry.get("cost_usd")
+        usage = telemetry.get("usage") or {}
+        # Anthropic reports cached inputs separately; Codex input includes them.
+        inputs = [usage.get(key) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
+        tokens = {"input": sum(value for value in inputs if value is not None)
+                  if any(value is not None for value in inputs) else None,
+                  "cached_input": usage.get("cache_read_input_tokens"),
+                  "output": usage.get("output_tokens"), "reasoning": None}
+        self.usage.append({"account": None, "thread": None, "tokens": tokens,
+                           "weekly_used_before": None, "weekly_used_after": None, "weekly_spent": 0})
 
     def finish(self, outcome=None, result=None):
         if self.finished:
@@ -159,6 +174,10 @@ class PhaseTelemetry:
                    "tokens": tokens, "weekly_used_before": last.get("weekly_used_before"),
                    "weekly_used_after": last.get("weekly_used_after"), "usage": self.usage,
                    "weekly_spent": st.get("weekly_used_percent", 0) - self.weekly_started}
+            if self.phase == "review":
+                row["reviewer"] = self.reviewer
+                if self.reviewer == "claude":
+                    row.update(account=None, thread=None, weekly_spent=0, cost_usd=self.cost_usd)
             write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)

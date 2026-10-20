@@ -138,7 +138,7 @@ def _review_verdict(rows):
     # A refused angle supplies no review result. Match the supervisor's merged
     # verdict for a mix of completed and refused angles, while preserving an
     # unknown verdict for incomplete or wholly refused review rounds.
-    completed = [row for row in rows if row.get("outcome") != "refused"]
+    completed = [row for row in rows if row.get("outcome") not in ("refused", "unavailable")]
     if not completed or any(row.get("outcome") != "completed" or row.get("verdict") not in ("clean", "defects")
                             for row in completed):
         return None
@@ -146,7 +146,9 @@ def _review_verdict(rows):
 
 
 def _review_outcome(rows):
-    outcomes = [row.get("outcome") for row in rows]
+    outcomes = [row.get("outcome") for row in rows if row.get("outcome") != "unavailable"]
+    if not outcomes:
+        return "unavailable"
     if all(outcome in ("completed", "refused") for outcome in outcomes):
         return "completed" if "completed" in outcomes else "refused"
     return next((_identifier(outcome) for outcome in reversed(outcomes)
@@ -239,6 +241,9 @@ def _accumulate_checks_and_reviews(row, task, totals):
         elif outcome in CANCELLATION_OUTCOMES:
             task["outcome"] = outcome
     if phase == "review":
+        reviewer = "claude" if row.get("reviewer") == "claude" else "codex"
+        totals["reviewers"][reviewer]["reviews"] += 1
+        totals["reviewers"][reviewer]["cost_usd"] += _number(row.get("cost_usd")) or 0
         group = (_round(row.get("turn")), _round(row.get("round")))
         review_rows = task["_reviews"].setdefault(group, [])
         review_rows.append(row)
@@ -257,7 +262,8 @@ def _accumulate_rows(rows, identities):
     tasks = {}
     accounts = {}
     totals = {"tokens": _empty_tokens(), "active_seconds": 0, "turns": 0, "capacity_retries": 0,
-              "checks": Counter(), "reviews": Counter(), "findings_samples": 0}
+              "checks": Counter(), "reviews": Counter(), "findings_samples": 0,
+              "reviewers": {name: {"reviews": 0, "cost_usd": 0} for name in ("codex", "claude")}}
     for row, identity in zip(rows, identities):
         phase = row["phase"]
         task = tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
@@ -384,6 +390,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
                         "defect_fraction": _fraction(reviews["with_defects"], reviews["total"]),
                         "findings": reviews["findings"],
                         "average_findings": _fraction(reviews["findings"], totals["findings_samples"])},
+            "reviewers": totals["reviewers"],
             "fix_rounds_to_clean": dict(sorted(reconciled["fix_rounds"].items(), key=lambda item: int(item[0]))),
             "auto_fix_stops": dict(sorted(reconciled["auto_fix_stops"].items())),
             "outcomes": dict(sorted(reconciled["outcomes"].items())),
@@ -421,6 +428,9 @@ def render_report(report):
         f"Reviews with defects: {reviews['with_defects']}/{reviews['total']} "
         f"({_percent(reviews['defect_fraction'])}); average findings: "
         + ("n/a" if average is None else f"{average:.2f}"),
+        "Reviews by reviewer: " + "; ".join(
+            f"{name} {values['reviews']} (${values['cost_usd']:.2f})"
+            for name, values in summary["reviewers"].items()),
         "Fix rounds to clean: " + _distribution(summary["fix_rounds_to_clean"]),
         "Auto-fix stops: " + _distribution(summary["auto_fix_stops"]),
         "Outcomes: " + _distribution(summary["outcomes"]),
