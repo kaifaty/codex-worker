@@ -25,9 +25,10 @@ subscription; its usage does not add to the task's Codex weekly percentage. `wai
 The supervisor removes inherited `CLAUDE*` and `ANTHROPIC*` environment variables, reads the reviewer
 token from macOS Keychain immediately before launch, and supplies the isolated config directory and
 token through the environment. Claude runs with `--permission-mode dontAsk`, allows
-`Read,Grep,Glob,Bash`, and disallows `Edit,Write,NotebookEdit`. The supervisor compares `HEAD` and
-`git status --porcelain` before and after review: any change fails with `reviewer modified the
-worktree`, preserving the worktree for inspection.
+`Read,Grep,Glob,Bash`, and disallows `Edit,Write,NotebookEdit`. The supervisor disables Git filters
+and compares `HEAD`, `git status --porcelain`, and raw contents of tracked and nonignored untracked
+files before and after review: any change fails with `reviewer modified the worktree`, preserving
+the worktree for inspection.
 
 A rejected rate limit, 401/403 authentication failure, missing executable during the cycle, error
 result, or invalid structured output falls back to an ordinary Codex review. `wait` reports

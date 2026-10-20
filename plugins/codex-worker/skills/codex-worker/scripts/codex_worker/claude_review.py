@@ -1,17 +1,55 @@
 """One isolated Claude Code review, with no persisted CLI output or credentials."""
+import hashlib
 import json
 import math
 import os
 import selectors
+import stat
 import subprocess
+import threading
 from pathlib import Path
 
 from . import clock, config, procs, result_schema, task_state
 
 
 def worktree_snapshot(st):
-    return tuple(procs.sh(config.GIT + args, cwd=st["worktree"], errors="surrogateescape")
-                 for args in (["rev-parse", "HEAD"], ["status", "--porcelain"]))
+    # Status reads file contents, so disable every configured filter, including
+    # git-lfs. Worker-written filter scripts must not run in the supervisor.
+    configured = subprocess.run(config.GIT + ["config", "--null", "--name-only", "--get-regexp",
+                                             r"^filter\..*\.(clean|smudge|process)$"],
+                                cwd=st["worktree"], text=True, capture_output=True,
+                                errors="surrogateescape")
+    if configured.returncode not in (0, 1):
+        configured.check_returncode()
+    snapshot_git = list(config.GIT)
+    drivers = {key[len("filter."):key.rfind(".")] for key in configured.stdout.split("\0") if key}
+    for driver in sorted(drivers):
+        for command in ("clean=", "smudge=", "process=", "required=false"):
+            snapshot_git += ["-c", f"filter.{driver}.{command}"]
+    head, status = (procs.sh(snapshot_git + args, cwd=st["worktree"], errors="surrogateescape")
+                    for args in (["rev-parse", "HEAD"], ["status", "--porcelain", "-z"]))
+    names = procs.sh(snapshot_git + ["ls-files", "--cached", "--others", "--exclude-standard", "-z"],
+                    cwd=st["worktree"], errors="surrogateescape")
+    files = []
+    for name in sorted(set(names.split("\0")) - {""}):
+        path = Path(st["worktree"]) / name
+        try:
+            mode = path.lstat().st_mode
+        except FileNotFoundError:
+            files.append((name, None, None))
+            continue
+        if stat.S_ISLNK(mode):
+            contents = os.readlink(path)
+        elif stat.S_ISREG(mode):
+            digest = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(65536), b""):
+                    digest.update(chunk)
+            contents = digest.digest()
+        else:
+            raise RuntimeError("unsupported worktree file type: " + name)
+        files.append((name, mode, contents))
+    return head, status, files
 
 
 def numeric(value):
@@ -50,7 +88,7 @@ def event_result(event, telemetry, token):
             value = event.get(key)
             if isinstance(value, str) and token not in value:
                 telemetry[key] = value
-    if ((kind == "system" and event.get("subtype") == "api_retry") or kind == "result"):
+    if kind == "system" and event.get("subtype") == "api_retry":
         if event.get("error_status", event.get("api_error_status")) in (401, 403):
             return None, "authentication failed"
     if kind == "rate_limit_event":
@@ -70,6 +108,8 @@ def event_result(event, telemetry, token):
         telemetry["cost_usd"] = event["total_cost_usd"]
     if type(event.get("num_turns")) is int:
         telemetry["num_turns"] = event["num_turns"]
+    if event.get("error_status", event.get("api_error_status")) in (401, 403):
+        return None, "authentication failed"
     if event.get("is_error"):
         return None, "review failed"
     result = event.get("structured_output")
@@ -137,7 +177,7 @@ def run(st, cfg, prompt, stopped):
     started = clock.CLOCK.monotonic()
     minutes = cfg["max_review_minutes"]
     st["codex_pid"] = proc.pid
-    buffer, eof = b"", False
+    buffer, eof, termination = b"", False, None
     try:
         task_state.save(st)
         with selectors.DefaultSelector() as selector:
@@ -164,27 +204,34 @@ def run(st, cfg, prompt, stopped):
                         try:
                             event = json.loads(line)
                         except (ValueError, UnicodeError):
-                            response["reason"] = "invalid JSON output"
-                            break
+                            response["reason"] = response["reason"] or "invalid JSON output"
+                            response["result"] = None
+                            continue
                         result, reason = event_result(event, response["telemetry"], token)
-                        if result is not None:
-                            response["result"] = result
                         if reason is not None:
-                            response["reason"] = reason
-                            break
-                    if response["reason"]:
-                        break
-                if response["reason"]:
-                    break
+                            response["reason"] = response["reason"] or reason
+                            response["result"] = None
+                        elif result is not None and response["reason"] is None:
+                            response["result"] = result
+                if response["reason"] and termination is None:
+                    # Interrupt once, then drain buffered and shutdown output:
+                    # keep reading while shutdown waits, so a large final result
+                    # can flush its usage without filling the stdout pipe.
+                    termination = threading.Thread(target=procs.terminate, args=(proc,))
+                    termination.start()
             else:
-                if proc.wait() != 0:
-                    response["reason"] = "review failed"
-                elif response["result"] is None:
-                    response["reason"] = "invalid structured output"
-                else:
-                    response["outcome"] = "completed"
+                if response["reason"] is None:
+                    if proc.wait() != 0:
+                        response["reason"] = "review failed"
+                    elif response["result"] is None:
+                        response["reason"] = "invalid structured output"
+                    else:
+                        response["outcome"] = "completed"
     finally:
-        procs.terminate(proc)
+        if termination is None:
+            procs.terminate(proc)
+        else:
+            termination.join()
         proc.stdout.close()
         st.pop("codex_pid", None)
         task_state.save(st)

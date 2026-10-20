@@ -1,4 +1,5 @@
 """Review angles, review turns and automatic fixes."""
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -84,7 +85,11 @@ def claude_review_turn(st, cfg, prompt, stopped):
                  "angle": st.get("review_angle") or "correctness", "outcome": "running"}
         st.setdefault("reviews", []).append(entry)
         task_state.save(st)
+        last = config.TASKS / st["slug"] / "review.md"
+        last.unlink(missing_ok=True)
         response = claude_review.run(st, cfg, prompt, stopped)
+        if response["outcome"] == "completed":
+            last.write_text(json.dumps(response["result"], ensure_ascii=False, indent=2), encoding="utf-8")
         st["outcome"] = response["outcome"]
         entry.update(result=response["result"], outcome=response["outcome"],
                      finished=clock.CLOCK.time(), thread=response["telemetry"].get("session_id") or "")

@@ -76,15 +76,18 @@ if mode == "auth_error":
           "api_error_status": status})
     sys.exit(1)
 limits = run.get("limits", fixture.get("limits"))
-if limits:
+if limits and mode != "rejected_buffered":
     emit({"type": "rate_limit_event", "rate_limit_info": limits})
+if mode == "rejected_shutdown":
+    while not stopped[0]:
+        time.sleep(0.02)
 if mode == "hold":
     trace({"command": "holding"})
     while not stopped[0]:
         time.sleep(0.02)
     sys.exit(130)
 if mode == "modify":
-    Path("reviewer-change.txt").write_text("Reviewer must leave this visible.\n")
+    Path(run.get("path", "reviewer-change.txt")).write_text("Reviewer must leave this visible.\n")
 if mode == "move_head":
     import subprocess
     subprocess.run(["git", "commit", "--allow-empty", "-qm", "Reviewer moved HEAD"], check=True)
@@ -101,7 +104,11 @@ result = {"type": "result", "subtype": "success", "is_error": mode == "is_error"
           "total_cost_usd": run.get("cost_usd", 0.125)}
 emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "StructuredOutput",
       "input": run.get("reply")}]}})
-emit(result)
+if mode == "rejected_buffered":
+    os.write(1, (json.dumps({"type": "rate_limit_event", "rate_limit_info": limits}) + "\n"
+                + json.dumps(result) + "\n").encode())
+else:
+    emit(result)
 '''
 
 
@@ -198,6 +205,10 @@ class ClaudeReviewTests(RotationTestCase):
             self.assertEqual(set(schema["properties"]), set(self.review_result()))
         self.assertEqual(len(self.security_trace_path.read_text().splitlines()), 2)
         self.assert_claude_review_telemetry(2)
+        status = self.cli("status", "claude-fix")
+        self.assertIn(self.review_result(False)["summary"], status)
+        self.assertEqual(json.loads((self.home / "claude-tasks" / "claude-fix" / "review.md").read_text()),
+                         state["reviews"][-1]["result"])
         self.assertNotIn(TEST_TOKEN, start_output + output)
         for directory in (self.home, self.other):
             for path in directory.rglob("*"):
@@ -279,6 +290,35 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(len(self.review_invocations()), 1)
         self.assertRegex(output, r"== reviewer claude unavailable: [^\n]+; review by codex")
 
+    def test_claude_rejected_preserves_buffered_and_shutdown_usage(self):
+        for mode in ("rejected_buffered", "rejected_shutdown"):
+            with self.subTest(mode=mode):
+                reply = self.review_result(False)
+                if mode == "rejected_shutdown":
+                    # The final JSON exceeds pipe capacity and must be read
+                    # while the supervisor waits for graceful shutdown.
+                    reply["summary"] = "Large final review. " * 20000
+                self.claude_fixture(runs=[{"mode": mode, "reply": reply,
+                                           "limits": {"status": "rejected"}}])
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "reply": self.work_result()},
+                    {"mode": "complete", "reply": self.review_result(False)}])
+                slug = "claude-" + mode.replace("_", "-")
+                self.start(slug, "--review", "--reviewer", "claude")
+                output = self.wait(slug)
+                self.assertIn("== reviewer claude unavailable: usage limit; review by codex", output)
+                rows = [row for row in self.phase_telemetry_journal()
+                        if row["slug"] == slug and row["phase"] == "review"]
+                self.assertEqual([row["reviewer"] for row in rows], ["claude", "codex"])
+                self.assertEqual(rows[0]["cost_usd"], 0.125)
+                self.assertEqual(rows[0]["tokens"], {"input": 150, "cached_input": 30,
+                                                     "output": 40, "reasoning": None})
+                self.assertEqual(self.state(slug)["reviews"][0]["outcome"], "unavailable")
+                self.assertIsNone(self.state(slug)["reviews"][0]["result"])
+                report = json.loads(self.cli("report", "--slug", slug, "--json"))
+                self.assertEqual(report["summary"]["reviewers"]["claude"]["cost_usd"], 0.125)
+
     def test_claude_missing_binary_is_a_clear_start_and_review_error(self):
         self.claude_fixture()
         self.start("claude-missing-review")
@@ -312,6 +352,51 @@ class ClaudeReviewTests(RotationTestCase):
                 if mode == "modify":
                     self.assertEqual((Path(state["worktree"]) / "reviewer-change.txt").read_text(),
                                      "Reviewer must leave this visible.\n")
+
+    def test_claude_snapshot_does_not_execute_worker_written_git_filters(self):
+        self.claude_fixture(sandbox="workspace")
+        self.commit_fixture({".gitattributes": "tracked.txt filter=project\n",
+                             "clean.sh": "#!/bin/sh\ncat\n"})
+        self.git("config", "filter.project.clean", "/bin/sh clean.sh")
+        marker = self.root / "outside-claude-worktree.marker"
+        marker.write_text("untouched\n")
+        script = "#!/bin/sh\nprintf 'filter executed\\n' > " + shlex.quote(str(marker)) + "\ncat\n"
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "worker change\n", "clean.sh": script},
+            "reply": self.work_result(commit_message="Do not run a worker-written filter")}])
+        self.start("claude-filter-guard", "--review", "--reviewer", "claude")
+        output = self.wait("claude-filter-guard")
+        state = self.state("claude-filter-guard")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertIn("filter driver project is configured", state["publish"]["error"])
+        self.assertIn("== review by claude", output)
+        self.assertEqual(marker.read_text(), "untouched\n")
+        self.assertEqual((Path(state["worktree"]) / "tracked.txt").read_text(), "worker change\n")
+
+    def test_claude_overwriting_dirty_or_untracked_contents_fails(self):
+        for path in ("tracked.txt", "reviewer-change.txt"):
+            with self.subTest(path=path):
+                self.claude_fixture(runs=[{"mode": "modify", "path": path,
+                                           "reply": self.review_result(False)}])
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {path: "Codex work must be preserved.\n"},
+                    "reply": self.work_result()}])
+                slug = "claude-dirty-" + path.replace(".txt", "")
+                self.start(slug)
+                self.wait(slug)
+                worktree = self.state(slug)["worktree"]
+                before = self.git("-C", worktree, "status", "--porcelain")
+                self.cli("review", slug, "--reviewer", "claude")
+                output = self.cli("wait", slug, "--timeout", "10")
+                state = self.state(slug)
+                self.assertEqual(self.git("-C", worktree, "status", "--porcelain"), before)
+                self.assertEqual((Path(worktree) / path).read_text(), "Reviewer must leave this visible.\n")
+                self.assertEqual(state["outcome"], "failed")
+                self.assertIn("reviewer modified the worktree", output)
+                self.assertIsNone(state["reviews"][-1]["result"])
+                self.assertFalse(self.review_invocations())
+                self.assertNotIn("review by codex", output)
 
     def test_stop_interrupts_claude_review_process_group_without_fallback(self):
         self.claude_fixture(runs=[{"mode": "hold"}])
