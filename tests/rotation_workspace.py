@@ -193,6 +193,66 @@ class WorkspaceTests(RotationTestCase):
         self.assertIn("PR: " + publication["pr"], output)
         self.assertNotIn(result["pr"], output)
 
+    def test_pr_supervisor_resolves_github_ssh_aliases_and_preserves_other_remotes(self):
+        self.configure(language="en")
+        _ = self.repo
+        real_git = shutil.which("git", path=self.env["PATH"])
+        self.assertIsNotNone(real_git)
+        # Keep fixture transport local while exposing the requested publication URL.
+        fake_git = self.root / "git"
+        fake_git.write_text(
+            "#!" + PYTHON + "\n"
+            "import os, sys\n"
+            "if sys.argv[-3:] == ['remote', 'get-url', 'origin']:\n"
+            "    print(os.environ['CODEX_FAKE_REMOTE_URL'])\n"
+            "else:\n"
+            "    os.execv(" + repr(real_git) + ", [" + repr(real_git) + "] + sys.argv[1:])\n")
+        fake_git.chmod(0o700)
+        ssh_trace = self.root / "ssh-trace.jsonl"
+        fake_ssh = self.root / "ssh"
+        fake_ssh.write_text(
+            "#!" + PYTHON + "\n"
+            "import json, os, sys\n"
+            "with open(" + repr(str(ssh_trace)) + ", 'a') as stream:\n"
+            "    stream.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+            "assert len(sys.argv) == 3 and sys.argv[1] == '-G'\n"
+            "print('user git\\nhostname ' + os.environ['CODEX_FAKE_SSH_HOSTNAME'])\n")
+        fake_ssh.chmod(0o700)
+        cases = (
+            ("scp-alias", "git@github-alias:owner/repo.git", "github.com", "github.com/owner/repo",
+             ["-G", "github-alias"]),
+            ("url-alias", "ssh://git@github-alias:2222/owner/repo.git", "github.com", "github.com/owner/repo",
+             ["-G", "github-alias"]),
+            ("scp-github", "git@github.com:owner/repo.git", "github.com", "git@github.com:owner/repo.git", None),
+            ("url-github", "ssh://git@github.com/owner/repo.git", "github.com", "ssh://git@github.com/owner/repo.git", None),
+            ("other-host", "git@forgejo-alias:owner/repo.git", "forgejo.example", "git@forgejo-alias:owner/repo.git",
+             ["-G", "forgejo-alias"]),
+        )
+        for name, remote, hostname, expected, ssh_args in cases:
+            with self.subTest(remote=remote):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                ssh_trace.unlink(missing_ok=True)
+                self.env.update(CODEX_FAKE_REMOTE_URL=remote, CODEX_FAKE_SSH_HOSTNAME=hostname)
+                self.account(self.home, "A", self.reset, runs=[{
+                    "mode": "complete", "write_files": {"tracked.txt": name + "\n"},
+                    "commit_files": ["tracked.txt"], "push": True,
+                    "reply": self.work_result(pr_title="Publish through SSH aliases", pr_body="Publish this change.")}])
+                before = len(self.gh_invocations())
+                slug = "pr-ssh-" + name
+                self.start(slug)
+                self.wait(slug)
+                publication = self.state(slug)["publish"]
+                self.assertEqual((publication["action"], publication["error"]), ("created", ""))
+                self.assertTrue(publication["pr"])
+                calls = self.gh_invocations()[before:]
+                self.assertEqual([event["argv"][:2] for event in calls],
+                                 [["repo", "view"], ["pr", "list"], ["pr", "create"]])
+                self.assertEqual(calls[0]["argv"][2], expected)
+                for event in calls[1:]:
+                    self.assertEqual(event["argv"][event["argv"].index("--repo") + 1], expected)
+                ssh_calls = [json.loads(line) for line in ssh_trace.read_text().splitlines()] if ssh_trace.exists() else []
+                self.assertEqual(ssh_calls, [ssh_args] if ssh_args else [])
+
     def test_pr_supervisor_ignores_fork_prs_with_the_same_branch_name(self):
         self.configure(language="en")
         for own_state in ("OPEN", "CLOSED", "MERGED", None):

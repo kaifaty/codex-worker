@@ -13,6 +13,43 @@ from rotation_support import PYTHON, SCRIPT, SKILL, RotationTestCase
 
 
 class ResultScoutConfigTests(RotationTestCase):
+    def test_start_custom_branch_is_used_for_worktree_rules_publication_and_clean(self):
+        self.configure(language="en", sandbox="workspace")
+        self.account(self.home, "A", self.reset, runs=[{
+            "mode": "complete", "write_files": {"tracked.txt": "implemented\n"},
+            "reply": self.work_result(commit_message="Implement the custom branch task")}])
+        self.start("custom-branch", "--branch", "feat/x")
+        self.wait("custom-branch")
+        state = self.state("custom-branch")
+        worktree = self.home / "worktrees" / "claude-custom-branch" / self.repo.name
+        self.assertEqual(state["branch"], "feat/x")
+        self.assertEqual(state["worktree"], str(worktree))
+        self.assertEqual(self.git("-C", str(worktree), "branch", "--show-current"), "feat/x")
+        self.assertIn("on branch `feat/x`", self.invocations()[0]["prompt"])
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["action"], "created")
+        create, = [event for event in self.gh_invocations() if event["argv"][:2] == ["pr", "create"]]
+        self.assertEqual(create["argv"][create["argv"].index("--head") + 1], "feat/x")
+        self.cli("clean", "custom-branch")
+        self.assertFalse(worktree.exists())
+        self.assertEqual(self.git("branch", "--list", "feat/x"), "")
+
+    def test_start_rejects_invalid_branch_before_creating_worktree(self):
+        self.configure()
+        trace = self.record_git_calls()
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "bad-branch",
+                                 "--brief", str(self.brief), "--repo", str(self.repo),
+                                 "--branch", "bad..name"],
+                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid branch name: 'bad..name'", result.stderr)
+        self.assertFalse((self.home / "worktrees" / "claude-bad-branch").exists())
+        self.assertFalse((self.home / "claude-tasks" / "bad-branch").exists())
+        calls = [json.loads(line)["argv"] for line in trace.read_text().splitlines()]
+        self.assertTrue(any(call[-3:] == ["check-ref-format", "--branch", "bad..name"] for call in calls))
+        self.assertFalse(any("worktree" in call for call in calls))
+        self.assertEqual(self.invocations(), [])
+
     def test_typed_work_result_prints_summary_checks_pr_and_persists_for_status(self):
         self.configure()
         self.configure_notify()

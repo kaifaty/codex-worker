@@ -1,8 +1,10 @@
 """Completed work turns and supervisor publication."""
 import json
+import re
 import shutil
 import subprocess
 import tempfile
+import urllib.parse
 
 from . import clock, config, sandboxing, task_state
 
@@ -94,6 +96,17 @@ def publish_pr(st, stopped):
             return
         stage = "origin remote"
         remote_url = run(config.GIT + ["remote", "get-url", "origin"])
+        ssh_url = urllib.parse.urlsplit(remote_url) if remote_url.startswith("ssh://") else None
+        scp_url = re.fullmatch(r"[^/@:]+@([^/:]+):(.+)", remote_url) if ssh_url is None else None
+        host = ssh_url.hostname if ssh_url is not None else scp_url[1] if scp_url else None
+        path = ssh_url.path if ssh_url is not None else scp_url[2] if scp_url else ""
+        if host and host.casefold() != "github.com":
+            try:
+                ssh_config = run(["ssh", "-G", host])
+            except (OSError, subprocess.CalledProcessError):
+                ssh_config = ""
+            if any(line.split() == ["hostname", "github.com"] for line in ssh_config.splitlines()):
+                remote_url = "github.com/" + path.lstrip("/").removesuffix(".git")
         stage = "gh repo view"
         repository = json.loads(run([gh, "repo", "view", remote_url, "--json", "nameWithOwner"]))["nameWithOwner"]
         stage = "gh pr list"

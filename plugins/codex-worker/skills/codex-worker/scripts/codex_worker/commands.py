@@ -39,7 +39,10 @@ def cmd_start(a):
     if sandbox == "workspace":
         rules += "\n\n" + sandboxing.sandbox_rules(cfg)
     repo = main_repo(a.repo)
-    branch = f"codex/{a.slug}"
+    branch = a.branch if a.branch is not None else f"codex/{a.slug}"
+    if subprocess.run(config.GIT + ["check-ref-format", "--branch", branch], cwd=repo,
+                      capture_output=True).returncode:
+        procs.die(f"invalid branch name: {branch!r}")
     wt = config.WORKTREES / f"claude-{a.slug}" / repo.name
     if wt.exists():
         procs.die(f"{wt} exists")

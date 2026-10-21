@@ -1,6 +1,6 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
   codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
@@ -98,6 +98,8 @@ OPTION_REGISTRY = (
     {"names": ("--base",),
      "argparse": {"default": None, "help": "default: the remote's default branch (origin/HEAD)"},
      "synopsis": "[--base origin/<branch>]", "commands": {"start": {}}},
+    {"names": ("--branch",), "argparse": {"metavar": "NAME", "help": "task branch name (default: codex/<slug>)"},
+     "synopsis": "[--branch NAME]", "commands": {"start": {}}},
     {"names": ("--file",), "argparse": {},
      "synopsis": "--file FILE", "commands": {"say": {}}},
     {"names": ("--effort",), "argparse": {"default": None},
