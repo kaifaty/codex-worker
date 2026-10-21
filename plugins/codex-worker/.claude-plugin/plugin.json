@@ -1,6 +1,6 @@
 {
   "name": "codex-worker",
-  "version": "1.21.0",
+  "version": "1.21.1",
   "description": "Let Claude plan and review while Codex implements in an isolated git worktree, with optional subscription rotation and reset waiting.",
   "author": {
     "name": "kaifaty"
