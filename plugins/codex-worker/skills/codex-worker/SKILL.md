@@ -73,6 +73,14 @@ builds on another). Before starting, split any task that promises more than abou
 Decisions that belong to the user are not Codex's to make: put them in the brief as settled facts, or ask
 the user first.
 
+Put these in "Done when" when they apply:
+
+- Network calls, retries or caches: the failure paths. An error is not an empty result, a lost response is
+  reconciled before a retry, and side effects are idempotent.
+- Changes to shared code: the neighbouring paths that must behave as on the base branch, with a test that
+  pins them.
+- Wording that matters (docs, messages, UI text): the exact text, marked as verbatim.
+
 ## Commands
 
 Set the script path for this skill:
@@ -116,6 +124,8 @@ Pass `--max-minutes M` on every implementation `start` and `say`, sized to the t
 `--max-weekly P` to bound weekly usage; allow extra budget for parallel work on one account.
 See [budgets.md](references/budgets.md) for cap mechanics and [telemetry.md](references/telemetry.md)
 for usage accounting. Saved checks and their output are described in [checks.md](references/checks.md).
+A script that `--check` runs must live in the repository or a stable directory such as
+`~/.codex/checks/<repo>/`, never in a session scratchpad, which is deleted with its session.
 
 ## The loop
 
@@ -167,6 +177,8 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
   `say` instruction to remove the extra mechanism; accept the finding as P3 or record an issue; or
   allow one focused round with `say <slug> "…" --max-minutes M --review --fix-rounds 1`.
 - After two rounds on the same point, take it to the user.
+- After two `budget_exhausted` turns in a row, don't send another continuation. Split what remains into
+  new briefs that each fit one turn.
 - A Codex PR you started through this skill is your work for the repo's merge rules; still ask the user
   before merging anything they asked to see first, or anything that breaks what is in use.
 
