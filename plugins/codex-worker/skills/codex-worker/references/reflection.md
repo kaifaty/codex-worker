@@ -65,7 +65,7 @@ before writing them; repository edits follow that repository's merge rules.
 
 ## Batch
 
-A scheduled session runs this every Monday. One record rarely shows a pattern; most lessons so far came
+A scheduled session runs this weekly. One record rarely shows a pattern; most lessons so far came
 from comparing records.
 
 1. Read `.archive/INDEX.md` and the newest `.archive/batch-*.md`. Take the records archived after its
