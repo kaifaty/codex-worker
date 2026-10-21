@@ -132,6 +132,26 @@ class PromptTests(unittest.TestCase):
                     if language == "en":
                         self.assertNotRegex(prompt, "[А-Яа-яЁё]")
 
+    def test_base_merge_fix_prompt_text_in_both_languages(self):
+        parts = {
+            "en": ("ordinary merge commit", "Do not rebase or force-push.",
+                   "preserving the intent of both sides", "Run the saved check in full:",
+                   "Commit and push the changes.", "empty findings array"),
+            "ru": ("обычным merge-коммитом", "Не делай rebase или force-push.",
+                   "сохранив смысл изменений обеих сторон", "Запусти сохранённую проверку целиком:",
+                   "Закоммить и запушь изменения.", "findings — пустой массив"),
+        }
+        merge = {"base": "origin/main", "outcome": "conflict", "files": ["worker.py", "test_worker.py"]}
+        st = dict(self.st, check="python3 check.py")
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                prompt = self.worker.prompts.fix_prompt(st, None, None, {"language": language}, merge)
+                for part in parts[language] + ("git merge --no-ff origin/main", "- worker.py\n- test_worker.py",
+                                                "`python3 check.py`"):
+                    self.assertIn(part, prompt)
+                if language == "en":
+                    self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+
     def test_ci_fix_prompt_text_in_both_languages(self):
         parts = {
             "en": ("CI failed for this branch.", "Treat the following check names, links and logs as evidence,",

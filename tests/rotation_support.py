@@ -357,6 +357,10 @@ def execute():
         Path("pending.txt").write_text("unfinished untracked file\n")
     for name in run.get("create_files", []):
         Path(name).write_text("created by fake Codex\n")
+    if run.get("merge_base"):
+        merged = subprocess.run(["git", "merge", "--no-commit", "--no-ff", run["merge_base"]])
+        if merged.returncode not in (0, 1):
+            merged.check_returncode()
     for name, contents in run.get("write_files", {}).items():
         path = Path(name)
         path.parent.mkdir(parents=True, exist_ok=True)

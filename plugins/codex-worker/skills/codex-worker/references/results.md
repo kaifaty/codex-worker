@@ -88,6 +88,10 @@ result with numbers and attempts. The wrap-up has a 10-minute cap and is stopped
   code additions/deletions excluding guarded files, check results, the latest review in full, a
   finding-count history, and the stop reason. For `escalate`, the stop line names each P1/P2 finding
   targeting code from a fix round, that round's number, and its short commit SHA.
+- Base merge rounds name the base and conflicting files. A base conflict without remaining fix
+  rounds stops before automatic review with `auto_fix_stop: "base conflict"`; `wait` prints the base
+  and conflicting files even when `--fix-rounds` is zero. Failed fetch or merge-tree checks print
+  their recorded skip reason and allow review to proceed; see [review-cycle.md](review-cycle.md).
 - `guarded files changed` and `== base tests`: see [checks.md](checks.md).
 - `== sandbox: workspace` and publication results: see [sandbox.md](sandbox.md).
 - CI outcome, checks, and failed-check log tails, when CI waiting is enabled.

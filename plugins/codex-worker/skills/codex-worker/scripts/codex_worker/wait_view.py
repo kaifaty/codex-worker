@@ -88,6 +88,9 @@ def wait_round_lines(st):
                            for severity in ("P1", "P2", "P3") if any(f["severity"] == severity for f in findings))
         source = (f"{len(findings)} findings" + (f" ({counts})" if counts else "")
                   if entry.get("review") is not None else "check failure")
+        if entry.get("base_merge"):
+            merge = entry["base_merge"]
+            source = f"base merge {merge['base']}: " + ", ".join(merge["files"])
         decisions = entry.get("decisions", [])
         fixed, rejected = (sum(d["decision"] == action for d in decisions) for action in ("fixed", "rejected"))
         code = entry.get("code")
@@ -115,6 +118,9 @@ def wait_check_lines(st):
 
 
 def wait_review_lines(st, slug):
+    for merge in st.get("base_merges", []):
+        if merge["outcome"] == "skipped":
+            yield f"== base merge {merge['base']}: skipped ({merge['reason']})"
     if st.get("review_skipped"):
         yield "== review skipped: " + st["review_skipped"]
     if st.get("auto_fix_stop") == "escalate":
@@ -173,6 +179,9 @@ def wait_stop_lines(st):
         trajectory = " → ".join(str(len(result["findings"])) for result in results if result is not None) or "unknown"
         reason = st.get("auto_fix_stop", st.get("outcome", "unknown"))
         yield f"== auto-fix: {len(st.get('rounds', []))} rounds, findings {trajectory}; stop: {reason}"
+    if st.get("auto_fix_stop") == "base conflict":
+        merge = next(item for item in reversed(st["base_merges"]) if item["outcome"] == "conflict")
+        yield f"== auto-fix: stop: base conflict — {merge['base']}: " + ", ".join(merge["files"])
     failed = [e for e in threads.events(st)[st.get("exec_event_start", st.get("event_start", 0)):]
               if e.get("type") in ("turn.failed", "error") and account_rotation.refusal_message(e) is None]
     if failed:

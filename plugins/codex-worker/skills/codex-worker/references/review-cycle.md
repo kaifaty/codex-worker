@@ -11,6 +11,19 @@ check, or after an unstructured result, for compatibility. Every review prompt n
 result of the passing saved check and tells the reviewer not to rerun the full suite; only focused
 checks that confirm a specific finding run again.
 
+Before the first automatic review and every repeat review after a fix, the supervisor fetches the
+task's base and runs `git merge-tree --write-tree HEAD <base>`. A clean merge proceeds to review
+without changing the task branch. If fetching or merge-tree fails (for example, without network
+access or with an older Git), the supervisor records the reason, skips this check and proceeds to
+review. Standalone `review`, the CI cycle and PR publication do not run this check.
+
+When the base conflicts and a `--fix-rounds` round remains, the supervisor uses that round to merge
+the base instead of starting review. The implementation prompt lists the conflicting files and asks
+for an ordinary merge commit, without rebase or force-push, preserving the intent of both sides and
+running the saved check in full. The merge is recorded in `rounds` and counts toward the same fix
+limit. The saved check and review then follow as after any other fix round, including another base
+merge check before review.
+
 ## Review provider
 
 `start`, `say`, and `review` accept `--reviewer codex|claude`. The default is the `reviewer` setting
@@ -100,3 +113,7 @@ The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop:
 limit, escalation or the budget gate described above,
 a review where every angle refused (`auto_fix_stop: "review refused"`), an incomplete implementation
 result, or a non-completed [turn outcome](results.md#turn-outcomes).
+
+A base conflict without an available fix round stops before review with
+`auto_fix_stop: "base conflict"`, including when `--fix-rounds` is omitted or zero. `wait` names the
+base and conflicting files so Claude can decide how to continue.
