@@ -82,7 +82,7 @@ def review_prompt(st, cfg=None):
                      "if you raise one again, explain why its rejection reason is wrong.\n"))
         context += "\n\n".join(rejected) + "\n"
     if ru:
-        return (f"Проведи ревью изменений задачи: git diff {shlex.quote(st['base'])}.\n"
+        return (f"Проведи ревью изменений задачи: git diff $(git merge-base {shlex.quote(st['base'])} HEAD).\n"
                 f"Бриф задачи — в файле {brief}. Прочитай его и сверяйся с разделом «Готово, когда».\n"
                 "Ищи только реальные дефекты: неверное поведение, невыполненные пункты брифа, "
                 "сломанные или фиктивные проверки, опасные побочные эффекты, гонки.\n"
@@ -98,7 +98,7 @@ def review_prompt(st, cfg=None):
                 "Файлы не меняй, ничего не коммить. Ответь JSON по схеме ревью: verdict clean, если "
                 "дефектов нет, иначе defects. Находки нумеруй F1, F2 и далее; severity P1/P2/P3, "
                 "file, line, title, detail и verify. При clean findings пуст; summary — краткий итог.")
-    return (f"Review the task changes: git diff {shlex.quote(st['base'])}.\n"
+    return (f"Review the task changes: git diff $(git merge-base {shlex.quote(st['base'])} HEAD).\n"
             f"Read the task brief at {brief} and check its acceptance criteria.\n"
             "Look only for real defects: incorrect behavior, unmet brief requirements, "
             "broken or ineffective checks, dangerous side effects, and races.\n"
