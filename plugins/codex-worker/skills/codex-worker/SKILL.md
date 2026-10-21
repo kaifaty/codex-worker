@@ -96,7 +96,7 @@ Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolate
 
 | Step | Command arguments |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--effort E] [--sandbox off\|workspace] --max-minutes M [--max-weekly P] --review [--review-angles LIST] --fix-rounds 2 [--ci] [--ci-rounds N] --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--guard` is repeatable) |
+| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--branch NAME] [--effort E] [--sandbox off\|workspace] --max-minutes M [--max-weekly P] --review [--review-angles LIST] --fix-rounds 2 [--ci] [--ci-rounds N] --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--branch` overrides `codex/<slug>` and must pass `git check-ref-format --branch`; `--guard` is repeatable) |
 | Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; read-only in the existing directory (default `.`), no worktree or branch |
 | Wait for the cycle | `wait <slug> [--through-sleep]` as a **background** Bash command: it re-invokes you when the whole review/fix cycle ends; read its [output](references/results.md#what-wait-prints) |
 | Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M [--max-weekly P] [--effort E] [--review] [--review-angles LIST] [--fix-rounds 2] [--ci\|--no-ci] [--ci-rounds N]` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
@@ -109,7 +109,7 @@ Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolate
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
 | Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock` |
 
-The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug>`; state and logs are in
+The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug>` (or `--branch NAME`); state and logs are in
 `~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
