@@ -161,8 +161,9 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
    check does not replace reading the diff.
 4. Problems found, or findings left after the round limit → one `say` with all of them, each with what's
    wrong, what to do and how it is checked, with `--max-minutes M --review --fix-rounds 2 --ci` for another
-   bounded cycle. Decide yourself whether P3 findings and work rejected as `out of scope` belong in a
-   separate task, and record deferred work in issues when appropriate.
+   bounded cycle. A `say` that merges the base keeps the saved check and `--fix-rounds`: name extra tests in
+   addition to the check, never instead of it. Decide yourself whether P3 findings and work rejected as
+   `out of scope` belong in a separate task, and record deferred work in issues when appropriate.
 5. For a GitHub PR, merge only when `wait` reports `CI … passed`; `failed`, `timeout`, `none`, and
    `skipped` need resolution first. Immediately before merging, run `gh pr checks <url>` again and
    verify all checks pass or skip. Merge per the repo's rules, then `clean`. If the task failed expensively,
