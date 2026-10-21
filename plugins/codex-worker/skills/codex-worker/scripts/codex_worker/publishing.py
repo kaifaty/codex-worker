@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import urllib.parse
 
-from . import clock, config, sandboxing, task_state
+from . import clock, config, result_schema, sandboxing, task_state, threads
 
 
 def completed_work_turn(st):
@@ -90,23 +90,31 @@ def publish_pr(st, stopped):
         if not receipt["pushed"]:
             skip("not pushed")
             return
-        gh = shutil.which("gh")
-        if not gh:
-            skip("gh unavailable")
-            return
         stage = "origin remote"
         remote_url = run(config.GIT + ["remote", "get-url", "origin"])
-        ssh_url = urllib.parse.urlsplit(remote_url) if remote_url.startswith("ssh://") else None
-        scp_url = re.fullmatch(r"[^/@:]+@([^/:]+):(.+)", remote_url) if ssh_url is None else None
-        host = ssh_url.hostname if ssh_url is not None else scp_url[1] if scp_url else None
-        path = ssh_url.path if ssh_url is not None else scp_url[2] if scp_url else ""
-        if host and host.casefold() != "github.com":
+        url = urllib.parse.urlsplit(remote_url) if remote_url.startswith(("ssh://", "https://")) else None
+        scp_url = re.fullmatch(r"[^/@:]+@([^/:]+):(.+)", remote_url) if url is None else None
+        host = url.hostname if url is not None else scp_url[1] if scp_url else None
+        path = url.path if url is not None else scp_url[2] if scp_url else ""
+        if host and host.casefold() != "github.com" and (scp_url or url.scheme == "ssh"):
             try:
                 ssh_config = run(["ssh", "-G", host])
             except (OSError, subprocess.CalledProcessError):
                 ssh_config = ""
-            if any(line.split() == ["hostname", "github.com"] for line in ssh_config.splitlines()):
+            for line in ssh_config.splitlines():
+                parts = line.split()
+                if len(parts) == 2 and parts[0] == "hostname":
+                    host = parts[1]
+                    break
+            if host.casefold() == "github.com":
                 remote_url = "github.com/" + path.lstrip("/").removesuffix(".git")
+        if host and host.casefold() != "github.com":
+            skip("not a GitHub remote: " + host)
+            return
+        gh = shutil.which("gh")
+        if not gh:
+            skip("gh unavailable")
+            return
         stage = "gh repo view"
         repository = json.loads(run([gh, "repo", "view", remote_url, "--json", "nameWithOwner"]))["nameWithOwner"]
         stage = "gh pr list"
@@ -120,6 +128,7 @@ def publish_pr(st, stopped):
         # Prefer the current open PR if this branch name has been reused.
         pr = next((item for item in prs if item["state"] == "OPEN"), prs[0] if prs else None)
         result = st.get("result") or {}
+        title = result.get("pr_title", "")
         body = result.get("pr_body", "")
         if pr:
             receipt["pr"] = pr["url"]
@@ -129,9 +138,21 @@ def publish_pr(st, stopped):
             if not body:
                 receipt["action"] = "unchanged"
                 return
-        title = result.get("pr_title") or run(config.GIT + ["log", "-1", "--format=%s"])
         if not pr:
+            if not title or not body:
+                stage = "PR text history"
+                for event in reversed(threads.events(st)):
+                    item = event.get("item") or {}
+                    if event.get("type") != "item.completed" or item.get("type") != "agent_message":
+                        continue
+                    previous = result_schema.parse_result(item.get("text", ""))
+                    if previous is not None:
+                        title = title or previous["pr_title"]
+                        body = body or previous["pr_body"]
+                    if title and body:
+                        break
             body = body or result.get("summary", "")
+        title = title or run(config.GIT + ["log", "-1", "--format=%s"])
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="pr-",
                                          dir=str(config.TASKS / st["slug"])) as file:
             file.write(body)
