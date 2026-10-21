@@ -1,5 +1,7 @@
-"""Text contracts for generated prompts, exercised without CLI subprocesses."""
+"""Text contracts and task diff regression for generated prompts."""
+import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -59,9 +61,9 @@ class PromptTests(unittest.TestCase):
     def test_followup_prompt_text_in_both_languages(self):
         parts = {
             "en": ("## Continuation", "Messages from Claude and review, in order:",
-                   "Current message — carry it out", "First inspect git status and git diff origin/main"),
+                   "Current message — carry it out", "First inspect git status and git diff $(git merge-base origin/main HEAD)"),
             "ru": ("## Продолжение", "Сообщения от Claude и ревью по порядку:",
-                   "Текущее сообщение — выполни его", "Сначала посмотри git status и git diff origin/main"),
+                   "Текущее сообщение — выполни его", "Сначала посмотри git status и git diff $(git merge-base origin/main HEAD)"),
         }
         message = "Continue with the requested follow-up."
         for language in ("en", "ru"):
@@ -222,7 +224,7 @@ class PromptTests(unittest.TestCase):
 
     def test_review_prompt_text_in_both_languages(self):
         parts = {
-            "en": ("Review the task changes: git diff origin/main.", "check its acceptance criteria.",
+            "en": ("Review the task changes: git diff $(git merge-base origin/main HEAD).", "check its acceptance criteria.",
                    "Look only for real defects:", "incorrect behavior", "unmet brief requirements",
                    "broken or ineffective checks", "dangerous side effects", "races", "file:line",
                    "how to verify it", "Do not comment on style.", "Do not change files or create commits.",
@@ -237,7 +239,7 @@ class PromptTests(unittest.TestCase):
                    "synthetic input is P3. Unrequested scope is a defect too: new options, settings, abstractions, "
                    'files or generality that "Done when" does not need. Rate it P2 when it adds an interface or '
                    "behavior nobody asked for, otherwise P3, and say what to remove."),
-            "ru": ("Проведи ревью изменений задачи: git diff origin/main.", "разделом «Готово, когда».",
+            "ru": ("Проведи ревью изменений задачи: git diff $(git merge-base origin/main HEAD).", "разделом «Готово, когда».",
                    "Ищи только реальные дефекты:", "неверное поведение", "невыполненные пункты брифа",
                    "сломанные или фиктивные проверки", "опасные побочные эффекты", "гонки", "файл:строка",
                    "как это проверить", "Без замечаний по стилю.", "Файлы не меняй, ничего не коммить.",
@@ -316,6 +318,43 @@ class PromptTests(unittest.TestCase):
                         self.assertIn("Base tests: failed (exit 9, 2 s).\nfixture base output", prompt)
                     if language == "en":
                         self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+
+    def test_review_prompt_diff_excludes_new_base_commits_in_both_languages(self):
+        repo = self.root / "repo"
+        repo.mkdir()
+        env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1", GIT_CONFIG_GLOBAL=os.devnull,
+                   GIT_AUTHOR_NAME="Prompt Test", GIT_AUTHOR_EMAIL="prompt@example.test",
+                   GIT_COMMITTER_NAME="Prompt Test", GIT_COMMITTER_EMAIL="prompt@example.test")
+
+        def git(*args):
+            return subprocess.run(["git"] + list(args), cwd=repo, env=env,
+                                  text=True, capture_output=True, check=True, timeout=10)
+
+        base = "base'branch"
+        git("init", "--quiet", "--initial-branch=" + base)
+        (repo / "task.txt").write_text("original\n")
+        git("add", "task.txt")
+        git("commit", "--quiet", "-m", "Initial base")
+        git("checkout", "--quiet", "-b", "task")
+        (repo / "task.txt").write_text("task change\n")
+        git("commit", "--quiet", "-am", "Task change")
+        git("checkout", "--quiet", base)
+        (repo / "base-only.txt").write_text("new base content\n")
+        git("add", "base-only.txt")
+        git("commit", "--quiet", "-m", "Advance base")
+        git("checkout", "--quiet", "task")
+
+        st = dict(self.st, base=base, worktree=str(repo))
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
+                    prompt = self.worker.prompts.review_prompt(st, {"language": language})
+                command = prompt.splitlines()[0].split(": ", 1)[1].removesuffix(".")
+                result = subprocess.run(["sh", "-c", command], cwd=repo, env=env,
+                                        text=True, capture_output=True, check=True, timeout=10)
+                self.assertIn("diff --git a/task.txt b/task.txt", result.stdout)
+                self.assertIn("+task change", result.stdout)
+                self.assertNotIn("base-only.txt", result.stdout)
 
     def test_scout_prompt_text_in_both_languages(self):
         parts = {

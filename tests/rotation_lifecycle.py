@@ -788,7 +788,7 @@ worker.notifications.reap_notifications = reap
         self.assertEqual(fallback["prompt"], rejected["prompt"])
         self.assert_output_schema(rejected, "review-fallback", review=True)
         self.assert_output_schema(fallback, "review-fallback", review=True)
-        self.assertIn("git diff " + working["base"], fallback["prompt"])
+        self.assertIn("git diff $(git merge-base " + shlex.quote(working["base"]) + " HEAD)", fallback["prompt"])
         self.assertEqual(fallback["ppid"], rejected["ppid"])
         state = self.state("review-fallback")
         self.assertEqual(state["thread"], working["thread"])

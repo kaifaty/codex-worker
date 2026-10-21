@@ -3,6 +3,7 @@ import json
 import math
 import os
 from pathlib import Path
+import shlex
 
 from . import accounts, clock, config, procs, result_schema, sandboxing
 
@@ -168,6 +169,6 @@ def handoff(st, current_message=False, cfg=None):
             messages.append(message)
         prompt += f"\n\n{label}:\n" + "\n\n".join(messages)[-4000:]
     if not scouting:
-        prompt += (f"\n\nСначала посмотри git status и git diff {st['base']}, потом продолжай работу.\n" if ru else
-                   f"\n\nFirst inspect git status and git diff {st['base']}, then continue the task.\n")
+        prompt += (f"\n\nСначала посмотри git status и git diff $(git merge-base {shlex.quote(st['base'])} HEAD), потом продолжай работу.\n" if ru else
+                   f"\n\nFirst inspect git status and git diff $(git merge-base {shlex.quote(st['base'])} HEAD), then continue the task.\n")
     return prompt
