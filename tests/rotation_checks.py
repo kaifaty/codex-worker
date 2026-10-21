@@ -596,6 +596,43 @@ class CheckGuardTests(RotationTestCase):
         self.assertNotIn("src/a.py", guarded)
         self.assertNotIn("contest/a.py", guarded)
 
+    def test_advanced_review_base_does_not_change_guarded_diff_or_base_check(self):
+        base_test = ("from pathlib import Path\n"
+                     "assert Path('src/a.txt').read_text() == 'task\\n', 'task HEAD code was not checked'\n"
+                     "assert not Path('tests/test_base_only.py').exists(), 'base-only test was restored'\n"
+                     "print('branch-point tests checked task HEAD')\n")
+        self.commit_fixture({"tests/test_a.py": base_test, "src/a.txt": "initial\n"})
+        branch_point = self.git("rev-parse", "origin/main")
+        (self.repo / "src/a.txt").write_text("task\n")
+        self.git("add", "--", "src/a.txt")
+        self.git("commit", "--quiet", "-m", "Change task code")
+
+        checkout = self.root / "base-checkout"
+        self.git("clone", "--quiet", str(self.root / "origin.git"), str(checkout))
+        (checkout / "tests/test_a.py").write_text("assert False, 'new base test must not run'\n")
+        (checkout / "tests/test_base_only.py").write_text("# base-only test\n")
+        self.git("-C", str(checkout), "add", "--", "tests")
+        self.git("-C", str(checkout), "commit", "--quiet", "-m", "Advance base tests")
+        self.git("-C", str(checkout), "push", "--quiet", "origin", "main")
+        upstream = self.git("-C", str(checkout), "rev-parse", "HEAD")
+        self.assertEqual(self.git("rev-parse", "origin/main"), branch_point)
+
+        worker = self.worker()
+        state = {"slug": "guarded-advanced-base", "repo": str(self.repo), "worktree": str(self.repo),
+                 "base": "origin/main", "check": PYTHON + " -I tests/test_a.py"}
+        (worker.config.TASKS / state["slug"]).mkdir(parents=True)
+        probe = worker.review_cycle.check_base_merge(state, lambda: False)
+        self.assertEqual(probe["outcome"], "passed")
+        self.assertEqual(self.git("rev-parse", "origin/main"), upstream)
+        self.assertEqual(worker.checking.guarded_changes(state), [])
+
+        result = worker.checking.run_base_check(state, lambda: False)
+        self.assertEqual((result["outcome"], result["exit"]), ("passed", 0), result["tail"])
+        self.assertIn("branch-point tests checked task HEAD", result["tail"])
+        self.assertEqual((self.repo / "tests/test_a.py").read_text(), base_test)
+        self.assertFalse((self.repo / "tests/test_base_only.py").exists())
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
     def test_base_check_restores_base_tests_reports_failure_and_still_reviews(self):
         self.configure(language="en")
         base_test = ("from pathlib import Path\n"

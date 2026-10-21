@@ -109,7 +109,7 @@ def cmd__run(a):
                 and not st.get("review_skipped") and (check is None or check["outcome"] == "passed")
                 and not budgets.stop_at_weekly_budget(st)):
             st["work_completed"] = True
-            base_merge = review_cycle.check_base_merge(st)
+            base_merge = review_cycle.check_base_merge(st, stopped)
             if not stopped() and not budgets.stop_at_weekly_budget(st):
                 conflict = base_merge["outcome"] == "conflict"
                 review = (None if conflict else

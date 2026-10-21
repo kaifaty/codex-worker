@@ -211,7 +211,7 @@ def fix_code_findings(st, review):
     return escalations
 
 
-def check_base_merge(st):
+def check_base_merge(st, stopped):
     """Fetch the task base and probe its merge without changing HEAD or the index."""
     base = st["base"]
     entry = {"base": base, "outcome": "skipped"}
@@ -232,6 +232,8 @@ def check_base_merge(st):
             # -z emits the tree ID, paths, an empty field, then conflict messages.
             entry["files"] = merged.stdout.split("\0\0", 1)[0].split("\0")[1:]
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if stopped():
+            return None
         detail = ((exc.stderr or exc.stdout or "").strip()
                   if isinstance(exc, subprocess.CalledProcessError) else str(exc))
         entry["reason"] = f"{stage}: {detail or str(exc)}"
@@ -317,7 +319,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep, base_merge=None):
         st["work_completed"] = True
         if budgets.stop_at_weekly_budget(st):
             return
-        base_merge = check_base_merge(st)
+        base_merge = check_base_merge(st, stopped)
         if stopped():
             return
         if base_merge["outcome"] == "conflict":

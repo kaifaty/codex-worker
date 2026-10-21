@@ -339,6 +339,18 @@ class PromptTests(unittest.TestCase):
                     if language == "en":
                         self.assertNotRegex(prompt, "[А-Яа-яЁё]")
 
+    def test_first_review_prompt_after_merge_round_in_both_languages(self):
+        st = dict(self.st, rounds=[{
+            "review": None, "decisions": [], "check": None,
+            "base_merge": {"base": "origin/main", "files": ["worker.py"]},
+        }])
+        for language, guidance in (("en", "From the second review onward"),
+                                   ("ru", "Начиная со второго ревью")):
+            with self.subTest(language=language):
+                with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
+                    prompt = self.worker.prompts.review_prompt(st, {"language": language})
+                self.assertNotIn(guidance, prompt)
+
     def test_review_prompt_diff_excludes_new_base_commits_in_both_languages(self):
         repo = self.root / "repo"
         repo.mkdir()

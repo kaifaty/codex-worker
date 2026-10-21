@@ -214,6 +214,39 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(state["outcome"], "completed")
         self.assertFalse(state.get("auto_fix_stop"))
 
+    def test_base_merge_stopped_fetch_does_not_record_a_skipped_probe(self):
+        self.configure(language="en")
+        calls = self.record_git_calls()
+        marker = self.root / "fetch-started"
+        wrapper = self.root / "git"
+        wrapper.write_text(wrapper.read_text().replace(
+            "import json, os, sys\n", "import json, os, signal, sys, time\n").replace(
+            "os.execv(",
+            "if 'fetch' in sys.argv and os.getcwd() != " + repr(str(self.repo)) + ":\n"
+            "    signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
+            "    with open(" + repr(str(marker)) + ", 'w') as stream:\n"
+            "        stream.write(str(os.getpid()))\n"
+            "    while True:\n"
+            "        time.sleep(0.05)\n"
+            "os.execv("))
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()}])
+        self.cli("start", "base-fetch-stopped", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", timeout=60)
+        self.until(lambda: marker.exists() and marker.read_text().isdigit(), timeout=60)
+        self.extra_pids.add(int(marker.read_text()))
+        self.cli("stop", "base-fetch-stopped", timeout=60)
+        output = self.wait("base-fetch-stopped")
+
+        state = self.state("base-fetch-stopped")
+        self.assertEqual(state["outcome"], "stopped")
+        self.assertFalse(state.get("base_merges"))
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(self.review_invocations())
+        self.assertNotIn("skipped (fetch:", output)
+        self.assertFalse(any("merge-tree" in json.loads(line)["argv"]
+                             for line in calls.read_text().splitlines()))
+
     def test_base_merge_unavailable_merge_tree_is_recorded_and_review_still_runs(self):
         self.configure(language="en")
         calls = self.record_git_calls()

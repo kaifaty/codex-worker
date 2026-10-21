@@ -36,7 +36,7 @@ def review_prompt(st, cfg=None):
     brief = config.TASKS / st["slug"] / "brief.md"
     ru = cfg.get("language", "en") == "ru"
     context = ""
-    if st.get("rounds"):
+    if any(entry.get("review") is not None for entry in st.get("rounds", [])):
         context += (("Начиная со второго ревью ищи регрессии, внесённые исправлениями, и невыполненные "
                      "пункты «Готово, когда». Новые граничные случаи вне брифа отмечай только как P3.\n") if ru else
                     ("From the second review onward, look for regressions introduced by the fixes and unmet "
