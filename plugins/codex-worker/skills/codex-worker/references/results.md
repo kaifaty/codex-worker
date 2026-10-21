@@ -13,8 +13,8 @@ The supervisor saves valid implementation JSON in state as `result`; `status` sh
 | `summary` | short plain-language summary |
 | `checks` | `{command, outcome, details}`; `outcome` is `passed`, `failed` or `not_run`, `details` carries numbers |
 | `pr` | compatibility field; the worker returns an empty string |
-| `pr_title` | required string; PR title, or empty to use the latest commit subject |
-| `pr_body` | required string; description of the whole PR, not just this turn; empty leaves an existing PR unchanged, or uses `summary` when creating one |
+| `pr_title` | required string; PR title, or empty to use the latest commit subject; when creating a PR, first reuse the latest nonempty title from this task's earlier results |
+| `pr_body` | required string; description of the whole PR, not just this turn; empty leaves an existing PR unchanged; when creating one, reuse the latest nonempty body from this task's earlier results, then fall back to `summary` |
 | `commit_message` | repository-style message, subject on the first line; empty when the worker committed or nothing changed |
 | `questions` | questions for Claude |
 | `remaining` | unfinished work, including findings deferred as `out of scope` |
@@ -26,6 +26,9 @@ when `origin` has the local branch's HEAD. The `publish` receipt records its URL
 `== PR updated <URL>`, or `== PR skipped: <reason>`; its final `PR:` uses the receipt URL.
 Missing or unauthorized GitHub CLI and publication errors do not fail the turn. Closed and merged
 PRs are left unchanged.
+For a new PR, title and body fall back independently to earlier results across the task's threads.
+Known non-GitHub `origin` hosts are skipped with `not a GitHub remote: <host>` before invoking the
+GitHub CLI; SSH aliases are resolved with `ssh -G`. Commit and push behavior is unchanged.
 
 ## CI result
 
