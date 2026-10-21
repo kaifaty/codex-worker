@@ -11,6 +11,321 @@ from rotation_support import PYTHON, SCRIPT, RotationTestCase
 
 
 class ReviewFixTests(RotationTestCase):
+    def advance_review_base(self, files):
+        checkout = self.root / "base-checkout"
+        if not checkout.exists():
+            self.git("clone", "--quiet", str(self.root / "origin.git"), str(checkout))
+        for name, contents in files.items():
+            path = checkout / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(contents)
+        self.git("-C", str(checkout), "add", "--", *files)
+        self.git("-C", str(checkout), "commit", "--quiet", "-m", "Advance review base")
+        self.git("-C", str(checkout), "push", "--quiet", "origin", "main")
+        return self.git("-C", str(checkout), "rev-parse", "HEAD")
+
+    def test_base_merge_fetches_advanced_base_and_leaves_clean_divergence_unmerged(self):
+        self.configure(language="en")
+        gate = self.root / "finish-work"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"task.txt": "task change\n"}, "commit_files": ["task.txt"],
+             "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        calls = self.record_git_calls()
+        self.cli("start", "base-clean", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", "--review-angles", "auto", timeout=60)
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        upstream = self.advance_review_base({"upstream.txt": "base change\n" * 500})
+        gate.touch()
+        self.wait("base-clean")
+
+        state = self.state("base-clean")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True])
+        self.assertEqual([(entry["base"], entry["outcome"]) for entry in state["base_merges"]],
+                         [("origin/main", "passed")])
+        self.assertEqual(self.git("rev-parse", "origin/main"), upstream)
+        self.assertEqual(len(self.git("-C", state["worktree"], "rev-list", "--parents", "-n", "1", "HEAD")
+                             .split()), 2, "a clean merge check must not merge the base")
+        self.assertFalse((Path(state["worktree"]) / "upstream.txt").exists())
+        commands = [json.loads(line)["argv"] for line in calls.read_text().splitlines()]
+        self.assertTrue(any("fetch" in command for command in commands))
+        self.assertTrue(any("merge-tree" in command and "--write-tree" in command
+                            and command[-2:] == ["HEAD", "origin/main"] for command in commands))
+        self.cli("review", "base-clean", "--review-angles", "auto", timeout=60)
+        self.wait("base-clean")
+        self.assertEqual(len(self.review_invocations()), 2)
+
+    def test_base_merge_conflict_uses_a_merge_round_then_saved_check_and_first_review(self):
+        self.configure(language="en")
+        gate = self.root / "finish-work"
+        command = "printf 'full-saved-check\\n' >> check-runs"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task change\n"}, "commit_files": ["tracked.txt"],
+             "reply": self.work_result()},
+            {"mode": "complete", "merge_base": "origin/main",
+             "write_files": {"tracked.txt": "task change\nbase change\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.cli("start", "base-merge", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", "--review-angles", "correctness,tests", "--fix-rounds", "1",
+                 "--check", command, timeout=60)
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        upstream = self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        output = self.wait("base-merge")
+
+        state = self.state("base-merge")
+        work, merge, *reviews = self.invocations()
+        self.assertEqual([event["review"] for event in (work, merge, *reviews)],
+                         [False, False, True, True])
+        self.assertTrue(all(not event["resume"] for event in reviews))
+        self.assertEqual(len({event["thread"] for event in (work, *reviews)}), 3)
+        self.assertEqual([entry["angle"] for entry in state["reviews"]], ["correctness", "tests"])
+        self.assertIn("Focus on behavior and acceptance criteria", reviews[0]["prompt"])
+        self.assertIn("Focus on ineffective or weakened tests", reviews[1]["prompt"])
+        self.assertTrue(all("From the second review onward" not in event["prompt"] for event in reviews))
+        self.assertTrue(merge["resume"])
+        self.assertEqual(merge["thread"], work["thread"])
+        self.assertIn("origin/main", merge["prompt"])
+        self.assertIn("tracked.txt", merge["prompt"])
+        self.assertIn("merge commit", merge["prompt"])
+        self.assertIn("rebase", merge["prompt"])
+        self.assertIn("force-push", merge["prompt"])
+        self.assertIn(command, merge["prompt"])
+        self.assertEqual([entry["outcome"] for entry in state["base_merges"]], ["conflict", "passed"])
+        self.assertEqual(state["base_merges"][0]["files"], ["tracked.txt"])
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertIsNone(state["rounds"][0]["review"])
+        self.assertEqual(state["rounds"][0]["base_merge"], state["base_merges"][0])
+        self.assertEqual(state["rounds"][0]["check"]["outcome"], "passed")
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertEqual((Path(state["worktree"]) / "check-runs").read_text().splitlines(),
+                         ["full-saved-check", "full-saved-check"])
+        parents = self.git("-C", state["worktree"], "rev-list", "--parents", "-n", "1", "HEAD").split()
+        self.assertEqual(len(parents), 3)
+        self.assertEqual(parents[2], upstream)
+        self.assertEqual((Path(state["worktree"]) / "tracked.txt").read_text(),
+                         "task change\nbase change\n")
+        self.assertEqual(state["auto_fix_stop"], "clean")
+        self.assertIn("== round 1:", output)
+
+    def test_workspace_base_conflict_fails_before_spending_a_merge_round(self):
+        self.configure(language="en", sandbox="workspace")
+        gate = self.root / "finish-work"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task change\n"},
+             "reply": self.work_result(commit_message="Implement workspace task")}])
+        slug = "base-workspace-conflict"
+        self.cli("start", slug, "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", "--fix-rounds", "2", timeout=60)
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        output = self.cli("wait", slug, "--timeout", "60", timeout=75)
+
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "failed")
+        self.assertIsNone(state["pid"])
+        self.assertEqual(state["rounds"], [])
+        self.assertEqual([entry["outcome"] for entry in state["base_merges"]], ["conflict"])
+        self.assertEqual([event["review"] for event in self.invocations()], [False])
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertIn("Automatic merge of origin/main is unavailable in workspace sandbox", output)
+        self.assertIn("merge the base outside the sandbox and retry", output)
+
+    def test_base_merge_conflict_without_rounds_stops_before_start_or_say_review(self):
+        self.configure(language="en")
+        for label, command, rounds in (("omitted", "start", ()),
+                                       ("zero", "say", ("--fix-rounds", "0"))):
+            with self.subTest(label=label):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                gate = self.root / ("finish-work-" + label)
+                runs = [{"mode": "complete", "delay_gate": str(gate),
+                         "write_files": {"tracked.txt": "task " + label + "\n"},
+                         "commit_files": ["tracked.txt"], "reply": self.work_result()}]
+                if command == "say":
+                    runs.insert(0, {"mode": "complete", "reply": self.work_result()})
+                self.account(self.home, "A", self.reset, runs=runs)
+                before = len(self.invocations())
+                slug = "base-stop-" + label
+                if command == "start":
+                    self.cli("start", slug, "--brief", str(self.brief), "--repo", str(self.repo),
+                             "--review", *rounds, timeout=60)
+                else:
+                    self.cli("start", slug, "--brief", str(self.brief), "--repo", str(self.repo), timeout=60)
+                    self.wait(slug)
+                    self.cli("say", slug, "Finish the task", "--review", *rounds, timeout=60)
+                self.until(lambda: len(self.invocations()) == before + len(runs), timeout=60)
+                self.advance_review_base({"tracked.txt": "base " + label + "\n"})
+                gate.touch()
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertFalse(any(event["review"] for event in self.invocations()[before:]))
+                self.assertEqual(state["auto_fix_stop"], "base conflict")
+                self.assertEqual(state["review_skipped"], "base conflict")
+                self.assertFalse(state.get("rounds"))
+                self.assertEqual(state["base_merges"][-1]["files"], ["tracked.txt"])
+                self.assertIn("== auto-fix: stop: base conflict — origin/main: tracked.txt", output)
+
+    def test_base_merge_checks_again_after_a_fix_and_stops_when_rounds_are_exhausted(self):
+        self.configure(language="en")
+        gate = self.root / "finish-fix"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result()},
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task fix\n"}, "commit_files": ["tracked.txt"],
+             "reply": self.work_result()}])
+        self.cli("start", "base-exhausted", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", "--fix-rounds", "1", timeout=60)
+        self.until(lambda: len(self.invocations()) == 3, timeout=60)
+        self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        output = self.wait("base-exhausted")
+
+        state = self.state("base-exhausted")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False])
+        self.assertEqual([entry["outcome"] for entry in state["base_merges"]], ["passed", "conflict"])
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual(state["auto_fix_stop"], "base conflict")
+        self.assertIn("== auto-fix: stop: base conflict — origin/main: tracked.txt", output)
+
+    def test_base_merge_conflict_after_a_fix_consumes_the_next_round_before_repeat_review(self):
+        self.configure(language="en")
+        gate = self.root / "finish-fix"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result()},
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task fix\n"}, "commit_files": ["tracked.txt"],
+             "reply": self.work_result()},
+            {"mode": "complete", "merge_base": "origin/main",
+             "write_files": {"tracked.txt": "task fix\nbase change\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.cli("start", "base-repeat", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", "--fix-rounds", "2", timeout=60)
+        self.until(lambda: len(self.invocations()) == 3, timeout=60)
+        self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        self.wait("base-repeat")
+
+        state = self.state("base-repeat")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False, False, True])
+        self.assertEqual([entry["outcome"] for entry in state["base_merges"]],
+                         ["passed", "conflict", "passed"])
+        self.assertEqual(len(state["rounds"]), 2)
+        self.assertIsNotNone(state["rounds"][0]["review"])
+        self.assertIsNone(state["rounds"][1]["review"])
+        self.assertEqual(state["rounds"][1]["base_merge"]["files"], ["tracked.txt"])
+        self.assertEqual(state["auto_fix_stop"], "clean")
+
+    def test_base_merge_fetch_failure_is_recorded_and_review_still_runs(self):
+        self.configure(language="en")
+        gate = self.root / "finish-work"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task change\n"}, "commit_files": ["tracked.txt"],
+             "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.cli("start", "base-fetch-failed", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", timeout=60)
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        self.advance_review_base({"tracked.txt": "base change\n"})
+        self.git("remote", "set-url", "origin", str(self.root / "missing-origin.git"))
+        gate.touch()
+        output = self.wait("base-fetch-failed")
+
+        state = self.state("base-fetch-failed")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True])
+        self.assertEqual(len(state["base_merges"]), 1)
+        self.assertEqual(state["base_merges"][0]["outcome"], "skipped")
+        self.assertIn("fetch", state["base_merges"][0]["reason"])
+        self.assertIn("== base merge origin/main: skipped (" + state["base_merges"][0]["reason"] + ")", output)
+        self.assertEqual(state["outcome"], "completed")
+        self.assertFalse(state.get("auto_fix_stop"))
+
+    def test_base_merge_stopped_fetch_does_not_record_a_skipped_probe(self):
+        self.configure(language="en")
+        calls = self.record_git_calls()
+        marker = self.root / "fetch-started"
+        wrapper = self.root / "git"
+        wrapper.write_text(wrapper.read_text().replace(
+            "import json, os, sys\n", "import json, os, signal, sys, time\n").replace(
+            "os.execv(",
+            "if 'fetch' in sys.argv and os.getcwd() != " + repr(str(self.repo)) + ":\n"
+            "    signal.signal(signal.SIGINT, signal.SIG_DFL)\n"
+            "    with open(" + repr(str(marker)) + ", 'w') as stream:\n"
+            "        stream.write(str(os.getpid()))\n"
+            "    while True:\n"
+            "        time.sleep(0.05)\n"
+            "os.execv("))
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()}])
+        self.cli("start", "base-fetch-stopped", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", timeout=60)
+        self.until(lambda: marker.exists() and marker.read_text().isdigit(), timeout=60)
+        self.extra_pids.add(int(marker.read_text()))
+        self.cli("stop", "base-fetch-stopped", timeout=60)
+        output = self.wait("base-fetch-stopped")
+
+        state = self.state("base-fetch-stopped")
+        self.assertEqual(state["outcome"], "stopped")
+        self.assertFalse(state.get("base_merges"))
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(self.review_invocations())
+        self.assertNotIn("skipped (fetch:", output)
+        self.assertFalse(any("merge-tree" in json.loads(line)["argv"]
+                             for line in calls.read_text().splitlines()))
+
+    def test_base_merge_unavailable_merge_tree_is_recorded_and_review_still_runs(self):
+        self.configure(language="en")
+        calls = self.record_git_calls()
+        wrapper = self.root / "git"
+        wrapper.write_text(wrapper.read_text().replace(
+            "os.execv(",
+            "if 'merge-tree' in sys.argv:\n"
+            "    print('fixture Git has no --write-tree support', file=sys.stderr)\n"
+            "    sys.exit(129)\n"
+            "os.execv("))
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.cli("start", "base-old-git", "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", timeout=60)
+        output = self.wait("base-old-git")
+
+        state = self.state("base-old-git")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True])
+        self.assertEqual(state["base_merges"][0]["outcome"], "skipped")
+        self.assertIn("merge-tree", state["base_merges"][0]["reason"])
+        self.assertIn("== base merge origin/main: skipped (" + state["base_merges"][0]["reason"] + ")", output)
+        self.assertEqual(state["outcome"], "completed")
+        self.assertTrue(any("merge-tree" in json.loads(line)["argv"]
+                            for line in calls.read_text().splitlines()))
+
+    def test_base_merge_does_not_gate_standalone_review(self):
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "write_files": {"tracked.txt": "task change\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.cli("start", "base-standalone", "--brief", str(self.brief), "--repo", str(self.repo), timeout=60)
+        self.wait("base-standalone")
+        self.advance_review_base({"tracked.txt": "base change\n"})
+        calls = self.record_git_calls()
+        self.cli("review", "base-standalone", timeout=60)
+        self.wait("base-standalone")
+
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True])
+        self.assertFalse(self.state("base-standalone").get("base_merges"))
+        commands = [json.loads(line)["argv"] for line in calls.read_text().splitlines()]
+        self.assertFalse(any("fetch" in command or "merge-tree" in command for command in commands))
+
     def provenance_review(self, locations):
         review = self.review_result()
         review["findings"] = [dict(review["findings"][0], id="F" + str(index),
@@ -1241,3 +1556,40 @@ class ReviewFixTests(RotationTestCase):
         self.assertFalse(self.review_invocations())
         self.assertFalse(self.state("review-stopped").get("checks"))
         self.assertFalse((Path(self.state("review-stopped")["worktree"]) / "unexpected-check").exists())
+
+    def test_base_merge_round_excludes_upstream_commits_but_attributes_conflict_resolution(self):
+        self.configure(language="en")
+        gate = self.root / "finish-work"
+        review = self.provenance_review([("P2", "src/upstream.py", 3)])
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task change\n"}, "commit_files": ["tracked.txt"],
+             "reply": self.work_result()},
+            {"mode": "complete", "merge_base": "origin/main",
+             "write_files": {"tracked.txt": "task change\nbase change\nresolved both changes\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": review}])
+        self.start("base-provenance", "--review", "--fix-rounds", "1")
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        upstream = self.advance_review_base({"src/upstream.py": "".join(
+            "VALUE_%s = %s\n" % (number, number) for number in range(1, 6))})
+        conflict = self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        output = self.wait("base-provenance")
+
+        state = self.state("base-provenance")
+        commit = self.git("-C", state["worktree"], "rev-parse", "HEAD")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, False, True])
+        self.assertEqual(state["auto_fix_stop"], "rounds_exhausted")
+        self.assertFalse(state.get("auto_fix_escalations"))
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual(state["rounds"][0]["commits"], [commit])
+        self.assertNotIn(upstream, state["rounds"][0]["commits"])
+        self.assertNotIn(conflict, state["rounds"][0]["commits"])
+        self.assertNotIn("code", state["rounds"][0])
+        round_line = next(line for line in output.splitlines() if line.startswith("== round 1:"))
+        self.assertNotIn("; code", round_line)
+        resolution = self.provenance_review([("P2", "tracked.txt", 3)])
+        short = self.git("-C", state["worktree"], "rev-parse", "--short", "HEAD")
+        self.assertEqual(self.worker().review_cycle.fix_code_findings(state, resolution),
+                         [dict(resolution["findings"][0], round=1, commit=short)])

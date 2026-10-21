@@ -45,7 +45,7 @@ def review_prompt(st, cfg=None):
                        "amendments to the brief; later `claude` entries take precedence over the brief and earlier "
                        "amendments. Entries with source `review` or `ci` are supervisor fix requests, not task requirements.\n"))
     context = ""
-    if st.get("rounds"):
+    if any(entry.get("review") is not None for entry in st.get("rounds", [])):
         context += (("Начиная со второго ревью ищи регрессии, внесённые исправлениями, и невыполненные "
                      "пункты «Готово, когда». Новые граничные случаи вне брифа отмечай только как P3.\n") if ru else
                     ("From the second review onward, look for regressions introduced by the fixes and unmet "
@@ -130,8 +130,33 @@ def review_prompt(st, cfg=None):
             "P1/P2/P3, file, line, title, detail and verify. For clean, findings is empty; summary is a short recap.")
 
 
-def fix_prompt(st, review, check, cfg):
+def fix_prompt(st, review, check, cfg, base_merge=None):
     ru = cfg.get("language", "en") == "ru"
+    if base_merge is not None:
+        base = base_merge["base"]
+        if st.get("sandbox") == "workspace":
+            raise ValueError(f"Automatic merge of {base} is unavailable in workspace sandbox; "
+                             "merge the base outside the sandbox and retry.")
+        files = "\n".join("- " + path for path in base_merge["files"])
+        if ru:
+            prompt = (f"Ветка задачи конфликтует с текущей базой {base}.\n"
+                      f"Конфликтующие файлы:\n{files}\n\n"
+                      f"Слей {base} в ветку задачи обычным merge-коммитом: "
+                      f"`git merge --no-ff {shlex.quote(base)}`. Не делай rebase или force-push. "
+                      "Разреши конфликты, сохранив смысл изменений обеих сторон.\n")
+            if st.get("check"):
+                prompt += f"Запусти сохранённую проверку целиком: `{st['check']}`.\n"
+            return prompt + ("Закоммить и запушь изменения. Верни итог по схеме работы; "
+                             "findings — пустой массив.\n")
+        prompt = (f"The task branch conflicts with the current base {base}.\n"
+                  f"Conflicting files:\n{files}\n\n"
+                  f"Merge {base} into the task branch with an ordinary merge commit: "
+                  f"`git merge --no-ff {shlex.quote(base)}`. Do not rebase or force-push. "
+                  "Resolve the conflicts while preserving the intent of both sides.\n")
+        if st.get("check"):
+            prompt += f"Run the saved check in full: `{st['check']}`.\n"
+        return prompt + ("Commit and push the changes. Return the work result schema; "
+                         "use an empty findings array.\n")
     if check is not None:
         prompt = (("Исправь сбой сохранённой проверки после предыдущего исправления.\n" if ru else
                    "Fix the saved check failure after the previous fix.\n") +

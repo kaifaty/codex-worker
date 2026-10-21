@@ -74,7 +74,8 @@ def guarded_changes(st):
     paths = check_paths(st)
     changed = {}
     args = config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
-    for revisions in ([st["base"], "HEAD"], ["--cached", "HEAD"], []):
+    base = procs.sh(config.GIT + ["merge-base", st["base"], "HEAD"], cwd=root, check=False) or st["base"]
+    for revisions in ([base, "HEAD"], ["--cached", "HEAD"], []):
         removed_lines = Counter()
         added_markers = []
         stats = procs.sh(args + ["--numstat", "-z"] + revisions + ["--"], cwd=root, check=False)
@@ -247,7 +248,7 @@ def run_base_check(st, stopped):
 
 
 def _run_base_check(st, stopped):
-    """Check task HEAD with the base's guarded files, leaving the task untouched."""
+    """Check task HEAD with the merge base's guarded files, leaving the task untouched."""
     driver = sandboxing.workspace_filter_driver(st)
     if driver is not None:
         return {"outcome": "skipped", "reason": f"filter driver {driver} is configured; commit this turn manually"}
@@ -259,18 +260,19 @@ def _run_base_check(st, stopped):
     result = None
     paths = check_paths(st)
     try:
+        base = procs.sh(config.GIT + ["merge-base", st["base"], "HEAD"], cwd=st["worktree"])
         with tempfile.TemporaryDirectory(prefix="base-check-", dir=str(config.TASKS / st["slug"])) as directory:
             worktree = Path(directory) / "worktree"
             try:
                 subprocess.run(config.GIT + ["worktree", "add", "--quiet", "--detach", str(worktree), "HEAD"],
                                cwd=st["worktree"], check=True, capture_output=True)
                 guarded = set()
-                for revision in (st["base"], "HEAD"):
+                for revision in (base, "HEAD"):
                     files = procs.sh(config.GIT + ["ls-tree", "-r", "--name-only", "-z", revision],
                                cwd=worktree)
                     guarded.update(path for path in files.split("\0") if path and guarded_path(path, st, paths))
                 if guarded:
-                    subprocess.run(config.GIT + ["--literal-pathspecs", "restore", "--source=" + st["base"],
+                    subprocess.run(config.GIT + ["--literal-pathspecs", "restore", "--source=" + base,
                                     "--staged", "--worktree", "--pathspec-from-file=-", "--pathspec-file-nul"],
                                    input="\0".join(sorted(guarded)) + "\0", text=True,
                                    cwd=worktree, check=True, capture_output=True)
