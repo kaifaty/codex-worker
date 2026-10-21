@@ -88,9 +88,9 @@ result with numbers and attempts. The wrap-up has a 10-minute cap and is stopped
 - After a review: findings with IDs, severity, file and line, details and verification steps; with
   angles, a runtime and outcome line per angle before the combined review.
 - After an automatic fix cycle: finding counts and decisions per round, rejected findings with reasons,
-  code additions/deletions excluding guarded files, check results, the latest review in full, a
-  finding-count history, and the stop reason. For `escalate`, the stop line names each P1/P2 finding
-  targeting code from a fix round, that round's number, and its short commit SHA.
+  code additions/deletions for ordinary fix rounds excluding guarded files, check results, the latest
+  review in full, a finding-count history, and the stop reason. For `escalate`, the stop line names each
+  P1/P2 finding targeting code from a fix round, that round's number, and its short commit SHA.
 - Base merge rounds name the base and conflicting files. A base conflict without remaining fix
   rounds stops before automatic review with `auto_fix_stop: "base conflict"`; `wait` prints the base
   and conflicting files even when `--fix-rounds` is zero. Failed fetch or merge-tree checks print

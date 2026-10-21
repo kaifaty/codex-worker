@@ -34,9 +34,9 @@ class ReviewFixTests(RotationTestCase):
             {"mode": "complete", "reply": self.review_result(False)}])
         calls = self.record_git_calls()
         self.cli("start", "base-clean", "--brief", str(self.brief), "--repo", str(self.repo),
-                 "--review", timeout=60)
+                 "--review", "--review-angles", "auto", timeout=60)
         self.until(lambda: len(self.invocations()) == 1, timeout=60)
-        upstream = self.advance_review_base({"upstream.txt": "base change\n"})
+        upstream = self.advance_review_base({"upstream.txt": "base change\n" * 500})
         gate.touch()
         self.wait("base-clean")
 
@@ -52,6 +52,9 @@ class ReviewFixTests(RotationTestCase):
         self.assertTrue(any("fetch" in command for command in commands))
         self.assertTrue(any("merge-tree" in command and "--write-tree" in command
                             and command[-2:] == ["HEAD", "origin/main"] for command in commands))
+        self.cli("review", "base-clean", "--review-angles", "auto", timeout=60)
+        self.wait("base-clean")
+        self.assertEqual(len(self.review_invocations()), 2)
 
     def test_base_merge_conflict_uses_a_merge_round_then_saved_check_and_first_review(self):
         self.configure(language="en")
@@ -132,9 +135,7 @@ class ReviewFixTests(RotationTestCase):
                 self.assertEqual(state["review_skipped"], "base conflict")
                 self.assertFalse(state.get("rounds"))
                 self.assertEqual(state["base_merges"][-1]["files"], ["tracked.txt"])
-                self.assertIn("origin/main", output)
-                self.assertIn("tracked.txt", output)
-                self.assertIn("base conflict", output)
+                self.assertIn("== auto-fix: stop: base conflict — origin/main: tracked.txt", output)
 
     def test_base_merge_checks_again_after_a_fix_and_stops_when_rounds_are_exhausted(self):
         self.configure(language="en")
@@ -157,8 +158,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual([entry["outcome"] for entry in state["base_merges"]], ["passed", "conflict"])
         self.assertEqual(len(state["rounds"]), 1)
         self.assertEqual(state["auto_fix_stop"], "base conflict")
-        self.assertIn("origin/main", output)
-        self.assertIn("tracked.txt", output)
+        self.assertIn("== auto-fix: stop: base conflict — origin/main: tracked.txt", output)
 
     def test_base_merge_conflict_after_a_fix_consumes_the_next_round_before_repeat_review(self):
         self.configure(language="en")
@@ -204,13 +204,14 @@ class ReviewFixTests(RotationTestCase):
         self.advance_review_base({"tracked.txt": "base change\n"})
         self.git("remote", "set-url", "origin", str(self.root / "missing-origin.git"))
         gate.touch()
-        self.wait("base-fetch-failed")
+        output = self.wait("base-fetch-failed")
 
         state = self.state("base-fetch-failed")
         self.assertEqual([event["review"] for event in self.invocations()], [False, True])
         self.assertEqual(len(state["base_merges"]), 1)
         self.assertEqual(state["base_merges"][0]["outcome"], "skipped")
         self.assertIn("fetch", state["base_merges"][0]["reason"])
+        self.assertIn("== base merge origin/main: skipped (" + state["base_merges"][0]["reason"] + ")", output)
         self.assertEqual(state["outcome"], "completed")
         self.assertFalse(state.get("auto_fix_stop"))
 
@@ -262,12 +263,13 @@ class ReviewFixTests(RotationTestCase):
             {"mode": "complete", "reply": self.review_result(False)}])
         self.cli("start", "base-old-git", "--brief", str(self.brief), "--repo", str(self.repo),
                  "--review", timeout=60)
-        self.wait("base-old-git")
+        output = self.wait("base-old-git")
 
         state = self.state("base-old-git")
         self.assertEqual([event["review"] for event in self.invocations()], [False, True])
         self.assertEqual(state["base_merges"][0]["outcome"], "skipped")
         self.assertIn("merge-tree", state["base_merges"][0]["reason"])
+        self.assertIn("== base merge origin/main: skipped (" + state["base_merges"][0]["reason"] + ")", output)
         self.assertEqual(state["outcome"], "completed")
         self.assertTrue(any("merge-tree" in json.loads(line)["argv"]
                             for line in calls.read_text().splitlines()))
@@ -1520,3 +1522,40 @@ class ReviewFixTests(RotationTestCase):
         self.assertFalse(self.review_invocations())
         self.assertFalse(self.state("review-stopped").get("checks"))
         self.assertFalse((Path(self.state("review-stopped")["worktree"]) / "unexpected-check").exists())
+
+    def test_base_merge_round_excludes_upstream_commits_but_attributes_conflict_resolution(self):
+        self.configure(language="en")
+        gate = self.root / "finish-work"
+        review = self.provenance_review([("P2", "src/upstream.py", 3)])
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task change\n"}, "commit_files": ["tracked.txt"],
+             "reply": self.work_result()},
+            {"mode": "complete", "merge_base": "origin/main",
+             "write_files": {"tracked.txt": "task change\nbase change\nresolved both changes\n"},
+             "commit_files": ["tracked.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": review}])
+        self.start("base-provenance", "--review", "--fix-rounds", "1")
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        upstream = self.advance_review_base({"src/upstream.py": "".join(
+            "VALUE_%s = %s\n" % (number, number) for number in range(1, 6))})
+        conflict = self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        output = self.wait("base-provenance")
+
+        state = self.state("base-provenance")
+        commit = self.git("-C", state["worktree"], "rev-parse", "HEAD")
+        self.assertEqual([event["review"] for event in self.invocations()], [False, False, True])
+        self.assertEqual(state["auto_fix_stop"], "rounds_exhausted")
+        self.assertFalse(state.get("auto_fix_escalations"))
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual(state["rounds"][0]["commits"], [commit])
+        self.assertNotIn(upstream, state["rounds"][0]["commits"])
+        self.assertNotIn(conflict, state["rounds"][0]["commits"])
+        self.assertNotIn("code", state["rounds"][0])
+        round_line = next(line for line in output.splitlines() if line.startswith("== round 1:"))
+        self.assertNotIn("; code", round_line)
+        resolution = self.provenance_review([("P2", "tracked.txt", 3)])
+        short = self.git("-C", state["worktree"], "rev-parse", "--short", "HEAD")
+        self.assertEqual(self.worker().review_cycle.fix_code_findings(state, resolution),
+                         [dict(resolution["findings"][0], round=1, commit=short)])

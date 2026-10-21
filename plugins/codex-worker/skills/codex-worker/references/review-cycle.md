@@ -98,13 +98,15 @@ A check failure after a fix spends the next available round on the last 40 lines
 instead of review findings. If no round remains, the cycle stops without another review.
 
 Each round records the commits added to the task branch, including supervisor commits in workspace
-sandbox mode. After a fix review, a P1/P2 finding with a file and line stops the cycle with
+sandbox mode. Base merge rounds record only first-parent commits, excluding imported base commits
+from fix attribution. After a fix review, a P1/P2 finding with a file and line stops the cycle with
 `auto_fix_stop: "escalate"` if `git blame` at `HEAD` attributes any line within two lines of its
 location to a commit from an earlier fix round. Missing files and out-of-range lines do not match;
 P3 findings keep their existing behavior. Claude chooses the next action as described in
 [SKILL.md](../SKILL.md#stop-rules).
 
-Round size is informational and does not stop the cycle; see
+Round size is informational and does not stop the cycle. Base merge rounds omit size because their
+diff includes imported base changes; see
 [results.md](results.md#what-wait-prints) for the output.
 
 ## Cycle stops

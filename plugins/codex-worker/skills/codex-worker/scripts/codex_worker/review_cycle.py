@@ -24,7 +24,7 @@ def selected_review_angles(st, cfg):
         for command in ("clean=", "smudge=", "process=", "required=false"):
             diff_git += ["-c", f"filter.{driver}.{command}"]
     lines = 0
-    for revisions in ([st["base"] + "..HEAD"], ["HEAD"]):
+    for revisions in ([st["base"] + "...HEAD"], ["HEAD"]):
         output = procs.sh(diff_git + ["diff", "--no-ext-diff", "--no-textconv", "--numstat"] + revisions,
                     cwd=st["worktree"])
         for record in output.splitlines():
@@ -171,9 +171,12 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
     return result
 
 
-def fix_round_changes(st, before, after):
-    """Record commits and informational code size, excluding guarded paths."""
-    commits = procs.sh(config.GIT + ["rev-list", f"{before}..{after}"], cwd=st["worktree"]).splitlines()
+def fix_round_changes(st, before, after, merge_round=False):
+    """Record round commits and ordinary fix size, excluding guarded paths."""
+    commits = procs.sh(config.GIT + ["rev-list"] + (["--first-parent"] if merge_round else [])
+                      + [f"{before}..{after}"], cwd=st["worktree"]).splitlines()
+    if merge_round:
+        return {"commits": commits}
     stats = procs.sh(config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                       "--numstat", "-z", before, after, "--"], cwd=st["worktree"], errors="replace")
     paths = checking.check_paths(st)
@@ -291,7 +294,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep, base_merge=None):
         before = procs.sh(config.GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         turns.work_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False, work_paths=work_paths)
         after = procs.sh(config.GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
-        entry.update(fix_round_changes(st, before, after))
+        entry.update(fix_round_changes(st, before, after, merge_round="base_merge" in entry))
         result = st.get("result")
         entry["decisions"] = result["findings"] if result is not None else []
         task_state.save(st)
