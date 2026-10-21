@@ -24,6 +24,10 @@ running the saved check in full. The merge is recorded in `rounds` and counts to
 limit. The saved check and review then follow as after any other fix round, including another base
 merge check before review.
 
+Automatic base merge rounds are unavailable in `sandbox: workspace`, where the worker cannot write
+Git metadata. With a fix round remaining, a base conflict fails explicitly before spending a round;
+merge the base outside the sandbox before continuing with `say`.
+
 ## Review provider
 
 `start`, `say`, and `review` accept `--reviewer codex|claude`. The default is the `reviewer` setting

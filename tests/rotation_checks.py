@@ -53,6 +53,26 @@ class CheckGuardTests(RotationTestCase):
         self.assertEqual(prompt, self.worker().prompts.review_prompt(state, {"language": "en"}))
         self.assertLess(output.index("== check `"), output.index("== review by "))
 
+    def test_guarded_changes_keep_dirty_layers_when_base_ref_is_deleted(self):
+        self.commit_fixture({"tests/test_committed.py": "assert True\n",
+                             "tests/test_staged.py": "assert True\n",
+                             "tests/test_working.py": "assert True\n"})
+        state = {"worktree": str(self.repo), "base": "origin/main"}
+        (self.repo / "tests/test_committed.py").write_text("assert 1 == 1\n")
+        self.git("add", "--", "tests/test_committed.py")
+        self.git("commit", "--quiet", "-m", "Change task test")
+        (self.repo / "tests/test_staged.py").write_text("assert 2 == 2\n")
+        self.git("add", "--", "tests/test_staged.py")
+        (self.repo / "tests/test_working.py").write_text("assert 3 == 3\n")
+        (self.repo / "tests/test_untracked.py").write_text("assert 4 == 4\n")
+        self.git("update-ref", "-d", "refs/remotes/origin/main")
+
+        changes = self.worker().checking.guarded_changes(state)
+        self.assertEqual([(item["path"], item["added"], item["removed"]) for item in changes],
+                         [("tests/test_staged.py", 1, 1),
+                          ("tests/test_untracked.py", 1, 0),
+                          ("tests/test_working.py", 1, 1)])
+
     def test_guarded_changes_decode_latin1_patches_for_every_diff_layer(self):
         original = ("# coding: latin-1\n"
                     "import unittest\n"

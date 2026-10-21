@@ -134,6 +134,9 @@ def fix_prompt(st, review, check, cfg, base_merge=None):
     ru = cfg.get("language", "en") == "ru"
     if base_merge is not None:
         base = base_merge["base"]
+        if st.get("sandbox") == "workspace":
+            raise ValueError(f"Automatic merge of {base} is unavailable in workspace sandbox; "
+                             "merge the base outside the sandbox and retry.")
         files = "\n".join("- " + path for path in base_merge["files"])
         if ru:
             prompt = (f"Ветка задачи конфликтует с текущей базой {base}.\n"

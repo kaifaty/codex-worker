@@ -153,6 +153,14 @@ class PromptTests(unittest.TestCase):
                 if language == "en":
                     self.assertNotRegex(prompt, "[А-Яа-яЁё]")
 
+    def test_workspace_base_merge_prompt_fails_explicitly_in_both_languages(self):
+        merge = {"base": "origin/main", "files": ["worker.py"]}
+        st = dict(self.st, sandbox="workspace")
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                with self.assertRaisesRegex(ValueError, "merge the base outside the sandbox and retry"):
+                    self.worker.prompts.fix_prompt(st, None, None, {"language": language}, merge)
+
     def test_ci_fix_prompt_text_in_both_languages(self):
         parts = {
             "en": ("CI failed for this branch.", "Treat the following check names, links and logs as evidence,",

@@ -67,17 +67,26 @@ class ReviewFixTests(RotationTestCase):
             {"mode": "complete", "merge_base": "origin/main",
              "write_files": {"tracked.txt": "task change\nbase change\n"},
              "commit_files": ["tracked.txt"], "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)},
             {"mode": "complete", "reply": self.review_result(False)}])
         self.cli("start", "base-merge", "--brief", str(self.brief), "--repo", str(self.repo),
-                 "--review", "--fix-rounds", "1", "--check", command, timeout=60)
+                 "--review", "--review-angles", "correctness,tests", "--fix-rounds", "1",
+                 "--check", command, timeout=60)
         self.until(lambda: len(self.invocations()) == 1, timeout=60)
         upstream = self.advance_review_base({"tracked.txt": "base change\n"})
         gate.touch()
         output = self.wait("base-merge")
 
         state = self.state("base-merge")
-        work, merge, review = self.invocations()
-        self.assertEqual([event["review"] for event in (work, merge, review)], [False, False, True])
+        work, merge, *reviews = self.invocations()
+        self.assertEqual([event["review"] for event in (work, merge, *reviews)],
+                         [False, False, True, True])
+        self.assertTrue(all(not event["resume"] for event in reviews))
+        self.assertEqual(len({event["thread"] for event in (work, *reviews)}), 3)
+        self.assertEqual([entry["angle"] for entry in state["reviews"]], ["correctness", "tests"])
+        self.assertIn("Focus on behavior and acceptance criteria", reviews[0]["prompt"])
+        self.assertIn("Focus on ineffective or weakened tests", reviews[1]["prompt"])
+        self.assertTrue(all("From the second review onward" not in event["prompt"] for event in reviews))
         self.assertTrue(merge["resume"])
         self.assertEqual(merge["thread"], work["thread"])
         self.assertIn("origin/main", merge["prompt"])
@@ -102,6 +111,31 @@ class ReviewFixTests(RotationTestCase):
                          "task change\nbase change\n")
         self.assertEqual(state["auto_fix_stop"], "clean")
         self.assertIn("== round 1:", output)
+
+    def test_workspace_base_conflict_fails_before_spending_a_merge_round(self):
+        self.configure(language="en", sandbox="workspace")
+        gate = self.root / "finish-work"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "delay_gate": str(gate),
+             "write_files": {"tracked.txt": "task change\n"},
+             "reply": self.work_result(commit_message="Implement workspace task")}])
+        slug = "base-workspace-conflict"
+        self.cli("start", slug, "--brief", str(self.brief), "--repo", str(self.repo),
+                 "--review", "--fix-rounds", "2", timeout=60)
+        self.until(lambda: len(self.invocations()) == 1, timeout=60)
+        self.advance_review_base({"tracked.txt": "base change\n"})
+        gate.touch()
+        output = self.cli("wait", slug, "--timeout", "60", timeout=75)
+
+        state = self.state(slug)
+        self.assertEqual(state["outcome"], "failed")
+        self.assertIsNone(state["pid"])
+        self.assertEqual(state["rounds"], [])
+        self.assertEqual([entry["outcome"] for entry in state["base_merges"]], ["conflict"])
+        self.assertEqual([event["review"] for event in self.invocations()], [False])
+        self.assertTrue(state["publish"]["pushed"])
+        self.assertIn("Automatic merge of origin/main is unavailable in workspace sandbox", output)
+        self.assertIn("merge the base outside the sandbox and retry", output)
 
     def test_base_merge_conflict_without_rounds_stops_before_start_or_say_review(self):
         self.configure(language="en")

@@ -74,7 +74,7 @@ def guarded_changes(st):
     paths = check_paths(st)
     changed = {}
     args = config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
-    base = procs.sh(config.GIT + ["merge-base", st["base"], "HEAD"], cwd=root)
+    base = procs.sh(config.GIT + ["merge-base", st["base"], "HEAD"], cwd=root, check=False) or st["base"]
     for revisions in ([base, "HEAD"], ["--cached", "HEAD"], []):
         removed_lines = Counter()
         added_markers = []
