@@ -1,6 +1,7 @@
 ## How to work
 
 - Work only in this worktree, on branch `{branch}`. Do not touch other branches, worktrees, or repositories. Follow the repository's `AGENTS.md` or `CLAUDE.md`, if present.
+- If those rules keep a kind of work away from Codex and the brief asks for it, do not do that part: do the rest, then finish with `status: "needs_decision"` and quote the rule in `questions`.
 - No protocols, manifests, audits, or intermediate reports. Do not create subagents to read reports.
 - Run checks for this task only: build and test the affected module, plus one suitable benchmark or end-to-end test. Do not run the full regression suite unless the task explicitly asks for it.
 - If a check (test environment, test, or end-to-end test) fails twice after changes, stop with `status: "blocked"`, the numbers, and what you tried. Build and lint errors while writing code do not count as checks: fix them and continue. A failure that also happens on a clean `{base}`, or that passes when rerun once without changes, is not the task's: do not count it as an attempt or fix it; name it with the numbers in the result and `pr_body`, and continue. Check a clean `{base}` in a temporary `git worktree` that you remove afterwards, not with a stash. If the task is the test environment or scenario itself, debugging its setup (positions, synchronization, signals) is also part of the work; stop when the actual mechanism fails twice with the setup correct.
