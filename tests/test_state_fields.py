@@ -109,7 +109,7 @@ st[dynamic_key] = 1
         unused = registered - used
         self.assertFalse(missing, "Unregistered state keys: " + ", ".join(sorted(missing)))
         self.assertFalse(unused, "Unused state registry keys: " + ", ".join(sorted(unused)))
-        self.assertEqual(len(registered), 73)
+        self.assertEqual(len(registered), 74)
         for key, field in self.worker.task_state.STATE_FIELDS.items():
             with self.subTest(key=key):
                 self.assertIn(field.lifetime, {"task", "history", "cursor", "turn", "attempt", "runtime"})
@@ -121,6 +121,7 @@ st[dynamic_key] = 1
             "auth_failures": {"old-work": 2}, "auth_transitions": 2,
             "auto_fix_escalations": [{"id": "F1"}], "auto_fix_stop": "old-stop",
             "base": "origin/main", "base_check": True, "branch": "codex/registry-test",
+            "base_merges": [{"base": "origin/main", "outcome": "passed"}],
             "capacity_retries": 2,
             "check": "python3 check.py", "check_paths": ["check.py"], "check_pid": 101,
             "check_start": 19, "check_timeout": 42, "checks": [{}, {}, {}],
@@ -173,7 +174,7 @@ st[dynamic_key] = 1
         self.assertEqual(changed - {"pid"}, marked)
         self.assertEqual(set(st) - set(before), set())
         deleted = {"sleeping", "turn_finished", "error", "review_skipped", "auto_fix_stop",
-                   "auto_fix_escalations", "turn_stop", "wrapup", "review_result",
+                   "auto_fix_escalations", "base_merges", "turn_stop", "wrapup", "review_result",
                    "review_angle", "refusal", "stop_request", "signal", "ci", "exec_event_start"}
         self.assertEqual(set(before) - set(st), deleted)
         expected = {

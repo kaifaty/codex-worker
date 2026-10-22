@@ -11,6 +11,23 @@ check, or after an unstructured result, for compatibility. Every review prompt n
 result of the passing saved check and tells the reviewer not to rerun the full suite; only focused
 checks that confirm a specific finding run again.
 
+Before the first automatic review and every repeat review after a fix, the supervisor fetches the
+task's base and runs `git merge-tree --write-tree HEAD <base>`. A clean merge proceeds to review
+without changing the task branch. If fetching or merge-tree fails (for example, without network
+access or with an older Git), the supervisor records the reason, skips this check and proceeds to
+review. Standalone `review`, the CI cycle and PR publication do not run this check.
+
+When the base conflicts and a `--fix-rounds` round remains, the supervisor uses that round to merge
+the base instead of starting review. The implementation prompt lists the conflicting files and asks
+for an ordinary merge commit, without rebase or force-push, preserving the intent of both sides and
+running the saved check in full. The merge is recorded in `rounds` and counts toward the same fix
+limit. The saved check and review then follow as after any other fix round, including another base
+merge check before review.
+
+Automatic base merge rounds are unavailable in `sandbox: workspace`, where the worker cannot write
+Git metadata. With a fix round remaining, a base conflict fails explicitly before spending a round;
+merge the base outside the sandbox before continuing with `say`.
+
 ## Review provider
 
 `start`, `say`, and `review` accept `--reviewer codex|claude`. The default is the `reviewer` setting
@@ -85,13 +102,15 @@ A check failure after a fix spends the next available round on the last 40 lines
 instead of review findings. If no round remains, the cycle stops without another review.
 
 Each round records the commits added to the task branch, including supervisor commits in workspace
-sandbox mode. After a fix review, a P1/P2 finding with a file and line stops the cycle with
+sandbox mode. Base merge rounds record only first-parent commits, excluding imported base commits
+from fix attribution. After a fix review, a P1/P2 finding with a file and line stops the cycle with
 `auto_fix_stop: "escalate"` if `git blame` at `HEAD` attributes any line within two lines of its
 location to a commit from an earlier fix round. Missing files and out-of-range lines do not match;
 P3 findings keep their existing behavior. Claude chooses the next action as described in
 [SKILL.md](../SKILL.md#stop-rules).
 
-Round size is informational and does not stop the cycle; see
+Round size is informational and does not stop the cycle. Base merge rounds omit size because their
+diff includes imported base changes; see
 [results.md](results.md#what-wait-prints) for the output.
 
 ## Cycle stops
@@ -100,3 +119,7 @@ The automatic cycle stops on a `clean` review, only P3 findings (`auto_fix_stop:
 limit, escalation or the budget gate described above,
 a review where every angle refused (`auto_fix_stop: "review refused"`), an incomplete implementation
 result, or a non-completed [turn outcome](results.md#turn-outcomes).
+
+A base conflict without an available fix round stops before review with
+`auto_fix_stop: "base conflict"`, including when `--fix-rounds` is omitted or zero. `wait` names the
+base and conflicting files so Claude can decide how to continue.

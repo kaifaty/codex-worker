@@ -193,7 +193,7 @@ class WorkspaceTests(RotationTestCase):
         self.assertIn("PR: " + publication["pr"], output)
         self.assertNotIn(result["pr"], output)
 
-    def test_pr_supervisor_resolves_github_ssh_aliases_and_preserves_other_remotes(self):
+    def test_pr_supervisor_resolves_github_ssh_aliases_and_skips_other_remotes(self):
         self.configure(language="en")
         _ = self.repo
         real_git = shutil.which("git", path=self.env["PATH"])
@@ -225,7 +225,13 @@ class WorkspaceTests(RotationTestCase):
              ["-G", "github-alias"]),
             ("scp-github", "git@github.com:owner/repo.git", "github.com", "git@github.com:owner/repo.git", None),
             ("url-github", "ssh://git@github.com/owner/repo.git", "github.com", "ssh://git@github.com/owner/repo.git", None),
-            ("other-host", "git@forgejo-alias:owner/repo.git", "forgejo.example", "git@forgejo-alias:owner/repo.git",
+            ("https-github", "https://github.com/owner/repo.git", "github.com", "https://github.com/owner/repo.git", None),
+            ("https-other", "https://203.0.113.10/owner/repo.git", "203.0.113.10", None, None),
+            ("scp-other", "git@203.0.113.10:owner/repo.git", "203.0.113.10", None,
+             ["-G", "203.0.113.10"]),
+            ("url-other", "ssh://git@203.0.113.10/owner/repo.git", "203.0.113.10", None,
+             ["-G", "203.0.113.10"]),
+            ("other-alias", "git@forgejo-alias:owner/repo.git", "forgejo.example", None,
              ["-G", "forgejo-alias"]),
         )
         for name, remote, hostname, expected, ssh_args in cases:
@@ -241,15 +247,24 @@ class WorkspaceTests(RotationTestCase):
                 slug = "pr-ssh-" + name
                 self.start(slug)
                 self.wait(slug)
-                publication = self.state(slug)["publish"]
-                self.assertEqual((publication["action"], publication["error"]), ("created", ""))
-                self.assertTrue(publication["pr"])
+                state = self.state(slug)
+                publication = state["publish"]
+                self.assertEqual(state["outcome"], "completed")
+                self.assertTrue(publication["pushed"])
                 calls = self.gh_invocations()[before:]
-                self.assertEqual([event["argv"][:2] for event in calls],
-                                 [["repo", "view"], ["pr", "list"], ["pr", "create"]])
-                self.assertEqual(calls[0]["argv"][2], expected)
-                for event in calls[1:]:
-                    self.assertEqual(event["argv"][event["argv"].index("--repo") + 1], expected)
+                if expected is None:
+                    self.assertEqual((publication["action"], publication["error"]),
+                                     ("skipped", "not a GitHub remote: " + hostname))
+                    self.assertEqual(publication["pr"], "")
+                    self.assertEqual(calls, [], "non-GitHub remotes must stop before any gh call")
+                else:
+                    self.assertEqual((publication["action"], publication["error"]), ("created", ""))
+                    self.assertTrue(publication["pr"])
+                    self.assertEqual([event["argv"][:2] for event in calls],
+                                     [["repo", "view"], ["pr", "list"], ["pr", "create"]])
+                    self.assertEqual(calls[0]["argv"][2], expected)
+                    for event in calls[1:]:
+                        self.assertEqual(event["argv"][event["argv"].index("--repo") + 1], expected)
                 ssh_calls = [json.loads(line) for line in ssh_trace.read_text().splitlines()] if ssh_trace.exists() else []
                 self.assertEqual(ssh_calls, [ssh_args] if ssh_args else [])
 
@@ -379,6 +394,41 @@ class WorkspaceTests(RotationTestCase):
         create, = self.gh_writes()
         self.assertEqual(create["argv"][create["argv"].index("--title") + 1], subject)
         self.assertEqual(create["body"], result["summary"])
+
+    def test_pr_supervisor_new_pr_recovers_each_empty_field_from_latest_task_turns(self):
+        self.configure(language="en")
+        previous_title = "Describe the complete task after revising its scope"
+        previous_body = "\nDescribe all completed work from the previous turn.\n"
+        for field in (None, "pr_title", "pr_body"):
+            with self.subTest(current_field=field):
+                (self.home / "exec-count").unlink(missing_ok=True)
+                slug = "pr-history-" + (field or "empty").replace("_", "-")
+                current = self.work_result(summary="Only the final follow-up summary.")
+                if field:
+                    current[field] = "Current explicit " + field
+                self.account(self.home, "A", self.reset, runs=[
+                    {"mode": "complete", "write_files": {"tracked.txt": "initial implementation\n"},
+                     "commit_files": ["tracked.txt"],
+                     "reply": self.work_result(pr_title="Outdated task title", pr_body="Outdated task body.")},
+                    {"mode": "complete", "reply": self.work_result(pr_title=previous_title)},
+                    {"mode": "complete", "reply": self.work_result(pr_body=previous_body)},
+                    {"mode": "complete", "push": True, "reply": current}])
+                before = len(self.gh_writes())
+                self.start(slug)
+                self.wait(slug)
+                for message in ("Revise the complete task title", "Revise the complete task body"):
+                    self.cli("say", slug, message)
+                    self.wait(slug)
+                self.assertEqual(self.gh_writes()[before:], [])
+                self.cli("say", slug, "Push the task and publish its complete description")
+                self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["publish"]["action"], "created")
+                self.assertEqual(state["result"], current)
+                create, = self.gh_writes()[before:]
+                self.assertEqual(create["argv"][create["argv"].index("--title") + 1],
+                                 current["pr_title"] or previous_title)
+                self.assertEqual(create["body"], current["pr_body"] or previous_body)
 
     def test_pr_supervisor_requires_origin_branch_to_match_local_head(self):
         self.configure(language="en")

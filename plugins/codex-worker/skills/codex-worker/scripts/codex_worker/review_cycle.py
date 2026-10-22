@@ -24,7 +24,7 @@ def selected_review_angles(st, cfg):
         for command in ("clean=", "smudge=", "process=", "required=false"):
             diff_git += ["-c", f"filter.{driver}.{command}"]
     lines = 0
-    for revisions in ([st["base"] + "..HEAD"], ["HEAD"]):
+    for revisions in ([st["base"] + "...HEAD"], ["HEAD"]):
         output = procs.sh(diff_git + ["diff", "--no-ext-diff", "--no-textconv", "--numstat"] + revisions,
                     cwd=st["worktree"])
         for record in output.splitlines():
@@ -171,9 +171,12 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
     return result
 
 
-def fix_round_changes(st, before, after):
-    """Record commits and informational code size, excluding guarded paths."""
-    commits = procs.sh(config.GIT + ["rev-list", f"{before}..{after}"], cwd=st["worktree"]).splitlines()
+def fix_round_changes(st, before, after, merge_round=False):
+    """Record round commits and ordinary fix size, excluding guarded paths."""
+    commits = procs.sh(config.GIT + ["rev-list"] + (["--first-parent"] if merge_round else [])
+                      + [f"{before}..{after}"], cwd=st["worktree"]).splitlines()
+    if merge_round:
+        return {"commits": commits}
     stats = procs.sh(config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
                       "--numstat", "-z", before, after, "--"], cwd=st["worktree"], errors="replace")
     paths = checking.check_paths(st)
@@ -211,7 +214,38 @@ def fix_code_findings(st, review):
     return escalations
 
 
-def auto_fix(st, cfg, review, effort, stopped, sleep):
+def check_base_merge(st, stopped):
+    """Fetch the task base and probe its merge without changing HEAD or the index."""
+    base = st["base"]
+    entry = {"base": base, "outcome": "skipped"}
+    stage = "fetch"
+    try:
+        remote, branch = base.split("/", 1)
+        subprocess.run(config.GIT + ["fetch", "--quiet", remote,
+                       f"+refs/heads/{branch}:refs/remotes/{base}"],
+                       cwd=st["worktree"], text=True, capture_output=True, errors="replace",
+                       timeout=60, check=True)
+        stage = "merge-tree"
+        merged = subprocess.run(config.GIT + ["merge-tree", "--write-tree", "--name-only", "-z", "HEAD", base],
+                                cwd=st["worktree"], text=True, capture_output=True, errors="replace", timeout=60)
+        if merged.returncode not in (0, 1):
+            merged.check_returncode()
+        entry["outcome"] = "conflict" if merged.returncode else "passed"
+        if merged.returncode:
+            # -z emits the tree ID, paths, an empty field, then conflict messages.
+            entry["files"] = merged.stdout.split("\0\0", 1)[0].split("\0")[1:]
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        if stopped():
+            return None
+        detail = ((exc.stderr or exc.stdout or "").strip()
+                  if isinstance(exc, subprocess.CalledProcessError) else str(exc))
+        entry["reason"] = f"{stage}: {detail or str(exc)}"
+    st.setdefault("base_merges", []).append(entry)
+    task_state.save(st)
+    return entry
+
+
+def auto_fix(st, cfg, review, effort, stopped, sleep, base_merge=None):
     """Bounded work/check/review loop under the original supervisor and wait."""
     failed_check = None
     if budgets.stop_at_weekly_budget(st):
@@ -222,7 +256,8 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
     while not stopped() and st.get("outcome") == "completed":
         if budgets.stop_at_weekly_budget(st):
             return
-        if failed_check is None:
+        conflict = base_merge is not None and base_merge["outcome"] == "conflict"
+        if failed_check is None and not conflict:
             if review is None or any(entry["outcome"] == "completed" and entry.get("result") is None
                                      for entry in review.get("angles", [])):
                 st["auto_fix_stop"] = "review unknown"
@@ -238,11 +273,17 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
                 st["auto_fix_stop"] = "escalate"
                 st["auto_fix_escalations"] = escalations
                 return
+        if conflict and len(st["rounds"]) >= st["fix_rounds"]:
+            st["auto_fix_stop"] = st["review_skipped"] = "base conflict"
+            return
         if len(st["rounds"]) >= st["fix_rounds"]:
             st["auto_fix_stop"] = "check " + failed_check["outcome"] if failed_check else "rounds_exhausted"
             return
-        message = prompts.fix_prompt(st, review, failed_check, cfg)
-        entry = {"review": None if failed_check else review, "decisions": [], "check": None}
+        message = prompts.fix_prompt(st, review, failed_check, cfg, base_merge=base_merge if conflict else None)
+        entry = {"review": None if failed_check or conflict else review, "decisions": [], "check": None}
+        if conflict:
+            entry["base_merge"] = base_merge
+        base_merge = None
         st["rounds"].append(entry)
         st.update(kind="work", result=None, outcome="running", reset_wait_seconds=0)
         st.pop("review_skipped", None)
@@ -253,7 +294,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         before = procs.sh(config.GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
         turns.work_turn(st, cfg, prompt, effort, True, stopped, sleep, new_turn=False, work_paths=work_paths)
         after = procs.sh(config.GIT + ["rev-parse", "HEAD"], cwd=st["worktree"])
-        entry.update(fix_round_changes(st, before, after))
+        entry.update(fix_round_changes(st, before, after, merge_round="base_merge" in entry))
         result = st.get("result")
         entry["decisions"] = result["findings"] if result is not None else []
         task_state.save(st)
@@ -281,7 +322,14 @@ def auto_fix(st, cfg, review, effort, stopped, sleep):
         st["work_completed"] = True
         if budgets.stop_at_weekly_budget(st):
             return
-        next_angles = []
+        base_merge = check_base_merge(st, stopped)
+        if stopped():
+            return
+        if base_merge["outcome"] == "conflict":
+            continue
+        if budgets.stop_at_weekly_budget(st):
+            return
+        next_angles = None if review is None else []
         if review and len(review.get("angles", [])) > 1:
             next_angles = ["correctness"]
             next_angles += [entry["angle"] for entry in review["angles"]

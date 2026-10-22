@@ -1,7 +1,7 @@
 """Scout, review, fix and resume prompt builders."""
 import shlex
 
-from . import checking, config
+from . import checking, config, threads
 
 
 REVIEW_ANGLES = {
@@ -35,8 +35,17 @@ def review_prompt(st, cfg=None):
     cfg = config.accounts_config() if cfg is None else cfg
     brief = config.TASKS / st["slug"] / "brief.md"
     ru = cfg.get("language", "en") == "ru"
+    amendments = ""
+    if any(message.get("source") == "claude" for message in threads.followup_messages(st)):
+        messages = brief.with_name("messages.jsonl")
+        amendments = ((f"Поправки к брифу — в файле {messages}. Прочитай его: записи с source `claude` — "
+                       "поправки Claude к брифу; более поздние записи `claude` важнее брифа и более ранних поправок. "
+                       "Записи с source `review` и `ci` — запросы исправлений от надзирателя, а не требования задачи.\n") if ru else
+                      (f"Read the brief amendments at {messages}: entries with source `claude` are Claude's "
+                       "amendments to the brief; later `claude` entries take precedence over the brief and earlier "
+                       "amendments. Entries with source `review` or `ci` are supervisor fix requests, not task requirements.\n"))
     context = ""
-    if st.get("rounds"):
+    if any(entry.get("review") is not None for entry in st.get("rounds", [])):
         context += (("Начиная со второго ревью ищи регрессии, внесённые исправлениями, и невыполненные "
                      "пункты «Готово, когда». Новые граничные случаи вне брифа отмечай только как P3.\n") if ru else
                     ("From the second review onward, look for regressions introduced by the fixes and unmet "
@@ -84,8 +93,11 @@ def review_prompt(st, cfg=None):
     if ru:
         return (f"Проведи ревью изменений задачи: git diff $(git merge-base {shlex.quote(st['base'])} HEAD).\n"
                 f"Бриф задачи — в файле {brief}. Прочитай его и сверяйся с разделом «Готово, когда».\n"
+                + amendments +
                 "Ищи только реальные дефекты: неверное поведение, невыполненные пункты брифа, "
-                "сломанные или фиктивные проверки, опасные побочные эффекты, гонки.\n"
+                "сломанные или фиктивные проверки, опасные побочные эффекты, гонки, "
+                "новый код, который повторяет существующую функцию вместо её вызова и теряет её поведение "
+                "(повторы, нормализацию, форматирование).\n"
                 "Серьёзность — по реальному триггеру: P1 или P2 только для поведения, достижимого на входах "
                 "и состояниях, которые встречаются в этом репозитории, в брифе или при обычном использовании; "
                 "дефект, которому нужен гипотетический или синтетический вход, — P3. Лишний объём — тоже дефект: "
@@ -100,8 +112,11 @@ def review_prompt(st, cfg=None):
                 "file, line, title, detail и verify. При clean findings пуст; summary — краткий итог.")
     return (f"Review the task changes: git diff $(git merge-base {shlex.quote(st['base'])} HEAD).\n"
             f"Read the task brief at {brief} and check its acceptance criteria.\n"
+            + amendments +
             "Look only for real defects: incorrect behavior, unmet brief requirements, "
-            "broken or ineffective checks, dangerous side effects, and races.\n"
+            "broken or ineffective checks, dangerous side effects, races, and "
+            "new code that duplicates an existing function instead of calling it and loses its behavior "
+            "(retries, normalization, formatting).\n"
             "Severity follows a realistic trigger: P1 or P2 only for behavior reachable with inputs or states "
             "that occur in this repository, the brief or normal use; a defect that needs a hypothetical or "
             "synthetic input is P3. Unrequested scope is a defect too: new options, settings, abstractions, "
@@ -115,8 +130,33 @@ def review_prompt(st, cfg=None):
             "P1/P2/P3, file, line, title, detail and verify. For clean, findings is empty; summary is a short recap.")
 
 
-def fix_prompt(st, review, check, cfg):
+def fix_prompt(st, review, check, cfg, base_merge=None):
     ru = cfg.get("language", "en") == "ru"
+    if base_merge is not None:
+        base = base_merge["base"]
+        if st.get("sandbox") == "workspace":
+            raise ValueError(f"Automatic merge of {base} is unavailable in workspace sandbox; "
+                             "merge the base outside the sandbox and retry.")
+        files = "\n".join("- " + path for path in base_merge["files"])
+        if ru:
+            prompt = (f"Ветка задачи конфликтует с текущей базой {base}.\n"
+                      f"Конфликтующие файлы:\n{files}\n\n"
+                      f"Слей {base} в ветку задачи обычным merge-коммитом: "
+                      f"`git merge --no-ff {shlex.quote(base)}`. Не делай rebase или force-push. "
+                      "Разреши конфликты, сохранив смысл изменений обеих сторон.\n")
+            if st.get("check"):
+                prompt += f"Запусти сохранённую проверку целиком: `{st['check']}`.\n"
+            return prompt + ("Закоммить и запушь изменения. Верни итог по схеме работы; "
+                             "findings — пустой массив.\n")
+        prompt = (f"The task branch conflicts with the current base {base}.\n"
+                  f"Conflicting files:\n{files}\n\n"
+                  f"Merge {base} into the task branch with an ordinary merge commit: "
+                  f"`git merge --no-ff {shlex.quote(base)}`. Do not rebase or force-push. "
+                  "Resolve the conflicts while preserving the intent of both sides.\n")
+        if st.get("check"):
+            prompt += f"Run the saved check in full: `{st['check']}`.\n"
+        return prompt + ("Commit and push the changes. Return the work result schema; "
+                         "use an empty findings array.\n")
     if check is not None:
         prompt = (("Исправь сбой сохранённой проверки после предыдущего исправления.\n" if ru else
                    "Fix the saved check failure after the previous fix.\n") +

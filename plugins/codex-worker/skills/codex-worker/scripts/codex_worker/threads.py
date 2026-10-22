@@ -39,6 +39,11 @@ def last_message(st):
     return msgs[-1] if msgs else ""
 
 
+def followup_messages(st):
+    messages = config.TASKS / st["slug"] / "messages.jsonl"
+    return [json.loads(line) for line in messages.read_text().splitlines()] if messages.exists() else []
+
+
 def followup_prompt(st, message, cfg, source="claude"):
     """Journal follow-ups before dispatch so rotation includes the current request."""
     with (config.TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
@@ -136,16 +141,14 @@ def handoff(st, current_message=False, cfg=None):
                     "Its commits and uncommitted changes in this worktree are your starting point. "
                     "Continue the existing work without starting over or reverting it.\n\n"))
     prompt += "Сообщения от Claude и ревью по порядку:\n" if ru else "Messages from Claude and review, in order:\n"
-    messages = d / "messages.jsonl"
-    if messages.exists():
-        lines = messages.read_text().splitlines()
-        for n, line in enumerate(lines, 1):
-            text = json.loads(line)["text"]
-            if current_message and n == len(lines):
-                heading = "Текущее сообщение — выполни его" if ru else "Current message — carry it out"
-                prompt += f"\n### {heading}\n\n{text}\n"
-            else:
-                prompt += f"\n{n}. {text}\n"
+    messages = followup_messages(st)
+    for n, message in enumerate(messages, 1):
+        text = message["text"]
+        if current_message and n == len(messages):
+            heading = "Текущее сообщение — выполни его" if ru else "Current message — carry it out"
+            prompt += f"\n### {heading}\n\n{text}\n"
+        else:
+            prompt += f"\n{n}. {text}\n"
     if not scouting:
         prompt += f"\n{'Коммиты' if ru else 'Commits'} (git log --oneline {st['base']}..HEAD):\n"
         prompt += procs.sh(config.GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False) or ("(нет)" if ru else "(none)")

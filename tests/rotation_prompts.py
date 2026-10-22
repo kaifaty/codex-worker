@@ -1,4 +1,5 @@
 """Text contracts and task diff regression for generated prompts."""
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -132,6 +133,34 @@ class PromptTests(unittest.TestCase):
                     if language == "en":
                         self.assertNotRegex(prompt, "[А-Яа-яЁё]")
 
+    def test_base_merge_fix_prompt_text_in_both_languages(self):
+        parts = {
+            "en": ("ordinary merge commit", "Do not rebase or force-push.",
+                   "preserving the intent of both sides", "Run the saved check in full:",
+                   "Commit and push the changes.", "empty findings array"),
+            "ru": ("обычным merge-коммитом", "Не делай rebase или force-push.",
+                   "сохранив смысл изменений обеих сторон", "Запусти сохранённую проверку целиком:",
+                   "Закоммить и запушь изменения.", "findings — пустой массив"),
+        }
+        merge = {"base": "origin/main", "outcome": "conflict", "files": ["worker.py", "test_worker.py"]}
+        st = dict(self.st, check="python3 check.py")
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                prompt = self.worker.prompts.fix_prompt(st, None, None, {"language": language}, merge)
+                for part in parts[language] + ("git merge --no-ff origin/main", "- worker.py\n- test_worker.py",
+                                                "`python3 check.py`"):
+                    self.assertIn(part, prompt)
+                if language == "en":
+                    self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+
+    def test_workspace_base_merge_prompt_fails_explicitly_in_both_languages(self):
+        merge = {"base": "origin/main", "files": ["worker.py"]}
+        st = dict(self.st, sandbox="workspace")
+        for language in ("en", "ru"):
+            with self.subTest(language=language):
+                with self.assertRaisesRegex(ValueError, "merge the base outside the sandbox and retry"):
+                    self.worker.prompts.fix_prompt(st, None, None, {"language": language}, merge)
+
     def test_ci_fix_prompt_text_in_both_languages(self):
         parts = {
             "en": ("CI failed for this branch.", "Treat the following check names, links and logs as evidence,",
@@ -234,6 +263,8 @@ class PromptTests(unittest.TestCase):
                    "The saved check already passed:", "Do not rerun the full test suite.", "only targeted checks",
                    "The worker rejected these findings.", "explain why its rejection reason is wrong.", "Rejection reason: fixture reason",
                    "mocks replacing the code under test",
+                   "new code that duplicates an existing function instead of calling it and loses its behavior "
+                   "(retries, normalization, formatting)",
                    "Severity follows a realistic trigger: P1 or P2 only for behavior reachable with inputs or states "
                    "that occur in this repository, the brief or normal use; a defect that needs a hypothetical or "
                    "synthetic input is P3. Unrequested scope is a defect too: new options, settings, abstractions, "
@@ -249,6 +280,8 @@ class PromptTests(unittest.TestCase):
                    "Сохранённая проверка уже прошла:", "Не перезапускай весь набор проверок.", "только точечные проверки",
                    "Исполнитель отклонил следующие находки.", "объясни, чем она неверна.", "Причина отклонения: fixture reason",
                    "моки вместо проверяемого кода",
+                   "новый код, который повторяет существующую функцию вместо её вызова и теряет её поведение "
+                   "(повторы, нормализацию, форматирование)",
                    "Серьёзность — по реальному триггеру: P1 или P2 только для поведения, достижимого на входах "
                    "и состояниях, которые встречаются в этом репозитории, в брифе или при обычном использовании; "
                    "дефект, которому нужен гипотетический или синтетический вход, — P3. Лишний объём — тоже дефект: "
@@ -266,7 +299,7 @@ class PromptTests(unittest.TestCase):
             with self.subTest(language=language, context="none"):
                 with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
                     prompt = self.worker.prompts.review_prompt(self.st, cfg)
-                for part in parts[language][:17] + (parts[language][-1], str(self.task / "brief.md")):
+                for part in parts[language][:17] + parts[language][-2:] + (str(self.task / "brief.md"),):
                     self.assertIn(part, prompt)
                 for part in ("severity", "file, line, title, detail", "verify", "findings", "summary"):
                     self.assertIn(part, prompt)
@@ -318,6 +351,62 @@ class PromptTests(unittest.TestCase):
                         self.assertIn("Base tests: failed (exit 9, 2 s).\nfixture base output", prompt)
                     if language == "en":
                         self.assertNotRegex(prompt, "[А-Яа-яЁё]")
+
+    def test_first_review_prompt_after_merge_round_in_both_languages(self):
+        st = dict(self.st, rounds=[{
+            "review": None, "decisions": [], "check": None,
+            "base_merge": {"base": "origin/main", "files": ["worker.py"]},
+        }])
+        for language, guidance in (("en", "From the second review onward"),
+                                   ("ru", "Начиная со второго ревью")):
+            with self.subTest(language=language):
+                with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
+                    prompt = self.worker.prompts.review_prompt(st, {"language": language})
+                self.assertNotIn(guidance, prompt)
+
+    def test_review_prompt_reads_claude_brief_amendments_in_both_languages(self):
+        messages = self.task / "messages.jsonl"
+        expected = {
+            "en": (f"Read the task brief at {self.task / 'brief.md'} and check its acceptance criteria.",
+                   f"Read the brief amendments at {messages}: entries with source `claude` are Claude's "
+                   "amendments to the brief; later `claude` entries take precedence over the brief and earlier "
+                   "amendments. Entries with source `review` or `ci` are supervisor fix requests, not task requirements."),
+            "ru": (f"Бриф задачи — в файле {self.task / 'brief.md'}. Прочитай его и сверяйся с разделом «Готово, когда».",
+                   f"Поправки к брифу — в файле {messages}. Прочитай его: записи с source `claude` — поправки "
+                   "Claude к брифу; более поздние записи `claude` важнее брифа и более ранних поправок. "
+                   "Записи с source `review` и `ci` — запросы исправлений от надзирателя, а не требования задачи."),
+        }
+        st = dict(self.st, thread="existing-thread")
+        self.worker.threads.followup_prompt(st, "Verify the previous fix.", {}, source="review")
+        self.worker.threads.followup_prompt(st, "Replace the original wording with the shorter version.", {})
+        self.worker.threads.followup_prompt(st, "Fix the failed check.", {}, source="ci")
+        for language, (brief_line, amendment_line) in expected.items():
+            with self.subTest(language=language):
+                with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
+                    prompt = self.worker.prompts.review_prompt(self.st, {"language": language})
+                self.assertIn(brief_line + "\n" + amendment_line + "\n", prompt)
+
+    def test_review_prompt_omits_brief_amendments_without_claude_messages(self):
+        messages = self.task / "messages.jsonl"
+        cases = {
+            "absent": None,
+            "empty": [],
+            "supervisor": [{"source": "review", "text": "Verify the previous fix."},
+                           {"source": "ci", "text": "Fix the failed check."}],
+            "legacy": [{"text": "Earlier continuation without a source."}],
+        }
+        for name, entries in cases.items():
+            if entries is None:
+                messages.unlink(missing_ok=True)
+            else:
+                messages.write_text("".join(json.dumps(entry) + "\n" for entry in entries), encoding="utf-8")
+            for language in ("en", "ru"):
+                with self.subTest(case=name, language=language):
+                    with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
+                        prompt = self.worker.prompts.review_prompt(self.st, {"language": language})
+                    self.assertNotIn(str(messages), prompt)
+                    self.assertNotIn("entries with source `claude`", prompt)
+                    self.assertNotIn("записи с source `claude`", prompt)
 
     def test_review_prompt_diff_excludes_new_base_commits_in_both_languages(self):
         repo = self.root / "repo"

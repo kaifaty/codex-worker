@@ -13,8 +13,8 @@ The supervisor saves valid implementation JSON in state as `result`; `status` sh
 | `summary` | short plain-language summary |
 | `checks` | `{command, outcome, details}`; `outcome` is `passed`, `failed` or `not_run`, `details` carries numbers |
 | `pr` | compatibility field; the worker returns an empty string |
-| `pr_title` | required string; PR title, or empty to use the latest commit subject |
-| `pr_body` | required string; description of the whole PR, not just this turn; empty leaves an existing PR unchanged, or uses `summary` when creating one |
+| `pr_title` | required string; PR title, or empty to use the latest commit subject; when creating a PR, first reuse the latest nonempty title from this task's earlier results |
+| `pr_body` | required string; description of the whole PR, not just this turn; empty leaves an existing PR unchanged; when creating one, reuse the latest nonempty body from this task's earlier results, then fall back to `summary` |
 | `commit_message` | repository-style message, subject on the first line; empty when the worker committed or nothing changed |
 | `questions` | questions for Claude |
 | `remaining` | unfinished work, including findings deferred as `out of scope` |
@@ -26,6 +26,9 @@ when `origin` has the local branch's HEAD. The `publish` receipt records its URL
 `== PR updated <URL>`, or `== PR skipped: <reason>`; its final `PR:` uses the receipt URL.
 Missing or unauthorized GitHub CLI and publication errors do not fail the turn. Closed and merged
 PRs are left unchanged.
+For a new PR, title and body fall back independently to earlier results across the task's threads.
+Known non-GitHub `origin` hosts are skipped with `not a GitHub remote: <host>` before invoking the
+GitHub CLI; SSH aliases are resolved with `ssh -G`. Commit and push behavior is unchanged.
 
 ## CI result
 
@@ -85,9 +88,13 @@ result with numbers and attempts. The wrap-up has a 10-minute cap and is stopped
 - After a review: findings with IDs, severity, file and line, details and verification steps; with
   angles, a runtime and outcome line per angle before the combined review.
 - After an automatic fix cycle: finding counts and decisions per round, rejected findings with reasons,
-  code additions/deletions excluding guarded files, check results, the latest review in full, a
-  finding-count history, and the stop reason. For `escalate`, the stop line names each P1/P2 finding
-  targeting code from a fix round, that round's number, and its short commit SHA.
+  code additions/deletions for ordinary fix rounds excluding guarded files, check results, the latest
+  review in full, a finding-count history, and the stop reason. For `escalate`, the stop line names each
+  P1/P2 finding targeting code from a fix round, that round's number, and its short commit SHA.
+- Base merge rounds name the base and conflicting files. A base conflict without remaining fix
+  rounds stops before automatic review with `auto_fix_stop: "base conflict"`; `wait` prints the base
+  and conflicting files even when `--fix-rounds` is zero. Failed fetch or merge-tree checks print
+  their recorded skip reason and allow review to proceed; see [review-cycle.md](review-cycle.md).
 - `guarded files changed` and `== base tests`: see [checks.md](checks.md).
 - `== sandbox: workspace` and publication results: see [sandbox.md](sandbox.md).
 - CI outcome, checks, and failed-check log tails, when CI waiting is enabled.

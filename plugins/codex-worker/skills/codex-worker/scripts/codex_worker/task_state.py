@@ -75,6 +75,7 @@ STATE_FIELDS = {
     "error": StateField("turn", spawn_reset=STATE_DELETE),
     "review_skipped": StateField("turn", spawn_reset=STATE_DELETE),
     "auto_fix_stop": StateField("turn", spawn_reset=STATE_DELETE),
+    "base_merges": StateField("turn", spawn_reset=STATE_DELETE),
     "auto_fix_escalations": StateField("turn", spawn_reset=STATE_DELETE),
     "turn_stop": StateField("turn", spawn_reset=STATE_DELETE),
     "wrapup": StateField("turn", spawn_reset=STATE_DELETE),

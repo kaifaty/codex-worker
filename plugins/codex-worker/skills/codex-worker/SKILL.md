@@ -23,7 +23,7 @@ Reference detail lives in `references/`. Read a file only when its topic comes u
 | [accounts.md](references/accounts.md) | subscriptions and rotation, `auto-continue at`, `needs login`, reset credits |
 | [notifications.md](references/notifications.md) | the user asks about task notifications |
 | [telemetry.md](references/telemetry.md) | `report`, or deciding whether fix rounds or review angles pay off |
-| [reflection.md](references/reflection.md) | after `clean` of a task that escalated, needed a corrective `say` or failed a check; before changing `AGENTS.md` or standing rules |
+| [reflection.md](references/reflection.md) | after `clean` of a task whose fix cycle did not converge or that ended `blocked`; the weekly batch; before changing `AGENTS.md` or standing rules |
 | [desktop-threads.md](references/desktop-threads.md) | the thread runs in the Codex desktop app, not under this skill |
 
 ## Delegate or do it yourself
@@ -37,14 +37,6 @@ Keep it yourself when:
 - it is small — a few edits or tool calls cost less than writing a brief and reviewing a PR;
 - it needs the user's live systems you are trusted with and Codex is not (accounts, publishing, uploads);
 - the spec is still fuzzy: settle it first (with the user if needed), then delegate.
-
-Visual and 3D work stays with Claude Opus 5.5: textures, image-generation prompts, models, materials,
-colour choice and colour correction, texture processing and packing, animations, scenes, rendering and
-shader code, captures and measurements made to judge a look, and the code of all these steps, plus any
-review of them. Do it yourself, or through an Opus subagent when you run on another model. Codex gets no
-task, scout or review of it; split a mixed task and delegate only the rest. The one exception is image generation: a scout in an empty directory may run
-Codex's `image_gen` tool with the prompt you wrote. Ask it only for the file paths, not for an
-assessment, and judge each image yourself.
 
 ## The brief
 
@@ -162,13 +154,15 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
    check does not replace reading the diff.
 4. Problems found, or findings left after the round limit → one `say` with all of them, each with what's
    wrong, what to do and how it is checked, with `--max-minutes M --review --fix-rounds 2 --ci` for another
-   bounded cycle. Decide yourself whether P3 findings and work rejected as `out of scope` belong in a
-   separate task, and record deferred work in issues when appropriate.
+   bounded cycle. A `say` that merges the base keeps the saved check and `--fix-rounds`: name extra tests in
+   addition to the check, never instead of it. Decide yourself whether P3 findings and work rejected as
+   `out of scope` belong in a separate task, and record deferred work in issues when appropriate.
 5. For a GitHub PR, merge only when `wait` reports `CI … passed`; `failed`, `timeout`, `none`, and
    `skipped` need resolution first. Immediately before merging, run `gh pr checks <url>` again and
-   verify all checks pass or skip. Merge per the repo's rules, then `clean`, and
-   [reflect](references/reflection.md) on its record if the task showed a signal. Report to the user: what Codex did, what you
-   checked, what is still open, the PR link, and any account switch `wait` reported.
+   verify all checks pass or skip. Merge per the repo's rules, then `clean`. If the task failed expensively,
+   [reflect](references/reflection.md#when) on its record now; other records wait for the weekly batch.
+   Report to the user: what Codex did, what you checked, what is still open, the PR link, and any account
+   switch `wait` reported.
 
 ## Stop rules
 
