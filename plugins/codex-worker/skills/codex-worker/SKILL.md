@@ -1,6 +1,6 @@
 ---
 name: codex-worker
-description: Delegate implementation work to Codex (OpenAI's coding agent, using the user's ChatGPT plan) and stay in control of it - Claude plans, writes the brief, reviews the result and merges; Codex writes the code in its own git worktree. Use it to save the Claude subscription on any sizeable, well-specified coding task (a feature step, a fix with a clear "done when", engine/C++ work, benchmarks, mechanical changes), when the user says to give work to Codex, and to steer or check a Codex thread already open in the Codex desktop app - also in Russian (поручи кодексу, отдай codex, пусть кодекс сделает, делегируй, кодекс исполнитель, проверь кодекс, что там у кодекса).
+description: Delegate implementation work to Codex (OpenAI's coding agent, using the user's ChatGPT plan) and stay in control of it - Claude plans, writes the brief, reviews the result and merges; Codex writes the code in its own git worktree. Use it to save the Claude subscription on any sizeable, well-specified coding task (a feature step, a fix with a clear "done when", engine/C++ work, benchmarks, mechanical changes) that the user's or the repository's instructions do not keep for Claude, when the user says to give work to Codex, and to steer or check a Codex thread already open in the Codex desktop app - also in Russian (поручи кодексу, отдай codex, пусть кодекс сделает, делегируй, кодекс исполнитель, проверь кодекс, что там у кодекса).
 ---
 
 # Codex as the worker, Claude as the lead
@@ -36,7 +36,14 @@ Keep it yourself when:
 - it is a decision, a design question, a plan, or a talk with the user;
 - it is small — a few edits or tool calls cost less than writing a brief and reviewing a PR;
 - it needs the user's live systems you are trusted with and Codex is not (accounts, publishing, uploads);
-- the spec is still fuzzy: settle it first (with the user if needed), then delegate.
+- the spec is still fuzzy: settle it first (with the user if needed), then delegate;
+- the user's or the repository's instructions keep this kind of work for Claude, for example visual or 3D
+  work. Codex then gets no task, scout or review of it, and none of the code that serves it: split a mixed
+  task and delegate only the rest. Codex helps there only in the way those instructions name, such as
+  [one tool run](#one-codex-tool-with-your-prompt).
+
+Such instructions win over this skill's defaults, including delegating by default and asking scouts instead
+of reading code yourself.
 
 ## The brief
 
@@ -110,6 +117,13 @@ new session `status` and `wait` pick it up again.
 Scouts need no `--parallel`: run several at once, one question each, alongside tasks. `say` continues a
 scout's read-only thread; `--check`, `--review`, `--review-angles`, `--fix-rounds` and `review` don't
 apply to scouts. `clean` on a scout archives its record the same way, never the inspected directory.
+
+### One Codex tool with your prompt
+
+When the instructions allow Codex only one tool for work kept for Claude, for example image generation, run
+it as a scout with `--repo` set to a new empty directory. Run `git init` there first: Codex refuses a
+directory that is neither trusted nor a git repository. Put your prompt in the question verbatim and ask
+only for the output file paths and the prompt as sent, not for an assessment. Judge the output yourself.
 
 ## Budgets and checks
 
