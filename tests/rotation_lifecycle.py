@@ -1058,6 +1058,22 @@ worker.notifications.reap_notifications = reap
         self.assertIn("(second)", output)
         self.assertIn("continue with say after that", output)
 
+        self.configure(soft_switch_at=80, wait_for_reset=False)
+        release = self.root / "report-hard-limit"
+        self.account(self.home, "A", self.reset, used=80, runs=[
+            {"mode": "usage_error", "rollout_used": 80, "delay_gate": str(release)}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        probes = len([event for event in self.trace() if event.get("command") == "quota-snapshot"])
+        self.start("soft-error-reset")
+        self.until(lambda: len([event for event in self.trace()
+                                if event.get("command") == "quota-snapshot"]) >= probes + 4)
+        release.touch()
+        output = self.wait("soft-error-reset")
+        exhausted = self.state("soft-error-reset")["exhausted"]
+        self.assertEqual(exhausted["account"], "main")
+        self.assertEqual(exhausted["reset"], self.reset)
+        self.assertIn("(main)", output)
+
     def test_all_accounts_exhausted_before_start_has_no_previous_executor(self):
         self.configure(wait_for_reset=False)
         self.exhaust_accounts((self.home, "A", self.reset + 3600),
@@ -1155,18 +1171,24 @@ worker.notifications.reap_notifications = reap
 
     def test_monitor_continues_when_all_accounts_reach_the_soft_threshold(self):
         self.configure(soft_switch_at=80)
-        for used, executions in ((80, 1), (10, 2)):
-            with self.subTest(rpc_used=used):
-                slug = "soft-continue-" + str(used)
+        for used, executions, reset in ((80, 1, False), (10, 2, False), (10, 3, True)):
+            with self.subTest(rpc_used=used, reset=reset):
+                slug = "soft-continue-" + str(executions)
                 release = self.root / slug
                 run = {"mode": "complete", "rollout_used": 80, "delay_gate": str(release)}
                 self.account(self.home, "A", self.reset, used=used, runs=[run])
-                self.account(self.other, "B", self.reset + 3600, used=used, runs=[run])
+                second_release = self.root / (slug + "-second")
+                second_run = dict(run, rollout_gate=str(second_release)) if reset else run
+                self.account(self.other, "B", self.reset + 3600, used=used, runs=[second_run])
                 before = len(self.invocations())
                 probes = len([event for event in self.trace() if event.get("command") == "quota-snapshot"])
                 self.start(slug)
+                if reset:
+                    self.until(lambda: len(self.invocations()) == before + 2)
+                    self.account(self.home, "A", self.reset + 10080 * 60, used=0)
+                    second_release.touch()
                 self.until(lambda: len([event for event in self.trace()
-                                        if event.get("command") == "quota-snapshot"]) >= probes + 2 + 2 * executions)
+                                        if event.get("command") == "quota-snapshot"]) >= probes + 2 + 2 * min(executions, 2))
                 release.touch()
                 self.wait(slug)
                 self.assertEqual(len(self.invocations()) - before, executions)

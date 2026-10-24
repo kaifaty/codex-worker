@@ -60,7 +60,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
     control = turn_monitor.TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
     visited = set()
-    soft_visited = set()
+    soft_visited = {}
     rotations = 0
     rotation = None
     soft_rotation = False
@@ -102,7 +102,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                 rotations += 1
                 visited.add(st["account"])
             else:
-                soft_visited.add(st["account"])
+                soft_visited[st["account"]] = current["limits"]
             st["thread"] = ""
         account = accounts.account_named(cfg, chosen["name"])
         quota_snapshot = chosen.get("limits")
@@ -119,17 +119,28 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     def on_limit(local, reason, allow_credits, cancelled):
         infos = account_rotation.task_snapshots(st, cfg, cancelled)
         current = next((i for i in infos if i["name"] == account["name"]), {})
-        if local and accounts.exhausted(local, cfg, soft=True):
+        if local and accounts.exhausted(local, cfg):
             # The RPC may lag the local rollout; keep its fresh credit balance.
             credits = current.get("limits", {}).get("credits", {})
             current["limits"] = dict(local["limits"], credits=credits)
         soft = allow_credits and local and not accounts.exhausted(local, cfg)
-        used = visited | soft_visited if soft else visited
+        if soft:
+            for info in infos:
+                previous = soft_visited.get(info["name"], {})
+                windows = [(window, info.get("limits", {}).get(name, {}))
+                           for name, window in previous.items() if name in ("primary", "secondary")
+                           and window.get("used", 0) >= cfg.get("soft_switch_at", cfg["switch_at"])]
+                if windows and all(before.get("reset") is not None and after.get("reset") is not None
+                                   and after["reset"] > before["reset"] for before, after in windows):
+                    del soft_visited[info["name"]]
+        used = visited | set(soft_visited) if soft else visited
         used_ids = {i.get("account_id") for i in infos if i["name"] in used and i.get("account_id")}
         excluded = used | {i["name"] for i in infos if i.get("account_id") in used_ids}
         if soft:
             chosen = accounts.available(infos, cfg, excluded)
             if chosen and not accounts.exhausted(chosen, cfg, soft=True):
+                # Keep the local windows until RPC confirms their reset, even if RPC usage lags.
+                soft_visited[account["name"]] = local["limits"]
                 return {"reason": reason, "infos": infos, "chosen": chosen, "soft": True}
             return None
         current["ordinary"] = False
@@ -263,8 +274,6 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         if soft_rotation:
             # Its reserve remains usable after the other accounts reach the soft threshold.
             visited.discard(rotation["from"])
-            # Do not trust a lagging RPC to invite another soft switch in this cycle.
-            soft_visited.add(rotation["from"])
         else:
             rotations += 1
         task_state.save(st)
