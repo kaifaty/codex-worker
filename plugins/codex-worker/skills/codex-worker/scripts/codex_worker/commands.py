@@ -308,6 +308,8 @@ def cmd_accounts(a):
 
 
 def print_accounts(infos, cfg):
+    if cfg.get("soft_switch_at", cfg["switch_at"]) != cfg["switch_at"]:
+        print(f"soft_switch_at: {cfg['soft_switch_at']:g}% (switch_at: {cfg['switch_at']:g}%)")
     print("NAME\tEMAIL\tPLAN\tWEEKLY %\tRESET (LOCAL)\tCREDITS\tRESETS\tSTATUS")
     for info in infos:
         w = accounts.longest_window(info)

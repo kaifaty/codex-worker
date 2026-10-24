@@ -89,6 +89,8 @@ def monitor_quota_decision(info, cfg, reason=None) -> MonitorQuotaDecision:
         return MonitorQuotaDecision("limit" if cfg["enabled"] else "failed", info, reason)
     if cfg["enabled"] and accounts.exhausted(info, cfg):
         return MonitorQuotaDecision("limit", info, account_rotation.limit_reason(info, cfg), True)
+    if cfg["enabled"] and accounts.exhausted(info, cfg, soft=True):
+        return MonitorQuotaDecision("limit", info, account_rotation.limit_reason(info, cfg, soft=True), True)
     return MonitorQuotaDecision("continue")
 
 

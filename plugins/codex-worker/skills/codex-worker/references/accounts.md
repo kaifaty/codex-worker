@@ -21,6 +21,7 @@ subscriptions, the settings can contain:
 {
   "language": "en",
   "switch_at": 99,
+  "soft_switch_at": 80,
   "credits": false,
   "wait_for_reset": true,
   "accounts": [
@@ -53,13 +54,24 @@ tokens appear separately in telemetry and `report`.
 
 ## Rotation
 
-With `accounts` configured, `start` chooses an available account whose longest window resets first;
-`say` keeps the current account while it is available. A detached supervisor watches limits and switches
-accounts at the `switch_at` threshold or on a usage-limit error. The next account opens a new thread in
-the same worktree, with the brief, follow-ups and current progress; commits and uncommitted changes are
-the starting point. If no other account is available, it continues on credits only when `credits` is
-true. Use `accounts` to inspect availability; two homes signed into the same ChatGPT account share
-limits.
+With `accounts` configured, `start` prefers accounts below `soft_switch_at` in both the `primary` and
+`secondary` windows, choosing the one whose longest window resets first. If none are below the soft
+threshold, it uses the same reset ordering among accounts still below `switch_at`.
+
+`soft_switch_at` must be a number in `(0, switch_at]`. It defaults to `switch_at` (whose default is
+`99`), preserving the original behavior. For example, `soft_switch_at: 80` and `switch_at: 99` keep
+a reserve on each account: reaching 80% used in either window triggers a switch only if another
+available account is below 80% in both windows. When all accounts have reached the soft threshold,
+the current account continues until `switch_at` or a usage-limit error; the soft threshold causes
+no further switches. `say` also keeps the current account while it is below the soft threshold or
+there is no other available account below it.
+
+A detached supervisor watches limits and applies these thresholds during the task. `wait` and
+rotation notifications name `soft_switch_at` when it caused the switch; `accounts` displays it when
+it differs from `switch_at`. The next account opens a new thread in the same worktree, with the brief,
+follow-ups and current progress; commits and uncommitted changes are the starting point. At the hard
+threshold, if no other account is available, it continues on credits only when `credits` is true.
+Use `accounts` to inspect availability; two homes signed into the same ChatGPT account share limits.
 
 ## Waiting for a reset
 

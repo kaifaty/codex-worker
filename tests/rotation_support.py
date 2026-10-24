@@ -386,7 +386,7 @@ def execute():
     if run["mode"] in ("limit", "usage_error"):
         clock.sleep(run.get("limit_after", 0.15))
         value = fixture()
-        value["primary"]["usedPercent"] = 99
+        value["primary"]["usedPercent"] = run.get("limit_used", 99)
         value["ordinaryUsageAllowed"] = run.get("ordinaryUsageAllowed", True)
         fixture_path.write_text(json.dumps(value))
         rollout_limits()

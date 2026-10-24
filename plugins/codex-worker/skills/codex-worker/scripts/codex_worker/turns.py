@@ -60,8 +60,10 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
     control = turn_monitor.TurnControl(minutes, cfg.get("repeat_limit", 3), st.get("max_task_weekly_percent"))
     visited = set()
+    soft_visited = {}
     rotations = 0
     rotation = None
+    soft_rotation = False
     capacity_retried = False
     resume_thread = None
     if new_turn:
@@ -76,8 +78,13 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         same_account = {i["name"] for i in infos if current.get("account_id")
                         and i.get("account_id") == current["account_id"]}
         resuming = bool(st.get("thread")) and not reviewing
-        chosen = (current if resuming and current.get("logged_in") and not accounts.exhausted(current, cfg)
-                  else accounts.available(infos, cfg, same_account if resuming else ()))
+        chosen = accounts.available(infos, cfg, same_account if resuming else ())
+        if resuming and current.get("logged_in") and not accounts.exhausted(current, cfg):
+            if (not accounts.exhausted(current, cfg, soft=True) or not chosen
+                    or accounts.exhausted(chosen, cfg, soft=True)):
+                chosen = current
+            else:
+                soft_rotation = True
         if not chosen and cfg["credits"]:
             chosen = current if current.get("logged_in") and accounts.has_credits(current) else None
         if stopped():
@@ -89,10 +96,13 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         if resuming and chosen["name"] != st["account"]:
             prompt = threads.handoff(st, current_message=current_message, cfg=cfg)
             st["rotations"].append({"at": clock.CLOCK.time(), "from": st["account"], "to": chosen["name"],
-                                    "reason": account_rotation.limit_reason(current, cfg), "thread": ""})
+                                    "reason": account_rotation.limit_reason(current, cfg, soft=soft_rotation), "thread": ""})
             rotation = st["rotations"][-1]
-            rotations += 1
-            visited.add(st["account"])
+            if not soft_rotation:
+                rotations += 1
+                visited.add(st["account"])
+            else:
+                soft_visited[st["account"]] = current["limits"]
             st["thread"] = ""
         account = accounts.account_named(cfg, chosen["name"])
         quota_snapshot = chosen.get("limits")
@@ -102,7 +112,8 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         st["review_account"] = account["name"]
     task_state.save(st)
     if rotation is not None:
-        notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
+        notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}" +
+               (f": {rotation['reason']}" if soft_rotation else ""),
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
     def on_limit(local, reason, allow_credits, cancelled):
@@ -112,9 +123,27 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             # The RPC may lag the local rollout; keep its fresh credit balance.
             credits = current.get("limits", {}).get("credits", {})
             current["limits"] = dict(local["limits"], credits=credits)
+        soft = allow_credits and local and not accounts.exhausted(local, cfg)
+        if soft:
+            for info in infos:
+                previous = soft_visited.get(info["name"], {})
+                windows = [(window, info.get("limits", {}).get(name, {}))
+                           for name, window in previous.items() if name in ("primary", "secondary")
+                           and window.get("used", 0) >= cfg.get("soft_switch_at", cfg["switch_at"])]
+                if windows and all(before.get("reset") is not None and after.get("reset") is not None
+                                   and after["reset"] > before["reset"] for before, after in windows):
+                    del soft_visited[info["name"]]
+        used = visited | set(soft_visited) if soft else visited
+        used_ids = {i.get("account_id") for i in infos if i["name"] in used and i.get("account_id")}
+        excluded = used | {i["name"] for i in infos if i.get("account_id") in used_ids}
+        if soft:
+            chosen = accounts.available(infos, cfg, excluded)
+            if chosen and not accounts.exhausted(chosen, cfg, soft=True):
+                # Keep the local windows until RPC confirms their reset, even if RPC usage lags.
+                soft_visited[account["name"]] = local["limits"]
+                return {"reason": reason, "infos": infos, "chosen": chosen, "soft": True}
+            return None
         current["ordinary"] = False
-        used_ids = {i.get("account_id") for i in infos if i["name"] in visited and i.get("account_id")}
-        excluded = visited | {i["name"] for i in infos if i.get("account_id") in used_ids}
         chosen = accounts.available(infos, cfg, excluded) if rotations < len(cfg["accounts"]) else None
         if allow_credits and not chosen and cfg["credits"] and current.get("logged_in") and accounts.has_credits(current):
             return None
@@ -221,6 +250,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                 break
             # Fresh quota snapshots start a new rotation cycle, including past accounts.
             visited.clear()
+            soft_visited.clear()
             rotations = 0
         quota_snapshot = chosen.get("limits")
         if chosen["name"] == account["name"]:
@@ -240,9 +270,15 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             st["review_account"] = account["name"]
         else:
             st.update(account=account["name"], thread="")
-        rotations += 1
+        soft_rotation = decision.get("soft", False)
+        if soft_rotation:
+            # Its reserve remains usable after the other accounts reach the soft threshold.
+            visited.discard(rotation["from"])
+        else:
+            rotations += 1
         task_state.save(st)
-        notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
+        notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}" +
+               (f": {rotation['reason']}" if soft_rotation else ""),
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
 

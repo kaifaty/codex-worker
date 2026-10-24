@@ -80,6 +80,7 @@ def accounts_config():
     cfg.setdefault("accounts", [{"name": "main", "home": str(CODEX_HOME)}])
     cfg.setdefault("language", "en")
     cfg.setdefault("switch_at", 99)
+    cfg.setdefault("soft_switch_at", cfg["switch_at"])
     cfg.setdefault("credits", False)
     cfg.setdefault("wait_for_reset", True)
     cfg.setdefault("use_reset_credits", False)
@@ -147,6 +148,9 @@ def accounts_config():
         procs.die("notify_events must be a list of event types")
     if not isinstance(cfg["switch_at"], (int, float)) or not 0 < cfg["switch_at"] <= 100:
         procs.die("switch_at must be in (0, 100]")
+    if (type(cfg["soft_switch_at"]) not in (int, float)
+            or not 0 < cfg["soft_switch_at"] <= cfg["switch_at"]):
+        procs.die("soft_switch_at must be a number in (0, switch_at]")
     if not isinstance(cfg["credits"], bool):
         procs.die("credits must be true or false")
     if not isinstance(cfg["ci"], bool):

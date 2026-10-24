@@ -532,11 +532,21 @@ class ResultScoutConfigTests(RotationTestCase):
         cfg = worker.config.accounts_config()
         self.assertEqual(cfg["language"], "en")
         self.assertEqual(cfg["switch_at"], 95)
+        self.assertEqual(cfg["soft_switch_at"], 95)
         self.assertFalse(cfg["enabled"], "a settings file alone must not enable rotation")
         self.assertEqual(cfg["accounts"], [{"name": "main", "home": str(self.home)}])
         # A malformed legacy file must not affect the preferred settings.
         (self.home / "claude-accounts.json").write_text("not json")
         self.assertEqual(worker.config.accounts_config(), cfg)
+        for value in (80.5, 95):
+            path.write_text(json.dumps({"switch_at": 95, "soft_switch_at": value}))
+            self.assertEqual(worker.config.accounts_config()["soft_switch_at"], value)
+        for value in (0, 96, "80", True, None, float("inf"), float("nan")):
+            with self.subTest(soft_switch_at=value):
+                path.write_text(json.dumps({"switch_at": 95, "soft_switch_at": value}))
+                with self.assertRaises(SystemExit) as error:
+                    worker.config.accounts_config()
+                self.assertIn("soft_switch_at must be a number in (0, switch_at]", str(error.exception))
 
     def test_language_defaults_rules_and_generated_prompts(self):
         worker = self.worker()
