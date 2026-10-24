@@ -146,10 +146,11 @@ def normalize_limits(raw):
     return out
 
 
-def exhausted(info, cfg):
+def exhausted(info, cfg, soft=False):
     limits = info.get("limits", {})
+    threshold = cfg.get("soft_switch_at", cfg["switch_at"]) if soft else cfg["switch_at"]
     return (info.get("ordinary") is False or limits.get("reached") is not None
-            or any(limits.get(n, {}).get("used", 0) >= cfg["switch_at"] for n in ("primary", "secondary")))
+            or any(limits.get(n, {}).get("used", 0) >= threshold for n in ("primary", "secondary")))
 
 
 def reset_time(info, cfg):
@@ -199,6 +200,7 @@ def snapshots(cfg, cancelled=lambda: False, prepare=False):
 def available(infos, cfg, exclude=()):
     choices = [i for i in infos if i["logged_in"] and not i.get("duplicate")
                and i["name"] not in exclude and not exhausted(i, cfg)]
+    choices = [i for i in choices if not exhausted(i, cfg, soft=True)] or choices
     return min(choices, key=lambda i: longest_window(i).get("reset") or float("inf")) if choices else None
 
 

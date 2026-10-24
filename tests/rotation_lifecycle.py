@@ -1097,6 +1097,82 @@ worker.notifications.reap_notifications = reap
             self.assertTrue((self.other / name).is_symlink(), name)
             self.assertEqual((self.other / name).resolve(), (self.home / name).resolve())
 
+    def test_soft_threshold_selection_and_say_preserve_reserves(self):
+        for label, settings, expected in (("default", {}, "main"),
+                                          ("equal", {"soft_switch_at": 99}, "main"),
+                                          ("soft", {"soft_switch_at": 80}, "second")):
+            with self.subTest(label=label):
+                self.configure(**settings)
+                first = self.account(self.home, "A", self.reset)
+                first["secondary"]["usedPercent"] = 80
+                (self.home / "fixture.json").write_text(json.dumps(first))
+                self.account(self.other, "B", self.reset + 3600, used=79)
+                slug = "choose-" + label
+                self.start(slug)
+                self.wait(slug)
+                self.assertEqual(self.state(slug)["account"], expected)
+                self.assertFalse(self.state(slug)["rotations"])
+                listing = self.cli("accounts")
+                self.assertEqual("soft_switch_at: 80% (switch_at: 99%)" in listing, label == "soft")
+
+        self.configure_notify()
+        self.cli("say", "choose-soft", "Continue below the soft threshold")
+        self.wait("choose-soft")
+        self.assert_resumed_same_thread(*self.invocations()[-2:], self.other)
+        self.account(self.other, "B", self.reset + 3600, used=80)
+        self.cli("say", "choose-soft", "Continue using the reserve")
+        self.wait("choose-soft")
+        self.assert_resumed_same_thread(*self.invocations()[-2:], self.other)
+        self.assertFalse(self.state("choose-soft")["rotations"])
+
+        self.account(self.home, "A", self.reset)
+        self.cli("say", "choose-soft", "Use the account below the soft threshold")
+        output = self.wait("choose-soft")
+        self.assertEqual(self.state("choose-soft")["account"], "main")
+        self.assertIn("soft_switch_at 80%", output)
+        self.assertIn("soft_switch_at 80%", self.notification("choose-soft", "rotated")["message"])
+        self.assertFalse(self.invocations()[-1]["resume"])
+
+    def test_soft_rotation_keeps_reserve_available_after_a_hard_limit(self):
+        self.configure(soft_switch_at=80, wait_for_reset=False)
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "limit", "limit_used": 80},
+            {"mode": "complete", "reply": "Completed using the reserve"}])
+        self.account(self.other, "B", self.reset + 3600, runs=[{"mode": "limit"}])
+        self.start("soft-reserve")
+        output = self.wait("soft-reserve")
+        state = self.state("soft-reserve")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual([execution["home"] for execution in self.invocations()],
+                         [str(self.home), str(self.other), str(self.home)])
+        self.assertEqual(len(state["rotations"]), 2)
+        self.assertIn("soft_switch_at 80%", state["rotations"][0]["reason"])
+        self.assertEqual(state["rotations"][1]["reason"], "weekly limit 99%")
+        self.assertIn("soft_switch_at 80%", output)
+        self.assertIn("soft_switch_at 80%", self.notification("soft-reserve", "rotated")["message"])
+        self.assertIn("Completed using the reserve", output)
+
+    def test_monitor_continues_when_all_accounts_reach_the_soft_threshold(self):
+        self.configure(soft_switch_at=80)
+        for used, executions in ((80, 1), (10, 2)):
+            with self.subTest(rpc_used=used):
+                slug = "soft-continue-" + str(used)
+                release = self.root / slug
+                run = {"mode": "complete", "rollout_used": 80, "delay_gate": str(release)}
+                self.account(self.home, "A", self.reset, used=used, runs=[run])
+                self.account(self.other, "B", self.reset + 3600, used=used, runs=[run])
+                before = len(self.invocations())
+                probes = len([event for event in self.trace() if event.get("command") == "quota-snapshot"])
+                self.start(slug)
+                self.until(lambda: len([event for event in self.trace()
+                                        if event.get("command") == "quota-snapshot"]) >= probes + 2 + 2 * executions)
+                release.touch()
+                self.wait(slug)
+                self.assertEqual(len(self.invocations()) - before, executions)
+                self.assertEqual(self.state(slug)["outcome"], "completed")
+                self.assertEqual(len(self.state(slug)["rotations"]), executions - 1)
+
     def test_unstarted_automatic_review_does_not_repeat_a_handled_rotation_failure(self):
         self.configure(language="en", wait_for_reset=False)
         self.account(self.home, "A", self.reset, runs=[{"mode": "usage_error"}])

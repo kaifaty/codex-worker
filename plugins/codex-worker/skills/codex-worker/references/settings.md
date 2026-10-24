@@ -16,6 +16,7 @@ that file is absent.
 | `ci_timeout_minutes` | `30` | maximum wait for PR checks per CI attempt |
 | `sandbox`, `writable_dirs` | `"off"`, `[]` | [sandbox.md](sandbox.md) |
 | `accounts`, `switch_at`, `credits`, `wait_for_reset`, `use_reset_credits`, `reset_credit_min_hours` | | [accounts.md](accounts.md) |
+| `soft_switch_at` | value of `switch_at` | number in `(0, switch_at]`; prefer accounts below this usage percentage in both windows, then use the reserve up to `switch_at`; see [accounts.md](accounts.md#rotation) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
 
 ## Claude reviewer

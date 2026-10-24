@@ -5,12 +5,15 @@ import re
 from . import accounts, clock, config, credit_resets, notifications, task_state, telemetry_log
 
 
-def limit_reason(info, cfg):
+def limit_reason(info, cfg, soft=False):
     limits = info.get("limits", {})
+    threshold = cfg.get("soft_switch_at", cfg["switch_at"]) if soft else cfg["switch_at"]
     for name in ("primary", "secondary"):
         w = limits.get(name, {})
-        if w.get("used", 0) >= cfg["switch_at"]:
+        if w.get("used", 0) >= threshold:
             label = "weekly" if w.get("minutes", 0) >= 10080 else name
+            if soft:
+                return f"{label} usage {w['used']:g}% reached soft_switch_at {threshold:g}%"
             return f"{label} limit {w['used']:g}%"
     return limits.get("reached") or "usage limit"
 

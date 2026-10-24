@@ -16,6 +16,7 @@
 
 All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
+soft_switch_at (same as switch_at),
 credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
 reviewer (codex), claude (isolated reviewer settings), review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
 start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
