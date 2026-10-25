@@ -1,5 +1,6 @@
 """CI waits, failure excerpts, prompts and fix cycles."""
 import json
+import os
 import re
 import shutil
 import signal
@@ -9,13 +10,13 @@ import time
 from . import budgets, checking, clock, config, procs, task_state, threads, turns
 
 
-def ci_command(st, args, stopped, timeout=60):
-    """Own gh's process group so stop also interrupts a slow API or log request."""
+def ci_command(st, args, stopped, timeout=60, env=None):
+    """Own the process group so stop also interrupts a slow CI request."""
     if stopped():
         raise InterruptedError("CI stopped")
     proc = subprocess.Popen(args, cwd=st["worktree"], stdin=subprocess.DEVNULL,
                             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
-                            errors="replace", start_new_session=True)
+                            errors="replace", start_new_session=True, env=env)
     deadline = time.monotonic() + timeout
     try:
         while not stopped():
@@ -171,6 +172,50 @@ def ci_failure_logs(st, gh, stopped, deadline):
         remaining -= len(lines)
 
 
+def wait_ci_command(st, stopped, deadline):
+    ci = st["ci"]
+
+    def run(args, env=None):
+        return ci_command(st, args, stopped,
+                          timeout=max(0.001, deadline - clock.CLOCK.monotonic()), env=env)
+
+    def git(args):
+        response = run(config.GIT + args)
+        if response.returncode:
+            raise ValueError(response.stderr.strip() or "git CI request failed")
+        return response.stdout.strip()
+
+    def remote_head():
+        value = git(["ls-remote", "--heads", "origin", "refs/heads/" + st["branch"]])
+        return value.split()[0] if value else ""
+
+    try:
+        ci["sha"] = git(["rev-parse", "HEAD"])
+        head = remote_head()
+        if not head:
+            return "skipped", "branch not pushed"
+        if head != ci["sha"]:
+            return "skipped", "remote branch head differs from local HEAD"
+        check = {"name": st["ci_command"], "state": "PENDING", "bucket": "pending", "link": ""}
+        ci["checks"] = [check]
+        task_state.save(st)
+        env = dict(os.environ, CODEX_CI_SHA=ci["sha"], CODEX_CI_BRANCH=st["branch"])
+        response = run(["sh", "-c", st["ci_command"]], env=env)
+        output = "\n".join(part for part in (response.stdout, response.stderr) if part)
+        check["tail"] = "\n".join(ci_failure_excerpt(output, 150))
+        failed = response.returncode != 0
+        check.update(state="FAILURE" if failed else "SUCCESS", bucket="fail" if failed else "pass")
+        if remote_head() != ci["sha"]:
+            return "skipped", "head changed while waiting"
+        return ("failed", "rounds_exhausted") if failed else ("passed", "passed")
+    except InterruptedError:
+        return "skipped", "stopped"
+    except subprocess.TimeoutExpired:
+        return "timeout", "timeout"
+    except (OSError, ValueError) as exc:
+        return "skipped", "CI command unavailable: " + str(exc)
+
+
 def wait_ci(st, stopped, sleep):
     """Wait without a model phase: no quota samples or active exec clock advance."""
     previous = st.get("ci") or {}
@@ -193,6 +238,8 @@ def wait_ci(st, stopped, sleep):
     checks = st.get("checks", [])[st.get("check_start", 0):]
     if st.get("check") and (not checks or checks[-1]["outcome"] != "passed"):
         return finish("skipped", "local check did not pass")
+    if st.get("ci_command"):
+        return finish(*wait_ci_command(st, stopped, deadline))
     publication = st.get("publish") or {}
     pr = publication.get("pr")
     if not pr:

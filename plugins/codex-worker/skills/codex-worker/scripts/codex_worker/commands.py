@@ -64,7 +64,8 @@ def cmd_start(a):
           "review_angles": a.review_angles,
           "reviewer": reviewer,
           "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
-          "ci_enabled": a.ci or cfg["ci"], "ci_rounds": a.ci_rounds if a.ci_rounds is not None else 1,
+          "ci_enabled": a.ci or bool(a.ci_command) or cfg["ci"], "ci_command": a.ci_command,
+          "ci_rounds": a.ci_rounds if a.ci_rounds is not None else 1,
           "ci_timeout_minutes": cfg["ci_timeout_minutes"],
           "max_task_weekly_percent": a.max_weekly if a.max_weekly is not None else cfg.get("max_task_weekly_percent"),
           "weekly_used_percent": 0,
@@ -124,10 +125,12 @@ def cmd_say(a):
     scouting = st.get("kind") == "scout"
     angles = getattr(a, "review_angles", None)
     reviewer = getattr(a, "reviewer", None)
+    ci_command = getattr(a, "ci_command", None)
+    no_ci_command = getattr(a, "no_ci_command", False)
     if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
                      or a.no_base_check or angles is not None or reviewer is not None
-                     or a.ci or a.no_ci or a.ci_rounds is not None):
-        procs.die("scout is read-only; say --check, --check-timeout, --review, --reviewer, --review-angles, --fix-rounds, --ci, --no-ci, --ci-rounds and --no-base-check are not supported")
+                     or a.ci or a.no_ci or ci_command is not None or no_ci_command or a.ci_rounds is not None):
+        procs.die("scout is read-only; say --check, --check-timeout, --review, --reviewer, --review-angles, --fix-rounds, --ci, --no-ci, --ci-command, --no-ci-command, --ci-rounds and --no-base-check are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
@@ -136,9 +139,13 @@ def cmd_say(a):
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     minutes = getattr(a, "max_minutes", None)
     st["max_turn_minutes"] = minutes if minutes is not None else cfg.get("max_turn_minutes")
+    if no_ci_command:
+        st["ci_command"] = None
+    elif ci_command is not None:
+        st["ci_command"] = ci_command
     if getattr(a, "no_ci", False):
         st["ci_enabled"] = False
-    elif getattr(a, "ci", False):
+    elif getattr(a, "ci", False) or ci_command is not None:
         st["ci_enabled"] = True
     if getattr(a, "ci_rounds", None) is not None:
         st["ci_rounds"] = a.ci_rounds

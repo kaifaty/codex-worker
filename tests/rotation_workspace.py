@@ -917,6 +917,153 @@ class WorkspaceTests(RotationTestCase):
         self.assertIn("== PR skipped: " + state["publish"]["error"], output)
         self.assertNotIn("== publish error:", output)
 
+    def test_ci_command_passes_without_pr_or_extra_budget_and_receives_head_branch_worktree(self):
+        self.enable_fake_clock()
+        self.configure(language="en", sandbox="workspace")
+        self.env["CODEX_FAKE_GH_REPO_ERROR"] = "1"
+        run = dict(self.ci_work(), weekly_used_before=10, weekly_used_after=10.75)
+        self.account(self.home, "A", self.reset, runs=[run])
+        script = self.root / "wait-ci.py"
+        script.write_text(
+            "import os, sys\n"
+            "sys.path.insert(0, " + repr(str(SKILL / "scripts")) + ")\n"
+            "from codex_worker import clock\n"
+            "clock.CLOCK.sleep(240)\n"
+            "print(os.environ['CODEX_CI_SHA'])\n"
+            "print(os.environ['CODEX_CI_BRANCH'])\n"
+            "print(os.getcwd())\n")
+        command = shlex.join([PYTHON, "-I", str(script)])
+        self.start("ci-command-pass", "--ci-command", command, "--max-minutes", "1", "--max-weekly", "1")
+        output = self.wait("ci-command-pass")
+        state = self.state("ci-command-pass")
+        ci = state["ci"]
+        self.assertTrue(state["ci_enabled"])
+        self.assertEqual(state["ci_command"], command)
+        self.assertEqual((ci["outcome"], ci["rounds"], state["outcome"]), ("passed", 0, "completed"))
+        self.assertEqual(ci["checks"], [{"name": command, "state": "SUCCESS", "bucket": "pass", "link": "",
+                                         "tail": "\n".join((ci["sha"], state["branch"], state["worktree"]))}])
+        self.assertEqual(ci["sha"], self.git("rev-parse", state["branch"]))
+        self.assertGreaterEqual(ci["seconds"], 240)
+        self.assertEqual(state["weekly_used_percent"], 0.75)
+        self.assertNotIn("turn_stop", state)
+        self.assertFalse(state["publish"]["pr"])
+        self.assertIn("== CI " + ci["sha"][:7] + ": passed (1/1,", output)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(self.ci_polls())
+
+    def test_ci_command_say_inherits_replaces_and_removes_command(self):
+        self.configure(language="en", sandbox="workspace")
+        self.configure_ci([[self.ci_check()]])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        first, second = "printf 'first\\n'", "printf 'command failed\\n' >&2; exit 7"
+        self.start("ci-command-say", "--ci-command", first, "--ci-rounds", "0")
+        self.wait("ci-command-say")
+        self.cli("say", "ci-command-say", "Continue with the saved command")
+        self.wait("ci-command-say")
+        state = self.state("ci-command-say")
+        self.assertEqual((state["ci_command"], state["ci_rounds"]), (first, 0))
+        self.assertEqual(state["ci"]["checks"][0]["tail"], "first")
+        self.cli("say", "ci-command-say", "Disable CI", "--no-ci")
+        self.wait("ci-command-say")
+        self.assertFalse(self.state("ci-command-say").get("ci"))
+        self.assertEqual(self.state("ci-command-say")["ci_command"], first)
+        self.cli("say", "ci-command-say", "Use the replacement CI command", "--ci-command", second)
+        output = self.wait("ci-command-say")
+        state = self.state("ci-command-say")
+        self.assertTrue(state["ci_enabled"])
+        self.assertEqual(state["ci_command"], second)
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"]), ("failed", 0))
+        self.assertIn("FAILED 1/1: " + second, output)
+        self.assertIn("command failed", output)
+        self.assertFalse(self.ci_polls())
+        self.cli("say", "ci-command-say", "Use GitHub checks again", "--no-ci-command")
+        self.wait("ci-command-say")
+        state = self.state("ci-command-say")
+        self.assertIsNone(state["ci_command"])
+        self.assertEqual(state["ci"]["outcome"], "passed")
+        self.assertEqual(len(self.ci_polls()), 1)
+        self.assertEqual(len(self.invocations()), 5)
+
+    def test_ci_command_failure_repairs_in_same_thread_with_bounded_excerpt(self):
+        self.configure(language="en", sandbox="workspace")
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed\n")])
+        script = self.root / "wait-ci.py"
+        script.write_text(
+            "from pathlib import Path\n"
+            "if Path('tracked.txt').read_text() == 'fixed\\n':\n"
+            "    print('passed')\n"
+            "else:\n"
+            "    print('FAIL: command fixture\\nAssertionError: repair needed')\n"
+            "    print('\\n'.join('failure context %d' % i for i in range(200)))\n"
+            "    print('\\nRan 1 test\\nFAILED (failures=1)')\n"
+            "    print('\\n'.join('test_success ... ok' for _ in range(200)))\n"
+            "    raise SystemExit(1)\n")
+        command = shlex.join([PYTHON, "-I", str(script)])
+        self.start("ci-command-fix", "--ci-command", command, "--ci-rounds", "1", "--check", "true")
+        self.wait("ci-command-fix")
+        state = self.state("ci-command-fix")
+        self.assertEqual((state["ci"]["outcome"], state["ci"]["rounds"]), ("passed", 1))
+        self.assertEqual([item["outcome"] for item in state["checks"]], ["passed", "passed"])
+        first, repair = self.invocations()
+        self.assert_resumed_same_thread(first, repair, self.home)
+        messages = (self.home / "claude-tasks" / "ci-command-fix" / "messages.jsonl").read_text().splitlines()
+        message = next(json.loads(line)["text"] for line in messages if json.loads(line)["source"] == "ci")
+        self.assertIn(message, repair["prompt"])
+        evidence = message.split("== CI ", 1)[1].splitlines()[2:]
+        self.assertEqual(len(evidence), 150)
+        self.assertIn("FAIL: command fixture", evidence)
+        self.assertIn("AssertionError: repair needed", evidence)
+        self.assertIn("Ran 1 test", evidence)
+        self.assertIn("FAILED (failures=1)", evidence)
+        self.assertIn("more failure lines omitted", evidence[-1])
+        self.assertNotIn("test_success ... ok", repair["prompt"])
+        self.assertFalse(self.review_invocations())
+        self.assertFalse(self.ci_polls())
+
+    def test_ci_command_timeout_and_stop_kill_its_process_group(self):
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        command = 'sleep 60 & child=$!; echo "$child" > check-child.pid; wait "$child"'
+        for outcome in ("timeout", "stopped"):
+            with self.subTest(outcome=outcome):
+                self.configure(language="en", sandbox="workspace", ci_timeout_minutes=2 if outcome == "timeout" else 30)
+                self.account(self.home, "A", self.reset, runs=[self.ci_work(outcome + "\n")])
+                slug = "ci-command-" + outcome
+                self.start(slug, "--ci-command", command)
+                child = self.check_child(slug)
+                if outcome == "stopped":
+                    self.cli("stop", slug, timeout=20)
+                output = self.wait(slug)
+                state = self.state(slug)
+                ci = state["ci"]
+                self.assertEqual((ci["outcome"], ci["reason"]),
+                                 ("timeout", "timeout") if outcome == "timeout" else ("skipped", "stopped"))
+                self.assertEqual(len(ci["checks"]), 1)
+                self.assertEqual(ci["checks"][0]["name"], command)
+                self.assertIn("timeout" if outcome == "timeout" else "skipped: stopped", output)
+                if outcome == "timeout":
+                    self.assertGreaterEqual(ci["seconds"], 2)
+                else:
+                    self.assertEqual(state["outcome"], "stopped")
+                self.until(lambda: not self.process_is_live(child))
+
+    def test_ci_command_skips_unpushed_mismatched_and_changed_remote_head(self):
+        worker = self.worker()
+        st = {"slug": "ci-command-head", "worktree": str(self.repo), "branch": "main",
+              "outcome": "completed", "ci_command": "touch command-ran"}
+        self.git("commit", "--allow-empty", "-m", "Unpushed change")
+        with mock.patch.object(worker.task_state, "save"):
+            ci = worker.ci_runs.wait_ci(st, lambda: False, lambda _: None)
+            self.assertEqual((ci["outcome"], ci["reason"]),
+                             ("skipped", "remote branch head differs from local HEAD"))
+            st["branch"] = "unpushed"
+            ci = worker.ci_runs.wait_ci(st, lambda: False, lambda _: None)
+            self.assertEqual((ci["outcome"], ci["reason"]), ("skipped", "branch not pushed"))
+            self.assertFalse((self.repo / "command-ran").exists())
+            self.git("push", "origin", "main")
+            st.update(branch="main", ci_command='git push --force origin "HEAD^:refs/heads/$CODEX_CI_BRANCH"')
+            ci = worker.ci_runs.wait_ci(st, lambda: False, lambda _: None)
+            self.assertEqual((ci["outcome"], ci["reason"]), ("skipped", "head changed while waiting"))
+
     def test_ci_pending_then_passed_is_reported_without_an_extra_codex_turn(self):
         self.configure(language="en", sandbox="workspace")
         self.configure_notify()

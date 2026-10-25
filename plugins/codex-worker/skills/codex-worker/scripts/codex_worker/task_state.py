@@ -97,6 +97,7 @@ STATE_FIELDS = {
     "check": StateField("task"),
     "check_timeout": StateField("task"),
     "ci_enabled": StateField("task"),
+    "ci_command": StateField("task"),
     "ci_rounds": StateField("task"),
     "ci_timeout_minutes": StateField("task"),
     "max_task_weekly_percent": StateField("task"),
