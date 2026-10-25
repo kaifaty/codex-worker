@@ -89,6 +89,8 @@ Set the script path for this skill:
 T=${CLAUDE_SKILL_DIR}/scripts/codex_task.py
 ```
 
+If a command prints a codex-worker version warning, set `T` again using the path shown in the warning.
+
 Run every command below as `python3 -I "$T" …`. The CLI is resolved from `CODEX_TASK_CODEX`, then the
 ChatGPT.app bundle if present, then `codex` on `PATH`. Model and reasoning defaults come from the user's
 Codex configuration; `--effort` overrides reasoning effort for a task.
