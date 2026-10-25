@@ -200,6 +200,7 @@ def wait_stop_lines(st):
 
 def cmd_wait(a):
     st = task_state.load(a.slug)
+    config.warn_plugin_version([st.get("plugin_version")])
     start = time.monotonic()
     while procs.alive(st.get("pid")):
         if st.get("outcome") == "sleeping" and not getattr(a, "through_sleep", False):

@@ -103,6 +103,7 @@ STATE_FIELDS = {
     "max_task_weekly_percent": StateField("task"),
     "weekly_used_percent": StateField("history"),
     "created": StateField("task"),  # Immutable task birth metadata.
+    "plugin_version": StateField("task"),
     "pid": StateField("runtime"),
     "codex_pid": StateField("runtime"),
     "check_pid": StateField("runtime"),

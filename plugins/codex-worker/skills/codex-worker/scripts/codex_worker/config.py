@@ -5,6 +5,7 @@ import os
 import re
 import runpy
 import shutil
+import sys
 import time
 from pathlib import Path
 
@@ -19,6 +20,7 @@ WORKTREES = CODEX_HOME / "worktrees"
 SCRIPT = Path(__file__).absolute().parent.parent / "codex_task.py"
 SCRIPT_RESOLVED = SCRIPT.resolve()
 SKILL = SCRIPT_RESOLVED.parent.parent
+PLUGIN = SKILL.parent.parent
 STATS = SCRIPT_RESOLVED.parent / "codex-stats.py"
 ROLLOUT = runpy.run_path(str(SCRIPT.with_name("rollout.py")))
 REPORT = SCRIPT.with_name("task_report.py")
@@ -39,6 +41,43 @@ RESET_RETRY_SECONDS = 15 * 60
 MAX_RESET_WAIT_SECONDS = 8 * 24 * 60 * 60
 TOKEN_FIELDS = ROLLOUT["TOKEN_FIELDS"]
 GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
+
+
+def plugin_version():
+    try:
+        return json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
+    except (OSError, ValueError, KeyError):
+        return None
+
+
+def version_tuple(version):
+    if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
+        return tuple(map(int, version.split(".")))
+    return None
+
+
+def warn_plugin_version(task_versions=()):
+    current = plugin_version()
+    current_tuple = version_tuple(current)
+    if current_tuple is None or version_tuple(PLUGIN.name) != current_tuple:
+        return
+    latest, script = current, SCRIPT_RESOLVED
+    try:
+        for directory in PLUGIN.parent.iterdir():
+            version = version_tuple(directory.name)
+            candidate = directory / SCRIPT_RESOLVED.relative_to(PLUGIN)
+            if version and version > version_tuple(latest) and candidate.is_file():
+                latest, script = directory.name, candidate
+    except OSError:
+        return
+    if latest != current:
+        print(f"== codex-worker {current} is running, {latest} is installed: T={script}", file=sys.stderr)
+        return
+    for version in task_versions:
+        parsed = version_tuple(version)
+        if parsed and parsed < current_tuple:
+            print(f"== codex-worker task started with {version}, {current} is running: T={script}", file=sys.stderr)
+            return
 
 
 def resolve_codex():
