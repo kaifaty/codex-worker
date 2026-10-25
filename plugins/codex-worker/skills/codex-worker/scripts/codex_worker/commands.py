@@ -20,6 +20,7 @@ def main_repo(path):
 
 
 def cmd_start(a):
+    config.warn_plugin_version()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
         procs.die("slug: 2-41 chars of a-z, 0-9 and '-'")
     cfg = config.accounts_config()
@@ -67,7 +68,7 @@ def cmd_start(a):
           "ci_timeout_minutes": cfg["ci_timeout_minutes"],
           "max_task_weekly_percent": a.max_weekly if a.max_weekly is not None else cfg.get("max_task_weekly_percent"),
           "weekly_used_percent": 0,
-          "created": clock.CLOCK.time(), "turns": 0}
+          "created": clock.CLOCK.time(), "turns": 0, "plugin_version": config.plugin_version()}
     task_state.save(st)
     proc = supervisor.spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
@@ -87,6 +88,7 @@ def require_idle(st):
 
 
 def cmd_scout(a):
+    config.warn_plugin_version()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
         procs.die("slug: 2-41 chars of a-z, 0-9 and '-'")
     cfg = config.accounts_config()
@@ -117,6 +119,7 @@ def cmd_scout(a):
 
 
 def cmd_say(a):
+    config.warn_plugin_version()
     st = task_state.load(a.slug)
     scouting = st.get("kind") == "scout"
     angles = getattr(a, "review_angles", None)
@@ -160,6 +163,7 @@ def cmd_say(a):
 
 
 def cmd_review(a):
+    config.warn_plugin_version()
     st = task_state.load(a.slug)
     if st.get("kind") == "scout":
         procs.die("scout is read-only; review is not supported")
@@ -211,11 +215,11 @@ def describe(st, detail):
 
 
 def cmd_status(a):
-    if a.slug:
-        print(describe(task_state.load(a.slug), True))
-        return
-    for p in sorted(config.TASKS.glob("*/state.json")):
-        print(describe(task_state.load(p.parent.name), False))
+    states = ([task_state.load(a.slug)] if a.slug else
+              [task_state.load(p.parent.name) for p in sorted(config.TASKS.glob("*/state.json"))])
+    config.warn_plugin_version(st.get("plugin_version") for st in states)
+    for st in states:
+        print(describe(st, bool(a.slug)))
 
 
 def cmd_stats(a):
