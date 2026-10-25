@@ -1,8 +1,8 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
@@ -20,6 +20,7 @@ soft_switch_at (same as switch_at),
 credits (false), wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
 reviewer (codex), claude (isolated reviewer settings), review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
 start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
+start/say --ci-command CMD enables CI via sh -c; say inherits it, and --no-ci-command removes it.
 say --ci/--no-ci enables/disables CI; --ci-rounds N replaces the saved round limit. ci_timeout_minutes defaults to 30.
 Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without rotation; weekly budgets still monitor rollout usage.
@@ -143,6 +144,11 @@ OPTION_REGISTRY = (
                   "say": {"group": "ci", "help": "enable PR CI waiting and repair for this task"}}},
     {"names": ("--no-ci",), "argparse": {"action": "store_true"}, "synopsis": "[--no-ci]",
      "commands": {"say": {"group": "ci", "help": "disable PR CI waiting and repair for this task"}}},
+    {"names": ("--ci-command",), "argparse": {"metavar": "CMD"}, "synopsis": "[--ci-command CMD]",
+     "commands": {"start": {"help": "enable CI waiting via a shell command instead of GitHub checks"},
+                  "say": {"group": "ci_command", "help": "replace the saved CI command and enable CI"}}},
+    {"names": ("--no-ci-command",), "argparse": {"action": "store_true"}, "synopsis": "[--no-ci-command]",
+     "commands": {"say": {"group": "ci_command", "help": "remove the saved CI command"}}},
     {"names": ("--ci-rounds",), "argparse": {"type": ci_rounds, "metavar": "N"},
      "synopsis": "[--ci-rounds N]",
      "commands": {"start": {"help": "maximum CI repair rounds (default: 1)"},

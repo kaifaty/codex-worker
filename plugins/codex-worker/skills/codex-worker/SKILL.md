@@ -15,7 +15,7 @@ Reference detail lives in `references/`. Read a file only when its topic comes u
 |---|---|
 | [results.md](references/results.md) | reading `wait` output: result and review fields, CI, outcomes, wrap-ups |
 | [budgets.md](references/budgets.md) | time and weekly caps, exhaustion, or headroom warnings |
-| [ci.md](references/ci.md) | GitHub check waiting and CI repair rounds |
+| [ci.md](references/ci.md) | CI waiting and repair rounds |
 | [checks.md](references/checks.md) | `wait` prints `guarded files changed` or `base tests`, or you consider `--guard` or `--base-check` |
 | [review-cycle.md](references/review-cycle.md) | angle choices, fix-round mechanics and automatic stops |
 | [settings.md](references/settings.md) | brief language, standing-rules override, default caps, `config.toml` trust |
@@ -67,6 +67,8 @@ Do not touch: <what is outside the task>.
 
 `start` appends the [standing rules](references/settings.md#standing-rules); don't repeat them in the
 brief. PR fields and publication receipts are described in [results.md](references/results.md).
+
+Codex must not wait for remote CI inside a turn: push and finish the turn; the supervisor waits with `--ci` for GitHub or `--ci-command CMD` for other hosts.
 
 One task per brief; split independent parts into several tasks (stacked branches with `--base` when one
 builds on another). Before starting, split any task that promises more than about 60 minutes of work.
@@ -142,7 +144,7 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
 1. Write the brief to a file outside the repository (the session scratchpad or a temporary directory),
    so it cannot enter a checkout commit. Run
    `start --max-minutes M --max-weekly 10 --review --fix-rounds 2 --ci --check "<command from Checks>"`
-   for GitHub repositories (omit `--ci` elsewhere), then
+   for GitHub repositories (use `--ci-command CMD` for other hosts), then
    one background `wait` for the whole cycle. Add `--review-angles auto` for large or risky PRs (processes, concurrency,
    security), `--base-check` when behavior must stay the same (refactoring, optimization), and `--guard`
    for test files the check reaches only through `sh -c`. Tell the user in a line what went to Codex and

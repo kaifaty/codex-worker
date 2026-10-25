@@ -13,7 +13,7 @@ that file is absent.
 | `repeat_limit` | `3` | identical failures before a `stuck` stop ([results.md](results.md)) |
 | `review_angles_min_lines` | `400` | changed lines from which `--review-angles auto` runs angles |
 | `ci` | `false` | initial task CI setting; see [Task CI options](#task-ci-options) |
-| `ci_timeout_minutes` | `30` | maximum wait for PR checks per CI attempt |
+| `ci_timeout_minutes` | `30` | maximum wait for CI checks or a CI command per attempt |
 | `sandbox`, `writable_dirs` | `"off"`, `[]` | [sandbox.md](sandbox.md) |
 | `accounts`, `switch_at`, `credits`, `wait_for_reset`, `use_reset_credits`, `reset_credit_min_hours` | | [accounts.md](accounts.md) |
 | `soft_switch_at` | value of `switch_at` | number in `(0, switch_at]`; prefer accounts below this usage percentage in both windows, then use the reserve up to `switch_at`; see [accounts.md](accounts.md#rotation) |
@@ -52,6 +52,11 @@ for token setup and [review-cycle.md](review-cycle.md#review-provider) for fallb
 `start --ci` or `"ci": true` in the settings enables GitHub PR check waiting for the task. The saved
 setting persists across follow-ups: `say` without CI flags preserves it, `say --ci` enables it, and
 `say --no-ci` disables it. `--ci` and `--no-ci` are mutually exclusive on `say`.
+
+`start --ci-command CMD` or `say --ci-command CMD` saves a shell command and enables the same CI cycle
+for other hosts. It replaces GitHub check waiting; `say` inherits it unless replaced, and
+`say --no-ci-command` removes it without disabling CI. The two command flags are mutually exclusive;
+`--no-ci` disables the cycle while retaining the saved command.
 
 `start --ci-rounds N` sets the maximum repair turns per CI cycle (a nonnegative integer, default 1).
 `say --ci-rounds N` replaces the saved limit; omitting it preserves the limit. Changing the round limit

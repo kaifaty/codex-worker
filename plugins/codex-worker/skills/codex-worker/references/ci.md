@@ -1,4 +1,4 @@
-# GitHub CI waiting and repair
+# CI waiting and repair
 
 Enable and change the task's CI options as described in [settings.md](settings.md#task-ci-options).
 
@@ -8,6 +8,13 @@ local check and a published GitHub PR whose head SHA equals local HEAD. Otherwis
 appear (`none` if none appear), and waits for pending checks up to `ci_timeout_minutes` (`timeout`).
 Waiting spends no task weekly budget and does not count toward `--max-minutes`; `stop` or an external
 signal interrupts it. A changed PR head also skips the wait.
+
+`--ci-command CMD` enables the same cycle on other hosts, replacing GitHub checks with `sh -c CMD`
+in the worktree. The command must wait for CI and exit 0 for success or nonzero for failure; it gets
+`CODEX_CI_SHA` (local HEAD) and `CODEX_CI_BRANCH`. The supervisor verifies the actual `origin` branch
+before and after the command: an unpushed or mismatched head is `skipped`, as is a head changed while
+waiting. The same `ci_timeout_minutes`, budget exclusions, `stop` handling and repair rounds apply.
+The result contains one check named after the command, with output selected by the excerpt rules below.
 
 Passing or skipped checks give `passed`; failed or cancelled checks give `failed`. A remaining CI
 round sends failed-check names and selected log lines to the same implementation thread. GitHub
