@@ -82,6 +82,9 @@ Put these in "Done when" when they apply:
 - Changes to shared code: the neighbouring paths that must behave as on the base branch, with a test that
   pins them.
 - Wording that matters (docs, messages, UI text): the exact text, marked as verbatim.
+- Probes whose non-zero exit is a normal answer, such as a process search that finds nothing: make absence an explicit success value (for example `pgrep -f NAME || echo absent`), or the repeat guard reads it as the same failure again.
+
+Before `start`, check that every "Done when" item can be reached within "Do not touch" and on the machine that runs it: a binary, account or service it needs exists, and a test that must fail first does fail on the base. Otherwise settle it first; a brief that cannot be finished ends in `needs_decision`.
 
 ## Commands
 

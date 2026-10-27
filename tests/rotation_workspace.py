@@ -175,7 +175,7 @@ class WorkspaceTests(RotationTestCase):
         self.assert_output_schema(self.invocations()[0], "pr-create")
         self.assertEqual([event["argv"][:2] for event in self.gh_invocations()],
                          [["repo", "view"], ["pr", "list"], ["pr", "create"]])
-        origin = str(self.root / "origin.git")
+        origin = "https://github.com/fixture/repo.git"
         self.assertEqual(self.gh_invocations()[0]["argv"][2], origin)
         for event in self.gh_invocations()[1:]:
             self.assertEqual(event["argv"][event["argv"].index("--repo") + 1], origin)
@@ -267,6 +267,23 @@ class WorkspaceTests(RotationTestCase):
                         self.assertEqual(event["argv"][event["argv"].index("--repo") + 1], expected)
                 ssh_calls = [json.loads(line) for line in ssh_trace.read_text().splitlines()] if ssh_trace.exists() else []
                 self.assertEqual(ssh_calls, [ssh_args] if ssh_args else [])
+
+    def test_pr_supervisor_skips_local_paths_without_gh(self):
+        worker = self.worker()
+        _ = self.repo
+        origin = self.root / "origin.git"
+        for remote in (str(origin), "../origin.git", origin.as_uri()):
+            with self.subTest(remote=remote):
+                self.git("remote", "set-url", "origin", remote)
+                st = {"kind": "work", "outcome": "completed", "worktree": str(self.repo),
+                      "branch": "main"}
+                with mock.patch.object(worker.task_state, "save"), \
+                        mock.patch.object(worker.publishing.shutil, "which") as which:
+                    worker.publishing.publish_pr(st, lambda: False)
+                self.assertTrue(st["publish"]["pushed"])
+                self.assertEqual((st["publish"]["action"], st["publish"]["error"]),
+                                 ("skipped", "not a GitHub remote: local path"))
+                which.assert_not_called()
 
     def test_pr_supervisor_ignores_fork_prs_with_the_same_branch_name(self):
         self.configure(language="en")
@@ -948,6 +965,23 @@ class WorkspaceTests(RotationTestCase):
         self.assertNotIn("turn_stop", state)
         self.assertFalse(state["publish"]["pr"])
         self.assertIn("== CI " + ci["sha"][:7] + ": passed (1/1,", output)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertFalse(self.ci_polls())
+
+    def test_ci_command_tempfail_skips_without_repair_and_preserves_output(self):
+        self.configure(language="en", sandbox="workspace")
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        command = "printf 'Checking CI\\n'; printf 'no route to host\\n' >&2; exit 75"
+        self.start("ci-command-unavailable", "--ci-command", command, "--ci-rounds", "1")
+        output = self.wait("ci-command-unavailable")
+        state = self.state("ci-command-unavailable")
+        ci = state["ci"]
+        self.assertEqual((ci["outcome"], ci["reason"], ci["rounds"], state["outcome"]),
+                         ("skipped", "CI unavailable (exit 75)", 0, "completed"))
+        self.assertEqual(ci["checks"], [{"name": command, "state": "SKIPPED", "bucket": "skipping", "link": "",
+                                         "tail": "Checking CI\n\nno route to host"}])
+        self.assertIn("== CI " + ci["sha"][:7] + ": skipped: CI unavailable (exit 75)", output)
+        self.assertIn(ci["checks"][0]["tail"], output)
         self.assertEqual(len(self.invocations()), 1)
         self.assertFalse(self.ci_polls())
 

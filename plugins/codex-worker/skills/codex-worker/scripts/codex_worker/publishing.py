@@ -92,6 +92,9 @@ def publish_pr(st, stopped):
             return
         stage = "origin remote"
         remote_url = run(config.GIT + ["remote", "get-url", "origin"])
+        if remote_url.startswith("file://") or not re.match(r"[^/]+:", remote_url):
+            skip("not a GitHub remote: local path")
+            return
         url = urllib.parse.urlsplit(remote_url) if remote_url.startswith(("ssh://", "https://")) else None
         scp_url = re.fullmatch(r"[^/@:]+@([^/:]+):(.+)", remote_url) if url is None else None
         host = url.hostname if url is not None else scp_url[1] if scp_url else None
