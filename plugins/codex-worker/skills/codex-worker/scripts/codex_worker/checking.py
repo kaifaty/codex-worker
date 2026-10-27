@@ -48,11 +48,15 @@ def check_paths(st):
     return sorted(paths)
 
 
-def guarded_path(path, st, paths):
+def test_path(path):
     parts = path.split("/")
     return (any(part in ("tests", "test", "__tests__", "spec") for part in parts[:-1])
             or any(fnmatch.fnmatchcase(parts[-1], pattern)
-                   for pattern in ("test_*", "*_test.*", "*.test.*", "*.spec.*"))
+                   for pattern in ("test_*", "*_test.*", "*.test.*", "*.spec.*")))
+
+
+def guarded_path(path, st, paths):
+    return (test_path(path)
             or path == ".gitlab-ci.yml"
             or path.startswith((".github/workflows/", ".forgejo/workflows/"))
             or any(item == "." or path == item or path.startswith(item + "/") for item in paths)
@@ -66,6 +70,11 @@ DISABLED_TEST = re.compile(
     r"|@(?:Disabled|Ignore)\b|\bt\.Skip\s*\(", re.I)
 
 
+def diff_base(st):
+    return (procs.sh(config.GIT + ["merge-base", st["base"], "HEAD"],
+                     cwd=st["worktree"], check=False) or st["base"])
+
+
 def guarded_changes(st):
     """Combine diff layers, matching moved skip markers within each layer."""
     if st.get("kind") == "scout" or sandboxing.workspace_filter_driver(st) is not None:
@@ -74,7 +83,7 @@ def guarded_changes(st):
     paths = check_paths(st)
     changed = {}
     args = config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-renames"]
-    base = procs.sh(config.GIT + ["merge-base", st["base"], "HEAD"], cwd=root, check=False) or st["base"]
+    base = diff_base(st)
     for revisions in ([base, "HEAD"], ["--cached", "HEAD"], []):
         removed_lines = Counter()
         added_markers = []
@@ -143,6 +152,58 @@ def guarded_changes(st):
                 if marker not in item["disabled"]:
                     item["disabled"].append(marker)
     return [changed[path] for path in sorted(changed)]
+
+
+def test_names(lines, path):
+    text = "\n".join(line for line, changed in lines)
+    suffix = Path(path).suffix
+    if suffix in (".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"):
+        pattern = (r"^\s*(?:it|test)(?:\.each\s*(?:\([\s\S]*?\)|`[^`]*`))?\s*\(\s*"
+                   r"(?P<quote>['\"`])(?P<name>(?:\\.|(?!(?P=quote))[^\r\n])*)(?P=quote)")
+    elif suffix == ".py":
+        pattern = r"^\s*(?:async\s+)?def\s+(?P<name>test_\w+)\s*\("
+    elif suffix in (".kt", ".java"):
+        pattern = r"\b(?:fun|void)\s+(?:`(?P<quoted>[^`]+)`|(?P<name>test\w*))\s*\("
+    elif suffix == ".rs":
+        pattern = (r"^\s*#\[(?:test|tokio::test)(?:\([^]]*\))?\]"
+                   r"(?:\s*#\[[^]]*\])*\s*(?:async\s+)?fn\s+(?P<name>\w+)\s*\(")
+    else:
+        return []
+    names = []
+    for match in re.finditer(pattern, text, re.M):
+        group = "quoted" if match.groupdict().get("quoted") is not None else "name"
+        if lines[text.count("\n", 0, match.start(group))][1]:
+            names.append(match[group])
+    return names
+
+
+def removed_tests(st, changes):
+    """Find deleted declarations in the branch diff, excluding names added elsewhere."""
+    paths = [item["path"] for item in changes if test_path(item["path"])]
+    if not paths:
+        return []
+    base = diff_base(st)
+    removed = []
+    added = set()
+    for path in paths:
+        patch = procs.sh(config.GIT + ["--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv",
+                                      "--no-renames", "--unified=3", base, "HEAD", "--", path],
+                         cwd=st["worktree"], check=False, errors="surrogateescape")
+        lines = {"-": [], "+": []}
+        in_hunk = False
+        for line in patch.splitlines() + ["@@"]:
+            if line.startswith("@@"):
+                removed.extend((path, name) for name in test_names(lines["-"], path))
+                added.update(test_names(lines["+"], path))
+                lines = {"-": [], "+": []}
+                in_hunk = True
+            elif in_hunk and line[:1] in ("-", "+"):
+                lines[line[0]].append((line[1:], True))
+            elif in_hunk and line.startswith(" "):
+                for side in lines.values():
+                    side.append((line[1:], False))
+    return [(path, name.encode("utf-8", errors="surrogateescape").decode("utf-8", errors="replace"))
+            for path, name in dict.fromkeys(removed) if name not in added]
 
 
 def guarded_lines(changes):

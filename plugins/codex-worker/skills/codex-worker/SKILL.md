@@ -121,6 +121,8 @@ The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
 
+When parallel tasks touch the same shared files, land the sibling PRs that are ready together, then send each branch still open one `say` to merge the base; or tell Codex to merge `origin/<base>` once, right before its final push. Merging siblings one at a time costs every open branch a merge round and a full CI wait each time.
+
 Scouts need no `--parallel`: run several at once, one question each, alongside tasks. `say` continues a
 scout's read-only thread; `--check`, `--review`, `--review-angles`, `--fix-rounds` and `review` don't
 apply to scouts. `clean` on a scout archives its record the same way, never the inspected directory.

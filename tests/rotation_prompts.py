@@ -332,7 +332,8 @@ class PromptTests(unittest.TestCase):
                         "review": {"findings": [finding]},
                         "decisions": [{"id": "F1", "decision": "rejected", "note": "fixture reason"}],
                     }])
-                    with mock.patch.object(self.worker.checking, "guarded_changes", return_value=guarded):
+                    with mock.patch.object(self.worker.checking, "guarded_changes", return_value=guarded), \
+                            mock.patch.object(self.worker.checking, "removed_tests", return_value=[]):
                         prompt = self.worker.prompts.review_prompt(st, cfg)
                     for part in parts[language] + (str(self.task / "brief.md"), "tests/test_worker.py (+1 −2)",
                                                    "tests/test_worker.py:8 skip marker",

@@ -50,13 +50,26 @@ def review_prompt(st, cfg=None):
                      "пункты «Готово, когда». Новые граничные случаи вне брифа отмечай только как P3.\n") if ru else
                     ("From the second review onward, look for regressions introduced by the fixes and unmet "
                      "acceptance criteria (Done when). Report new edge cases outside the brief only as P3.\n"))
-    guarded = checking.guarded_lines(checking.guarded_changes(st))
+    changes = checking.guarded_changes(st)
+    guarded = checking.guarded_lines(changes)
     if guarded:
         context += "\n".join(guarded) + "\n"
         context += (("Прочитай эти охраняемые файлы целиком и проверь, не ослаблены ли проверки: "
                      "убранные утверждения, пропуски, расширенные допуски, моки вместо проверяемого кода.\n") if ru else
                     ("Read these guarded files in full and check for weakened checks: removed assertions, "
                      "skips, widened tolerances, or mocks replacing the code under test.\n"))
+    removed = checking.removed_tests(st, changes)
+    if removed:
+        context += "Ветка удалила эти тесты:\n" if ru else "The branch deleted these tests:\n"
+        context += "".join(f"- {path}: {name}\n" for path, name in removed[:40])
+        if len(removed) > 40:
+            context += f"… и ещё {len(removed) - 40}\n" if ru else f"… and {len(removed) - 40} more\n"
+        context += (("Отчитайся за каждый: проверь, перенесён ли его контракт в новый код, "
+                     "или он устарел, и почему. Удалённый тест, контракт которого ещё действует, "
+                     "без замены — находка P2.\n") if ru else
+                    ("Account for each test: check whether its contract is preserved in the new code "
+                     "or is obsolete, and explain why. A deleted test whose contract still applies "
+                     "without a replacement is a P2 finding.\n"))
     checks = st.get("checks", [])
     if (checks and st.get("check") == checks[-1]["cmd"] and checks[-1]["outcome"] == "passed"):
         check = checks[-1]
