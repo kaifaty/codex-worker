@@ -11,6 +11,8 @@ check, or after an unstructured result, for compatibility. Every review prompt n
 result of the passing saved check and tells the reviewer not to rerun the full suite; only focused
 checks that confirm a specific finding run again.
 
+The review prompt lists deleted tests and asks the reviewer to account for each contract, treating a still-valid contract removed without replacement as P2.
+
 Before the first automatic review and every repeat review after a fix, the supervisor fetches the
 task's base and runs `git merge-tree --write-tree HEAD <base>`. A clean merge proceeds to review
 without changing the task branch. If fetching or merge-tree fails (for example, without network

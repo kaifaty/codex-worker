@@ -393,6 +393,74 @@ class CheckGuardTests(RotationTestCase):
             self.state("guarded-counts"), {"language": "en"}))
         self.assertEqual(self.notification("guarded-counts", "turn_finished")["guarded_changed"], 1)
 
+    def test_review_prompt_lists_deleted_tests_and_excludes_moves_in_both_languages(self):
+        fixtures = {
+            "tests/body.test.ts": ("it('parses a body', () => {});\n"
+                                   'test("keeps list nodes", () => {});\n'
+                                   "it.each([[1]])('formats %s', () => {});\n"
+                                   'test.each([\n  [1],\n])("handles rows", () => {});\n'
+                                   "test.each`value\n${1}`('handles a table', () => {});\n"
+                                   "test(dynamicName, () => {});\n"),
+            "tests/test_body.py": "def test_body(): pass\nasync def test_async_body(): pass\n",
+            "tests/BodyTest.kt": "fun `keeps order`() {}\nfun testBody() {}\nfun helper() {}\n",
+            "tests/BodyTest.java": "public void testRequest() {}\n",
+            "tests/body.rs": ("#[test]\nfn ordered() {}\n#[tokio::test]\nasync fn async_body() {}\n"
+                              "#[test]\nfn relocated() {}\nfn helper() {}\n"),
+            "tests/target.rs": "#[test]\nfn replaced() {}\n",
+            "tests/test_old.py": "def test_relocated(): pass\n",
+            "src/helper.py": "def test_nontest(): pass\n",
+        }
+        self.commit_fixture(fixtures)
+        worker = self.worker()
+        state = {"slug": "removed-tests", "worktree": str(self.repo), "base": "origin/main",
+                 "guards": ["src/*"]}
+        headings = {"en": "The branch deleted these tests:", "ru": "Ветка удалила эти тесты:"}
+        for language, heading in headings.items():
+            self.assertNotIn(heading, worker.prompts.review_prompt(state, {"language": language}))
+
+        self.git("checkout", "--quiet", "-b", "task")
+        self.git("rm", "--quiet", "--", *(path for path in fixtures if path != "tests/target.rs"))
+        (self.repo / "tests").mkdir(exist_ok=True)
+        (self.repo / "tests/test_new.py").write_text(fixtures["tests/test_old.py"])
+        (self.repo / "tests/target.rs").write_text("#[test]\nfn relocated() {}\n")
+        self.git("add", "--", "tests")
+        self.git("commit", "--quiet", "-m", "Remove obsolete tests and relocate one")
+        self.git("checkout", "--quiet", "main")
+        self.commit_fixture({"tests/test_base_only.py": "def test_upstream_only(): pass\n"})
+        self.git("checkout", "--quiet", "task")
+
+        expected = ["tests/body.test.ts: parses a body", "tests/body.test.ts: keeps list nodes",
+                    "tests/body.test.ts: formats %s", "tests/body.test.ts: handles rows",
+                    "tests/body.test.ts: handles a table",
+                    "tests/test_body.py: test_body", "tests/test_body.py: test_async_body",
+                    "tests/BodyTest.kt: keeps order", "tests/BodyTest.kt: testBody",
+                    "tests/BodyTest.java: testRequest", "tests/body.rs: ordered", "tests/body.rs: async_body",
+                    "tests/target.rs: replaced"]
+        for language, heading in headings.items():
+            with self.subTest(language=language):
+                prompt = worker.prompts.review_prompt(state, {"language": language})
+                block = prompt.split(heading + "\n", 1)[1]
+                self.assertEqual(set(line[2:] for line in block.splitlines() if line.startswith("- ")), set(expected))
+                for name in ("relocated", "test_nontest", "test_upstream_only", "helper", "dynamicName"):
+                    self.assertNotIn(name, block)
+                for text in (("Account for each test", "preserved in the new code", "obsolete", "explain why", "P2")
+                             if language == "en" else ("Отчитайся за каждый", "перенесён", "устарел", "почему", "P2")):
+                    self.assertIn(text, block)
+
+    def test_review_prompt_limits_deleted_tests_to_forty_in_both_languages(self):
+        path = "tests/test_many.py"
+        self.commit_fixture({path: "".join(f"def test_case_{i:02}(): pass\n" for i in range(43))})
+        self.git("rm", "--quiet", "--", path)
+        self.git("commit", "--quiet", "-m", "Remove test cases")
+        worker = self.worker()
+        state = {"slug": "removed-tests-limit", "worktree": str(self.repo), "base": "origin/main"}
+        for language, overflow in (("en", "… and 3 more"), ("ru", "… и ещё 3")):
+            with self.subTest(language=language):
+                prompt = worker.prompts.review_prompt(state, {"language": language})
+                entries = [line for line in prompt.splitlines() if line.startswith("- tests/")]
+                self.assertEqual(entries, [f"- {path}: test_case_{i:02}" for i in range(40)])
+                self.assertIn(overflow, prompt)
+
     def test_disabled_test_markers_ignore_prose_and_match_test_annotations(self):
         pattern = self.worker().checking.DISABLED_TEST
         for line in ("only P3 remains", "Contend only for the reset journal lock",
