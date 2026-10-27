@@ -404,7 +404,8 @@ class CheckGuardTests(RotationTestCase):
             "tests/test_body.py": "def test_body(): pass\nasync def test_async_body(): pass\n",
             "tests/BodyTest.kt": "fun `keeps order`() {}\nfun testBody() {}\nfun helper() {}\n",
             "tests/BodyTest.java": "public void testRequest() {}\n",
-            "tests/body.rs": ("#[test]\nfn ordered() {}\n#[tokio::test]\nasync fn async_body() {}\n"
+            "tests/body.rs": ("#[test]\n#[should_panic]\n#[ignore]\n#[cfg(any(unix, windows))]\nfn ordered() {}\n"
+                              '#[tokio::test(flavor = "multi_thread")]\nasync fn async_body() {}\n'
                               "#[test]\nfn relocated() {}\nfn helper() {}\n"),
             "tests/target.rs": "#[test]\nfn replaced() {}\n",
             "tests/test_old.py": "def test_relocated(): pass\n",

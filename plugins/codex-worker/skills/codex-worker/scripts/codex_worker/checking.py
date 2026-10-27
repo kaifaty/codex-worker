@@ -165,7 +165,8 @@ def test_names(lines, path):
     elif suffix in (".kt", ".java"):
         pattern = r"\b(?:fun|void)\s+(?:`(?P<quoted>[^`]+)`|(?P<name>test\w*))\s*\("
     elif suffix == ".rs":
-        pattern = r"^\s*#\[(?:test|tokio::test)\]\s*(?:async\s+)?fn\s+(?P<name>\w+)\s*\("
+        pattern = (r"^\s*#\[(?:test|tokio::test)(?:\([^]]*\))?\]"
+                   r"(?:\s*#\[[^]]*\])*\s*(?:async\s+)?fn\s+(?P<name>\w+)\s*\(")
     else:
         return []
     names = []
