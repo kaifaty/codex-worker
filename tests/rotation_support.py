@@ -2,6 +2,7 @@
 import datetime
 import json
 import os
+import shlex
 import shutil
 import signal
 import subprocess
@@ -583,11 +584,24 @@ class RotationTestCase(unittest.TestCase):
         fake_gh = self.root / "gh"
         fake_gh.write_text("#!" + PYTHON + "\n" + FAKE_GH)
         fake_gh.chmod(0o700)
+        # Fake GitHub publication keeps its transport in the local bare repository.
+        git_bin = self.root / "fixture-bin"
+        git_bin.mkdir()
+        real_git = shutil.which("git")
+        self.assertIsNotNone(real_git)
+        fake_git = git_bin / "git"
+        fake_git.write_text(
+            "#!/bin/sh\n"
+            'case "$*" in\n'
+            '  *"remote get-url origin") echo https://github.com/fixture/repo.git ;;\n'
+            '  *) exec ' + shlex.quote(real_git) + ' "$@" ;;\n'
+            "esac\n")
+        fake_git.chmod(0o700)
         self.env = dict(os.environ, CODEX_TASK_HOME=str(self.home),
                         CODEX_TASK_CODEX=str(self.fake), CODEX_FAKE_TRACE=str(self.trace_path),
                         CODEX_FAKE_GH_TRACE=str(self.gh_trace_path),
                         CODEX_FAKE_GH_STATE=str(self.root / "fake-gh-state.json"),
-                        PATH=str(self.root) + os.pathsep + os.environ.get("PATH", ""),
+                        PATH=str(self.root) + os.pathsep + str(git_bin) + os.pathsep + os.environ.get("PATH", ""),
                         CODEX_TASK_SLEEP_STEP="0.05", CODEX_TASK_RESET_MARGIN="0.1",
                         CODEX_TASK_WAIT_POLL_SECONDS="0.02", CODEX_TASK_RATE_POLL_SECONDS="0.05",
                         CODEX_TASK_ROLLOUT_SEARCH_SECONDS="0.05",

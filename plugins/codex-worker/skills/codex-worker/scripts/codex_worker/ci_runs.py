@@ -203,10 +203,14 @@ def wait_ci_command(st, stopped, deadline):
         response = run(["sh", "-c", st["ci_command"]], env=env)
         output = "\n".join(part for part in (response.stdout, response.stderr) if part)
         check["tail"] = "\n".join(ci_failure_excerpt(output, 150))
+        unavailable = response.returncode == 75
         failed = response.returncode != 0
-        check.update(state="FAILURE" if failed else "SUCCESS", bucket="fail" if failed else "pass")
+        check.update(state="SKIPPED" if unavailable else "FAILURE" if failed else "SUCCESS",
+                     bucket="skipping" if unavailable else "fail" if failed else "pass")
         if remote_head() != ci["sha"]:
             return "skipped", "head changed while waiting"
+        if unavailable:
+            return "skipped", "CI unavailable (exit 75)"
         return ("failed", "rounds_exhausted") if failed else ("passed", "passed")
     except InterruptedError:
         return "skipped", "stopped"
@@ -318,7 +322,8 @@ def ci_lines(ci):
                 lines.append(check["tail"])
         return lines
     if ci["outcome"] == "skipped":
-        return [f"== CI {sha}: skipped: {ci['reason']}"]
+        return [f"== CI {sha}: skipped: {ci['reason']}"] + [
+            check["tail"] for check in checks if check["bucket"] == "skipping" and check.get("tail")]
     return [f"== CI {sha}: {ci['outcome']} ({passed}/{len(checks)}, {ci.get('seconds', 0) / 60:.1f} min)"]
 
 

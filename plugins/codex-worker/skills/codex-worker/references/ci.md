@@ -11,7 +11,9 @@ signal interrupts it. A changed PR head also skips the wait.
 
 `--ci-command CMD` enables the same cycle on other hosts, replacing GitHub checks with `sh -c CMD`
 in the worktree. The command must wait for CI and exit 0 for success or nonzero for failure; it gets
-`CODEX_CI_SHA` (local HEAD) and `CODEX_CI_BRANCH`. The supervisor verifies the actual `origin` branch
+`CODEX_CI_SHA` (local HEAD) and `CODEX_CI_BRANCH`. Exit code 75 (EX_TEMPFAIL) instead records `skipped`
+with reason `CI unavailable (exit 75)`, preserves the output excerpt, and does not start a repair round.
+The supervisor verifies the actual `origin` branch
 before and after the command: an unpushed or mismatched head is `skipped`, as is a head changed while
 waiting. The same `ci_timeout_minutes`, budget exclusions, `stop` handling and repair rounds apply.
 The result contains one check named after the command, with output selected by the excerpt rules below.
