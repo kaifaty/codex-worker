@@ -312,7 +312,9 @@ class TimeBudgetTests(RotationTestCase):
         cases = [(command, 1, "", False) for command in (
             "pgrep -f fixture", "grep fixture", "egrep fixture", "fgrep fixture", "rg fixture",
             "git grep fixture", "/bin/zsh -lc 'pgrep -f fixture'", "/bin/sh -c 'git grep fixture'",
-            "ps | grep fixture", "/bin/zsh -lc 'ps | grep fixture'")]
+            "ps | grep fixture", "/bin/zsh -lc 'ps | grep fixture'",
+            "pgrep -fl x 2>&1", "pgrep x >&1", "pgrep x &>search.log",
+            "rg foo 2>/dev/null", "ps aux | grep x 2>&1", '/bin/zsh -lc "rg foo 2>&1"')]
         cases += [("pgrep fixture", 1, " \t\n", False),
                   ("grep fixture", 1, "search failed", True),
                   ("pgrep fixture", 2, "", True),
@@ -321,6 +323,8 @@ class TimeBudgetTests(RotationTestCase):
                   ("pgrep fixture; false", 1, "", True),
                   ("pgrep fixture && false", 1, "", True),
                   ("pgrep fixture || false", 1, "", True),
+                  ("pgrep x & sleep 1", 1, "", True),
+                  ("grep x || true", 1, "", True),
                   ("pgrep fixture\nfalse", 1, "", True),
                   ("/bin/zsh -lc 'pgrep fixture; false'", 1, "", True)]
         for command, code, output, stuck in cases:

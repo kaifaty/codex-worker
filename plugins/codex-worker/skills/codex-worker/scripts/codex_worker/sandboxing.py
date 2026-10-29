@@ -40,13 +40,23 @@ def rules_text(cfg=None, no_push=False):
     if not no_push:
         return text
     lines = text.splitlines(keepends=True)
+    replaced = False
     for index, line in enumerate(lines):
         if line.startswith("- Commit as you go."):
             lines[index] = ("- Commit as you go. Keep commits local; do not publish the branch or open or edit PRs. "
                             "Do not merge the PR or deploy anything: Claude handles review and merging.\n")
+            replaced = True
         elif line.startswith("- Коммить по ходу,"):
             lines[index] = ("- Коммить по ходу локально. Не публикуй ветку, не открывай и не редактируй PR. "
                             "Не мержи PR и ничего не выкатывай: ревью и слияние делает Claude.\n")
+            replaced = True
+    if not replaced:
+        cfg = config.accounts_config() if cfg is None else cfg
+        rule = ("Коммить локально; не пушь ветку, не открывай и не редактируй PR. "
+                "Это отменяет правила о публикации выше." if cfg.get("language", "en") == "ru" else
+                "Commit locally; do not push the branch or open or edit PRs. "
+                "This overrides any publication rule above.")
+        lines.append(("\n" if text.endswith("\n") else "\n\n") + "- " + rule + "\n")
     return "".join(lines)
 
 

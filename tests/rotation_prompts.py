@@ -125,6 +125,22 @@ class PromptTests(unittest.TestCase):
                     self.assertIn("Stay read-only" if language == "en" else "Режим только чтения", prompt)
                     self.assertNotRegex(prompt, "push|пуш")
 
+        custom = "Always push the branch and open a PR."
+        (self.root / "codex-worker-rules.md").write_text(custom, encoding="utf-8")
+        for language, rule in (
+                ("en", "Commit locally; do not push the branch or open or edit PRs. "
+                 "This overrides any publication rule above."),
+                ("ru", "Коммить локально; не пушь ветку, не открывай и не редактируй PR. "
+                 "Это отменяет правила о публикации выше.")):
+            with self.subTest(custom_rules_language=language):
+                cfg = {"language": language}
+                (self.root / "codex-worker.json").write_text(json.dumps(cfg), encoding="utf-8")
+                self.assertEqual(self.worker.sandboxing.rules_text(cfg), custom)
+                self.assertEqual(self.worker.sandboxing.rules_text(no_push=False), custom)
+                expected = custom + "\n\n- " + rule + "\n"
+                self.assertEqual(self.worker.sandboxing.rules_text(cfg, no_push=True), expected)
+                self.assertEqual(self.worker.sandboxing.rules_text(no_push=True), expected)
+
     def test_fix_prompt_text_in_both_languages(self):
         parts = {
             "en": ("Check these review findings against the code:",

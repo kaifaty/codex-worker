@@ -22,7 +22,7 @@ def _search_command(command):
         if "\n" in command or "\r" in command:
             return False
         try:
-            lexer = shlex.shlex(command, posix=True, punctuation_chars="|;&")
+            lexer = shlex.shlex(command, posix=True, punctuation_chars="|;&>")
             lexer.whitespace_split = True
             lexer.commenters = ""
             words = list(lexer)
@@ -32,7 +32,9 @@ def _search_command(command):
                 and words[1] in ("-c", "-lc")):
             command = words[2]
             continue
-        if not words or any(word and all(char in "|;&" for char in word) and word != "|" for word in words):
+        operators = [word for word in words if word and all(char in "|;&>" for char in word)]
+        if not words or any(";" in word or "&&" in word or "||" in word
+                            or "&" in word.replace(">&", "").replace("&>", "") for word in operators):
             return False
         while "|" in words:
             words = words[words.index("|") + 1:]
