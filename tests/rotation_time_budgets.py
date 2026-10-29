@@ -307,6 +307,31 @@ class TimeBudgetTests(RotationTestCase):
                 self.assertEqual(len(self.invocations()) - before, 1)
                 self.assertIn("No loop detected", output)
 
+    def test_empty_search_results_do_not_trigger_stuck(self):
+        worker = self.worker()
+        cases = [(command, 1, "", False) for command in (
+            "pgrep -f fixture", "grep fixture", "egrep fixture", "fgrep fixture", "rg fixture",
+            "git grep fixture", "/bin/zsh -lc 'pgrep -f fixture'", "/bin/sh -c 'git grep fixture'",
+            "ps | grep fixture", "/bin/zsh -lc 'ps | grep fixture'")]
+        cases += [("pgrep fixture", 1, " \t\n", False),
+                  ("grep fixture", 1, "search failed", True),
+                  ("pgrep fixture", 2, "", True),
+                  ("false", 1, "", True),
+                  ("grep fixture | false", 1, "", True),
+                  ("pgrep fixture; false", 1, "", True),
+                  ("pgrep fixture && false", 1, "", True),
+                  ("pgrep fixture || false", 1, "", True),
+                  ("pgrep fixture\nfalse", 1, "", True),
+                  ("/bin/zsh -lc 'pgrep fixture; false'", 1, "", True)]
+        for command, code, output, stuck in cases:
+            with self.subTest(command=command, code=code, output=output):
+                control = worker.turn_monitor.TurnControl(None, 3)
+                event = {"type": "item.completed", "item": {
+                    "type": "command_execution", "command": command,
+                    "exit_code": code, "aggregated_output": output}}
+                self.assertEqual([control.repeated(event) for _ in range(3)], [False, False, stuck])
+                self.assertEqual(control.reason is not None, stuck)
+
     def test_repeat_limit_and_russian_wrap_prompt_follow_settings(self):
         self.configure(repeat_limit=2)
         command = {"command": "pytest tests/widget.py", "exit_code": 2,

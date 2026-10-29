@@ -24,6 +24,9 @@ def cmd_start(a):
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
         procs.die("slug: 2-41 chars of a-z, 0-9 and '-'")
     cfg = config.accounts_config()
+    no_push = getattr(a, "no_push", False)
+    if no_push and (a.ci or a.ci_command is not None):
+        procs.die("--no-push cannot be combined with --ci or --ci-command; CI requires a published branch")
     reviewer = getattr(a, "reviewer", None) or cfg["reviewer"]
     if reviewer == "claude":
         config.require_claude()
@@ -36,9 +39,9 @@ def cmd_start(a):
     if not brief.strip():
         procs.die("empty brief")
     sandbox = a.sandbox if a.sandbox is not None else cfg["sandbox"]
-    rules = sandboxing.rules_text(cfg)
+    rules = sandboxing.rules_text(cfg, no_push=no_push)
     if sandbox == "workspace":
-        rules += "\n\n" + sandboxing.sandbox_rules(cfg)
+        rules += "\n\n" + sandboxing.sandbox_rules(cfg, no_push=no_push)
     repo = main_repo(a.repo)
     branch = a.branch if a.branch is not None else f"codex/{a.slug}"
     if subprocess.run(config.GIT + ["check-ref-format", "--branch", branch], cwd=repo,
@@ -60,11 +63,11 @@ def cmd_start(a):
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
-          "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"],
+          "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"], "no_push": no_push,
           "review_angles": a.review_angles,
           "reviewer": reviewer,
           "max_turn_minutes": a.max_minutes if a.max_minutes is not None else cfg.get("max_turn_minutes"),
-          "ci_enabled": a.ci or bool(a.ci_command) or cfg["ci"], "ci_command": a.ci_command,
+          "ci_enabled": not no_push and (a.ci or bool(a.ci_command) or cfg["ci"]), "ci_command": a.ci_command,
           "ci_rounds": a.ci_rounds if a.ci_rounds is not None else 1,
           "ci_timeout_minutes": cfg["ci_timeout_minutes"],
           "max_task_weekly_percent": a.max_weekly if a.max_weekly is not None else cfg.get("max_task_weekly_percent"),
@@ -127,6 +130,8 @@ def cmd_say(a):
     reviewer = getattr(a, "reviewer", None)
     ci_command = getattr(a, "ci_command", None)
     no_ci_command = getattr(a, "no_ci_command", False)
+    if st.get("no_push") and (a.ci or ci_command is not None):
+        procs.die("--no-push task cannot enable --ci or --ci-command; CI requires a published branch")
     if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
                      or a.no_base_check or angles is not None or reviewer is not None
                      or a.ci or a.no_ci or ci_command is not None or no_ci_command or a.ci_rounds is not None):
@@ -206,6 +211,8 @@ def describe(st, detail):
     line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {location}  "
             f"account {account}  thread {thread[:13]}" + label
             + "  sandbox " + ("read-only" if scouting else st.get("sandbox", "off")))
+    if st.get("no_push"):
+        line += "  push disabled (--no-push)"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
     if not detail:

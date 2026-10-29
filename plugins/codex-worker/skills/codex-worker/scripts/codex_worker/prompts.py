@@ -145,6 +145,9 @@ def review_prompt(st, cfg=None):
 
 def fix_prompt(st, review, check, cfg, base_merge=None):
     ru = cfg.get("language", "en") == "ru"
+    commit = (("Коммить локально. Не публикуй ветку и не открывай PR." if ru else
+               "Commit locally. Do not publish the branch or open a PR.") if st.get("no_push") else
+              ("Закоммить и запушь изменения." if ru else "Commit and push the changes."))
     if base_merge is not None:
         base = base_merge["base"]
         if st.get("sandbox") == "workspace":
@@ -155,20 +158,22 @@ def fix_prompt(st, review, check, cfg, base_merge=None):
             prompt = (f"Ветка задачи конфликтует с текущей базой {base}.\n"
                       f"Конфликтующие файлы:\n{files}\n\n"
                       f"Слей {base} в ветку задачи обычным merge-коммитом: "
-                      f"`git merge --no-ff {shlex.quote(base)}`. Не делай rebase или force-push. "
+                      f"`git merge --no-ff {shlex.quote(base)}`. "
+                      + ("Не делай rebase. " if st.get("no_push") else "Не делай rebase или force-push. ") +
                       "Разреши конфликты, сохранив смысл изменений обеих сторон.\n")
             if st.get("check"):
                 prompt += f"Запусти сохранённую проверку целиком: `{st['check']}`.\n"
-            return prompt + ("Закоммить и запушь изменения. Верни итог по схеме работы; "
+            return prompt + (commit + " Верни итог по схеме работы; "
                              "findings — пустой массив.\n")
         prompt = (f"The task branch conflicts with the current base {base}.\n"
                   f"Conflicting files:\n{files}\n\n"
                   f"Merge {base} into the task branch with an ordinary merge commit: "
-                  f"`git merge --no-ff {shlex.quote(base)}`. Do not rebase or force-push. "
+                  f"`git merge --no-ff {shlex.quote(base)}`. "
+                  + ("Do not rebase. " if st.get("no_push") else "Do not rebase or force-push. ") +
                   "Resolve the conflicts while preserving the intent of both sides.\n")
         if st.get("check"):
             prompt += f"Run the saved check in full: `{st['check']}`.\n"
-        return prompt + ("Commit and push the changes. Return the work result schema; "
+        return prompt + (commit + " Return the work result schema; "
                          "use an empty findings array.\n")
     if check is not None:
         prompt = (("Исправь сбой сохранённой проверки после предыдущего исправления.\n" if ru else
@@ -185,7 +190,7 @@ def fix_prompt(st, review, check, cfg, base_merge=None):
                 "Если исправлению нужен новый механизм (новый анализ, опция, абстракция или обработка входов, "
                 "которых в этом репозитории не бывает), сузь решение: пусть неподдерживаемый случай падает явно, "
                 "или отклони находку с причиной out of scope и вынеси её в remaining. "
-                "Находки о лишнем объёме исправляй удалением лишнего кода. Закоммить и запушь изменения. "
+                "Находки о лишнем объёме исправляй удалением лишнего кода. " + commit + " " +
                 "Верни итог по схеме работы; в findings укажи для каждой находки id, "
                 "decision fixed или rejected и note с пояснением. Если находок нет, findings пуст.\n") if ru else
                ("\n\nVerify every finding against the code. Fix real defects, adding a test where reasonable. "
@@ -193,7 +198,7 @@ def fix_prompt(st, review, check, cfg, base_merge=None):
                 "If a fix would need a new mechanism (a new analysis, option, abstraction, or handling of inputs "
                 "that do not occur in this repository), narrow instead: make the unsupported case fail loudly, "
                 "or reject the finding with the reason out of scope and list it in remaining. "
-                "Fix unrequested-scope findings by deleting the extra code. Commit and push the changes. "
+                "Fix unrequested-scope findings by deleting the extra code. " + commit + " " +
                 "Return the work result schema; in findings give each finding's id, decision fixed or rejected, "
                 "and an explanatory note. When there are no findings, use an empty findings array.\n"))
     return prompt
@@ -229,7 +234,7 @@ def wrapup_prompt(st, reason, cfg):
                       "The task's weekly limit budget is exhausted. ")
         else:
             prompt = ("Время хода вышло. " if ru else "The turn's time budget has expired. ")
-        if st.get("kind") not in ("review", "scout"):
+        if st.get("kind") not in ("review", "scout") and not st.get("no_push"):
             prompt += ("Закоммить то, что работает, и запушь. " if ru else
                        "Commit what works and push it. ")
         if not reviewing:
@@ -244,11 +249,18 @@ def wrapup_prompt(st, reason, cfg):
                    "Stop. Report numerical evidence and what you tried. "))
         if not reviewing:
             prompt += "Короткий итог со status blocked. " if ru else "Give a short final result with status blocked. "
+    if st.get("no_push") and st.get("kind") not in ("review", "scout"):
+        prompt += ("Коммить локально. Не публикуй ветку и не открывай PR. " if ru else
+                   "Commit locally. Do not publish the branch or open a PR. ")
     prompt += ("На сворачивание не больше 10 минут; не продолжай реализацию и не запускай ревью. " if ru else
                "You have at most 10 minutes to wrap up; do not continue implementation or start a review. ")
     if st.get("kind") in ("review", "scout"):
-        prompt += ("Режим только чтения: не меняй файлы, не коммить и не пушь. " if ru else
-                   "Stay read-only: do not change files, commit or push. ")
+        if st.get("no_push"):
+            prompt += ("Режим только чтения: не меняй файлы, не коммить, не публикуй ветку и не открывай PR. " if ru else
+                       "Stay read-only: do not change files or commit, publish the branch or open a PR. ")
+        else:
+            prompt += ("Режим только чтения: не меняй файлы, не коммить и не пушь. " if ru else
+                       "Stay read-only: do not change files, commit or push. ")
     if reviewing:
         prompt += (("Ответь JSON по схеме ревью: в findings верни находки, найденные к этому моменту; "
                     "verdict defects, если находки есть, иначе clean. В summary отметь, что ревью не завершено.") if ru else

@@ -34,6 +34,8 @@ def wait_rotation_lines(st):
 
 
 def wait_publication_lines(st):
+    if st.get("no_push"):
+        yield "== push disabled (--no-push)"
     if st.get("sandbox") == "workspace":
         yield "== sandbox: workspace"
     publication = st.get("publish")

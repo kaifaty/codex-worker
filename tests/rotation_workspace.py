@@ -136,6 +136,98 @@ class WorkspaceTests(RotationTestCase):
                         worker.config.accounts_config()
                     self.assertIn(key, str(raised.exception))
 
+    def test_no_push_persists_through_fixes_say_and_review_with_local_commits(self):
+        self.configure(language="en", sandbox="workspace", ci=True)
+        decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed the defect."}
+                     for finding in self.review_result()["findings"]]
+        self.account(self.home, "A", self.reset, runs=[
+            self.ci_work("initial local change\n"),
+            {"mode": "complete", "reply": self.review_result()},
+            self.ci_work("fixed local change\n", findings=decisions),
+            {"mode": "complete", "reply": self.review_result(False)},
+            self.ci_work("follow-up local change\n"),
+            {"mode": "complete", "reply": self.review_result(False)}])
+        calls = self.record_git_calls()
+        self.start("local-only", "--no-push", "--review", "--fix-rounds", "1", "--check", "true")
+        output = self.wait("local-only")
+        state = self.state("local-only")
+        self.assertTrue(state["no_push"])
+        self.assertFalse(state["ci_enabled"])
+        self.assertEqual(len(state["rounds"]), 1)
+        self.assertEqual([check["outcome"] for check in state["checks"]], ["passed", "passed"])
+        self.assertIn("== push disabled (--no-push)", output)
+        self.assertIn("== PR skipped: no-push", output)
+        self.assertEqual((state["publish"]["pushed"], state["publish"]["error"]), (False, "no-push"))
+        self.assertTrue(state["publish"]["sha"])
+        for args in (("status",), ("status", "local-only")):
+            self.assertIn("push disabled (--no-push)", self.cli(*args))
+        self.cli("say", "local-only", "Make another local change")
+        self.wait("local-only")
+        self.cli("review", "local-only")
+        self.wait("local-only")
+        state = self.state("local-only")
+        self.assertTrue(state["no_push"])
+        self.assertEqual([event["review"] for event in self.invocations()], [False, True, False, True, False, True])
+        self.assertEqual(self.git("rev-list", "--count", "origin/main.." + state["branch"]), "3")
+        self.assertEqual(self.git("-C", state["worktree"], "status", "--porcelain"), "")
+        self.assertEqual(self.git("ls-remote", "--heads", "origin", state["branch"]), "")
+        self.assertFalse(self.gh_invocations())
+        commands = [json.loads(line)["argv"] for line in calls.read_text().splitlines()]
+        self.assertFalse(any("push" in command for command in commands), commands)
+
+        # The policy must also skip PR publication for a branch already on the remote.
+        worker = self.worker()
+        st = dict(state, kind="work", outcome="completed")
+        st.pop("publish")
+        with mock.patch.object(worker.publishing.subprocess, "run") as run, \
+                mock.patch.object(worker.task_state, "save") as save:
+            worker.publishing.publish_pr(st, lambda: False)
+        run.assert_not_called()
+        save.assert_called_once_with(st)
+        self.assertEqual((st["publish"]["action"], st["publish"]["error"]), ("skipped", "no-push"))
+
+    def test_no_push_wrap_up_commits_without_publishing(self):
+        self.configure(language="en", sandbox="workspace")
+        command = {"command": "fixture-check", "exit_code": 2, "aggregated_output": "failure"}
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "hold", "commands": [command] * 3},
+            self.ci_work("local wrap-up\n", status="blocked")])
+        self.start("local-wrap", "--no-push")
+        output = self.wait("local-wrap")
+        state = self.state("local-wrap")
+        self.assertEqual((state["outcome"], state["wrapup"]["outcome"]), ("stuck", "completed"))
+        self.assertTrue(state["no_push"])
+        self.assertTrue(state["publish"]["sha"])
+        self.assertFalse(state["publish"]["pushed"])
+        self.assertEqual(state["publish"]["error"], "no-push")
+        self.assertIn("== PR skipped: no-push", output)
+        self.assertEqual(self.git("ls-remote", "--heads", "origin", state["branch"]), "")
+        self.assertFalse(self.gh_invocations())
+
+    def test_no_push_rejects_explicit_ci_on_start_and_say_before_mutating_state(self):
+        self.configure(language="en")
+        for options in (("--ci",), ("--ci-command", "true")):
+            with self.subTest(command="start", options=options):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "local-conflict",
+                                         "--brief", str(self.brief), "--repo", str(self.repo),
+                                         "--no-push", *options], cwd=self.repo, env=self.env,
+                                        text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--no-push cannot be combined", result.stderr)
+                self.assertFalse((self.home / "claude-tasks/local-conflict").exists())
+        self.start("local-ci", "--no-push")
+        self.wait("local-ci")
+        path = self.home / "claude-tasks/local-ci/state.json"
+        before = path.read_bytes()
+        for options in (("--ci",), ("--ci-command", "true")):
+            with self.subTest(command="say", options=options):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "say", "local-ci", "Continue", *options],
+                                        cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("--no-push task cannot enable", result.stderr)
+                self.assertEqual(path.read_bytes(), before)
+        self.assertEqual(len(self.invocations()), 1)
+
     def test_workspace_rules_are_localized_and_off_has_no_sandbox_flags_or_section(self):
         for language, heading in (("en", "## Workspace sandbox"), ("ru", "## Песочница worktree")):
             with self.subTest(language=language):

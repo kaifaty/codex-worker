@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import selectors
+import shlex
 import subprocess
 import sys
 import termios
@@ -14,6 +15,29 @@ from pathlib import Path
 from typing import Literal, NamedTuple, Optional
 
 from . import account_rotation, accounts, budgets, clock, config, procs, result_schema, sandboxing, task_state, telemetry_log, threads
+
+
+def _search_command(command):
+    while True:
+        if "\n" in command or "\r" in command:
+            return False
+        try:
+            lexer = shlex.shlex(command, posix=True, punctuation_chars="|;&")
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            words = list(lexer)
+        except ValueError:
+            return False
+        if (len(words) == 3 and Path(words[0]).name in ("sh", "bash", "zsh", "dash", "ksh", "fish")
+                and words[1] in ("-c", "-lc")):
+            command = words[2]
+            continue
+        if not words or any(word and all(char in "|;&" for char in word) and word != "|" for word in words):
+            return False
+        while "|" in words:
+            words = words[words.index("|") + 1:]
+        return bool(words) and (Path(words[0]).name in ("pgrep", "grep", "egrep", "fgrep", "rg")
+                                or (Path(words[0]).name == "git" and words[1:2] == ["grep"]))
 
 
 class TurnControl:
@@ -55,6 +79,9 @@ class TurnControl:
             return False
         output = item.get("aggregated_output", "")
         if not isinstance(output, str):
+            return False
+        if code == 1 and not output.strip() and _search_command(command):
+            self.failures.pop(command, None)
             return False
         digest = hashlib.sha256(output.encode("utf-8")[-2048:]).hexdigest()
         signature = (code, digest)
@@ -143,7 +170,7 @@ def monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup,
     else:
         args += sandboxing.sandbox_args(st)
         if st.get("sandbox") == "workspace":
-            rules = sandboxing.sandbox_rules(cfg, reviewing=reviewing)
+            rules = sandboxing.sandbox_rules(cfg, reviewing=reviewing, no_push=st.get("no_push", False))
             if not prompt.endswith(rules):
                 prompt += "\n\n" + rules
     if st.get("kind") != "scout":

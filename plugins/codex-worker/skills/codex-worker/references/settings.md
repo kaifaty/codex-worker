@@ -49,6 +49,9 @@ for token setup and [review-cycle.md](review-cycle.md#review-provider) for fallb
 
 ## Task CI options
 
+`start --no-push` keeps commits local through `say`, reviews, fixes and wrap-up; the supervisor skips branch and PR publication (`no-push`), and `wait`/`status` show push disabled.
+It disables the default `ci` setting; explicit `--ci` or `--ci-command CMD` on `start` or `say` is an error for this task. Local `--check` still runs.
+
 `start --ci` or `"ci": true` in the settings enables GitHub PR check waiting for the task. The saved
 setting persists across follow-ups: `say` without CI flags preserves it, `say --ci` enables it, and
 `say --no-ci` disables it. `--ci` and `--no-ci` are mutually exclusive on `say`.
