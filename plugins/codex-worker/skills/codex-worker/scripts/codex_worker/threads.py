@@ -49,7 +49,12 @@ def followup_prompt(st, message, cfg, source="claude"):
     with (config.TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"at": clock.CLOCK.time(), "text": message, "source": source},
                                 ensure_ascii=False) + "\n")
-    return message if st.get("thread") else handoff(st, current_message=True, cfg=cfg)
+    if st.get("thread"):
+        if st.get("no_push"):
+            message += ("\n\nКоммить локально. Не публикуй ветку и не открывай PR." if cfg.get("language", "en") == "ru" else
+                        "\n\nCommit locally. Do not publish the branch or open a PR.")
+        return message
+    return handoff(st, current_message=True, cfg=cfg)
 
 
 def rollout_path(home, thread):
@@ -174,4 +179,7 @@ def handoff(st, current_message=False, cfg=None):
     if not scouting:
         prompt += (f"\n\nСначала посмотри git status и git diff $(git merge-base {shlex.quote(st['base'])} HEAD), потом продолжай работу.\n" if ru else
                    f"\n\nFirst inspect git status and git diff $(git merge-base {shlex.quote(st['base'])} HEAD), then continue the task.\n")
+    if st.get("no_push") and st.get("kind") not in ("review", "scout"):
+        prompt += ("\nКоммить локально. Не публикуй ветку и не открывай PR.\n" if ru else
+                   "\nCommit locally. Do not publish the branch or open a PR.\n")
     return prompt

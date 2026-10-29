@@ -81,6 +81,66 @@ class PromptTests(unittest.TestCase):
                 if language == "en":
                     self.assertNotRegex(prompt, "[А-Яа-яЁё]")
 
+    def test_no_push_rules_and_prompts_in_both_languages(self):
+        review = {"findings": []}
+        merge = {"base": "origin/main", "files": ["worker.py"]}
+        reasons = ({"outcome": "budget_exhausted", "minutes": 1},
+                   {"outcome": "stuck", "command": "false", "count": 3,
+                    "exit_code": 1, "output_sha256": "abc123"})
+        for language, commit, unpublished in (
+                ("en", "Commit locally.", "Do not publish the branch or open a PR."),
+                ("ru", "Коммить локально.", "Не публикуй ветку и не открывай PR.")):
+            with self.subTest(language=language):
+                cfg = {"language": language}
+                st = dict(self.st, no_push=True)
+                rules = self.worker.sandboxing.rules_text(cfg)
+                self.assertEqual(rules, self.worker.sandboxing.rules_path(cfg).read_text(encoding="utf-8"))
+                self.assertEqual(rules, self.worker.sandboxing.rules_text(cfg, no_push=False))
+                local_rules = self.worker.sandboxing.rules_text(cfg, no_push=True)
+                self.assertIn("Keep commits local" if language == "en" else "Коммить по ходу локально", local_rules)
+                self.assertIn("do not publish the branch" if language == "en" else "Не публикуй ветку", local_rules)
+                self.assertNotRegex(local_rules, "push|пуш")
+                for reviewing in (False, True):
+                    sandbox = self.worker.sandboxing.sandbox_rules(cfg, reviewing=reviewing, no_push=True)
+                    self.assertIn("Do not publish the branch" if language == "en" else "Не публикуй ветку", sandbox)
+                    self.assertNotRegex(sandbox, "push|пуш")
+                    if not reviewing:
+                        self.assertIn("commit them locally" if language == "en" else "закоммитит их локально", sandbox)
+                with mock.patch.object(self.worker.procs, "sh", return_value="fixture git output"):
+                    handoff = self.worker.threads.handoff(st, cfg=cfg)
+                prompts = [handoff, self.worker.threads.followup_prompt(dict(st, thread="existing-thread"),
+                                                                       "Continue the task.", cfg),
+                           self.worker.prompts.fix_prompt(st, review, None, cfg),
+                           self.worker.prompts.fix_prompt(st, None, {"cmd": "check", "outcome": "failed", "exit": 1,
+                                                                   "tail": "fixture failure"}, cfg),
+                           self.worker.prompts.fix_prompt(st, None, None, cfg, merge)]
+                prompts.extend(self.worker.prompts.wrapup_prompt(st, reason, cfg) for reason in reasons)
+                for prompt in prompts:
+                    self.assertIn(commit, prompt)
+                    self.assertIn(unpublished, prompt)
+                    self.assertNotRegex(prompt, "push|пуш")
+                for reason in reasons:
+                    prompt = self.worker.prompts.wrapup_prompt(dict(st, kind="review"), reason, cfg)
+                    self.assertNotIn(commit, prompt)
+                    self.assertIn("Stay read-only" if language == "en" else "Режим только чтения", prompt)
+                    self.assertNotRegex(prompt, "push|пуш")
+
+        custom = "Always push the branch and open a PR."
+        (self.root / "codex-worker-rules.md").write_text(custom, encoding="utf-8")
+        for language, rule in (
+                ("en", "Commit locally; do not push the branch or open or edit PRs. "
+                 "This overrides any publication rule above."),
+                ("ru", "Коммить локально; не пушь ветку, не открывай и не редактируй PR. "
+                 "Это отменяет правила о публикации выше.")):
+            with self.subTest(custom_rules_language=language):
+                cfg = {"language": language}
+                (self.root / "codex-worker.json").write_text(json.dumps(cfg), encoding="utf-8")
+                self.assertEqual(self.worker.sandboxing.rules_text(cfg), custom)
+                self.assertEqual(self.worker.sandboxing.rules_text(no_push=False), custom)
+                expected = custom + "\n\n- " + rule + "\n"
+                self.assertEqual(self.worker.sandboxing.rules_text(cfg, no_push=True), expected)
+                self.assertEqual(self.worker.sandboxing.rules_text(no_push=True), expected)
+
     def test_fix_prompt_text_in_both_languages(self):
         parts = {
             "en": ("Check these review findings against the code:",

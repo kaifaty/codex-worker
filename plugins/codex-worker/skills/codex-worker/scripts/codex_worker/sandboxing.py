@@ -35,29 +35,56 @@ def rules_path(cfg=None):
     return config.SKILL / "references" / filename
 
 
-def rules_text(cfg=None):
-    return rules_path(cfg).read_text(encoding="utf-8")
+def rules_text(cfg=None, no_push=False):
+    text = rules_path(cfg).read_text(encoding="utf-8")
+    if not no_push:
+        return text
+    lines = text.splitlines(keepends=True)
+    replaced = False
+    for index, line in enumerate(lines):
+        if line.startswith("- Commit as you go."):
+            lines[index] = ("- Commit as you go. Keep commits local; do not publish the branch or open or edit PRs. "
+                            "Do not merge the PR or deploy anything: Claude handles review and merging.\n")
+            replaced = True
+        elif line.startswith("- Коммить по ходу,"):
+            lines[index] = ("- Коммить по ходу локально. Не публикуй ветку, не открывай и не редактируй PR. "
+                            "Не мержи PR и ничего не выкатывай: ревью и слияние делает Claude.\n")
+            replaced = True
+    if not replaced:
+        cfg = config.accounts_config() if cfg is None else cfg
+        rule = ("Коммить локально; не пушь ветку, не открывай и не редактируй PR. "
+                "Это отменяет правила о публикации выше." if cfg.get("language", "en") == "ru" else
+                "Commit locally; do not push the branch or open or edit PRs. "
+                "This overrides any publication rule above.")
+        lines.append(("\n" if text.endswith("\n") else "\n\n") + "- " + rule + "\n")
+    return "".join(lines)
 
 
-def sandbox_rules(cfg, reviewing=False):
+def sandbox_rules(cfg, reviewing=False, no_push=False):
     if cfg.get("language", "en") == "ru":
         rules = ("## Песочница worktree\n\n"
-                 "Этот раздел отменяет правила про коммиты и публикацию выше. "
-                 "git commit и git push в песочнице недоступны, не пытайся их запускать. "
-                 "Не открывай и не редактируй PR: надзиратель делает это из pr_title/pr_body. ")
+                 "Этот раздел отменяет правила про коммиты и публикацию выше. ")
+        rules += (("git commit в песочнице недоступен, не пытайся его запускать. "
+                   "Не публикуй ветку, не открывай и не редактируй PR. ") if no_push else
+                  ("git commit и git push в песочнице недоступны, не пытайся их запускать. "
+                   "Не открывай и не редактируй PR: надзиратель делает это из pr_title/pr_body. "))
         if reviewing:
             return rules + "Файлы не меняй; верни только JSON по схеме ревью."
-        return rules + ("Оставь изменения в worktree: надзиратель закоммитит и опубликует их после хода. "
-                        "В итоге дай commit_message по правилам репозитория: первая строка — заголовок. "
+        rules += ("Оставь изменения в worktree: надзиратель закоммитит их локально после хода. " if no_push else
+                  "Оставь изменения в worktree: надзиратель закоммитит и опубликует их после хода. ")
+        return rules + ("В итоге дай commit_message по правилам репозитория: первая строка — заголовок. "
                         "Если изменений нет или ты уже закоммитил их сам, commit_message — пустая строка.")
     rules = ("## Workspace sandbox\n\n"
-             "This section overrides the commit and publication rules above. "
-             "git commit and git push are unavailable in the sandbox; do not try them. "
-             "Do not open or edit PRs yourself: the supervisor does it from pr_title/pr_body. ")
+             "This section overrides the commit and publication rules above. ")
+    rules += (("git commit is unavailable in the sandbox; do not try it. "
+               "Do not publish the branch or open or edit PRs. ") if no_push else
+              ("git commit and git push are unavailable in the sandbox; do not try them. "
+               "Do not open or edit PRs yourself: the supervisor does it from pr_title/pr_body. "))
     if reviewing:
         return rules + "Do not change files; return only JSON matching the review schema."
-    return rules + ("Leave changes in the worktree: the supervisor will commit and publish them after the turn. "
-                    "Return commit_message following the repository's rules; the first line is the subject. "
+    rules += ("Leave changes in the worktree: the supervisor will commit them locally after the turn. " if no_push else
+              "Leave changes in the worktree: the supervisor will commit and publish them after the turn. ")
+    return rules + ("Return commit_message following the repository's rules; the first line is the subject. "
                     "Use an empty commit_message if there are no changes or you already committed them yourself.")
 
 

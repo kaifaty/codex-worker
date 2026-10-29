@@ -47,9 +47,10 @@ def publish_work(st, stopped):
                 return
             run(config.GIT + ["commit", "-F", file.name])
         receipt["sha"] = run(config.GIT + ["rev-parse", "HEAD"])
-        stage = "push"
-        run(config.GIT + ["push", "-u", "origin", st["branch"]])
-        receipt["pushed"] = True
+        if not st.get("no_push"):
+            stage = "push"
+            run(config.GIT + ["push", "-u", "origin", st["branch"]])
+            receipt["pushed"] = True
     except (OSError, subprocess.CalledProcessError, RuntimeError) as exc:
         detail = (exc.stderr or exc.stdout or str(exc)) if isinstance(exc, subprocess.CalledProcessError) else str(exc)
         receipt["error"] = stage + ": " + detail.strip()
@@ -78,6 +79,9 @@ def publish_pr(st, stopped):
 
     stage = "not pushed"
     try:
+        if st.get("no_push"):
+            skip("no-push")
+            return
         # Remote-tracking refs can be stale: verify the actual origin branch.
         try:
             head = run(config.GIT + ["rev-parse", "HEAD"])
