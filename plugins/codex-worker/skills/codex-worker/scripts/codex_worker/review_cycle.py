@@ -1,5 +1,6 @@
 """Review angles, review turns and automatic fixes."""
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -226,7 +227,7 @@ def check_base_merge(st, stopped):
                 subprocess.run(config.GIT + ["fetch", "--quiet", remote,
                                f"+refs/heads/{branch}:refs/remotes/{base}"],
                                cwd=st["worktree"], text=True, capture_output=True, errors="replace",
-                               timeout=60, check=True)
+                               timeout=60, check=True, env=dict(os.environ, LC_ALL="C", LANGUAGE="C"))
                 break
             except subprocess.CalledProcessError as exc:
                 if stopped():

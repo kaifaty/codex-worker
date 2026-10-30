@@ -52,7 +52,9 @@ def followup_prompt(st, message, cfg, source="claude"):
     if st.get("thread"):
         switch = st.get("base_switch")
         if switch:
-            message += f"\n\nTask base is now {st['base']}; use it instead of {switch['from']}."
+            message += (f"\n\nТеперь база задачи — {st['base']}; используй её вместо {switch['from']}."
+                        if cfg.get("language", "en") == "ru" else
+                        f"\n\nTask base is now {st['base']}; use it instead of {switch['from']}.")
         if st.get("no_push"):
             message += ("\n\nКоммить локально. Не публикуй ветку и не открывай PR." if cfg.get("language", "en") == "ru" else
                         "\n\nCommit locally. Do not publish the branch or open a PR.")
@@ -187,5 +189,6 @@ def handoff(st, current_message=False, cfg=None):
                    "\nCommit locally. Do not publish the branch or open a PR.\n")
     switch = st.get("base_switch")
     if switch:
-        prompt += f"\nTask base is now {st['base']}; use it instead of {switch['from']}.\n"
+        prompt += (f"\nТеперь база задачи — {st['base']}; используй её вместо {switch['from']}.\n" if ru else
+                   f"\nTask base is now {st['base']}; use it instead of {switch['from']}.\n")
     return prompt

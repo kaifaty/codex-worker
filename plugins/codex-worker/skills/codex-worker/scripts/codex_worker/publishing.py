@@ -174,7 +174,7 @@ def publish_pr(st, stopped):
                 receipt["action"] = "updated"
             else:
                 stage = "gh pr create"
-                receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].split("/", 1)[-1],
+                receipt["pr"] = run([gh, "pr", "create", "--base", st["base"].removeprefix("origin/"),
                                      "--head", st["branch"], "--title", title, "--body-file", file.name,
                                      "--repo", remote_url])
                 receipt["action"] = "created"
