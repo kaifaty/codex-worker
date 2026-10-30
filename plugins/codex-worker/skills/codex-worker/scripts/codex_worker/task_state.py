@@ -92,6 +92,7 @@ STATE_FIELDS = {
     "worktree": StateField("task"),
     "branch": StateField("task"),
     "base": StateField("task"),
+    "base_switch": StateField("task"),
     "effort": StateField("task"),
     "thread": StateField("cursor"),
     "check": StateField("task"),

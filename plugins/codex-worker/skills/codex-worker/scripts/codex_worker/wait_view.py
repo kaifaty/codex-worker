@@ -120,6 +120,9 @@ def wait_check_lines(st):
 
 
 def wait_review_lines(st, slug):
+    switch = st.get("base_switch")
+    if switch:
+        yield f"base {switch['from']} is gone; checked against {switch['to']}"
     for merge in st.get("base_merges", []):
         if merge["outcome"] == "skipped":
             yield f"== base merge {merge['base']}: skipped ({merge['reason']})"

@@ -24,40 +24,74 @@ class ReviewFixTests(RotationTestCase):
         self.git("-C", str(checkout), "push", "--quiet", "origin", "main")
         return self.git("-C", str(checkout), "rev-parse", "HEAD")
 
-    def test_base_merge_fetches_advanced_base_and_leaves_clean_divergence_unmerged(self):
+    def test_base_merge_deleted_stacked_base_checks_default_and_preserves_it_for_followups(self):
         self.configure(language="en")
+        self.git("push", "--quiet", "origin", "main:stacked")
+        self.git("remote", "add", "upstream", str(self.root / "origin.git"))
+        self.git("fetch", "--quiet", "upstream")
+        self.git("remote", "set-head", "upstream", "main")
         gate = self.root / "finish-work"
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "delay_gate": str(gate),
              "write_files": {"task.txt": "task change\n"}, "commit_files": ["task.txt"],
              "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)},
+            {"mode": "complete", "write_files": {"followup.txt": "follow-up change\n"},
+             "commit_files": ["followup.txt"], "push": True,
+             "reply": self.work_result(pr_title="Publish the task", pr_body="Task changes.")},
+            {"mode": "complete", "reply": self.review_result(False)},
             {"mode": "complete", "reply": self.review_result(False)}])
         calls = self.record_git_calls()
         self.cli("start", "base-clean", "--brief", str(self.brief), "--repo", str(self.repo),
-                 "--review", "--review-angles", "auto", timeout=60)
+                 "--base", "upstream/stacked", "--review", "--review-angles", "auto", timeout=60)
         self.until(lambda: len(self.invocations()) == 1, timeout=60)
         upstream = self.advance_review_base({"upstream.txt": "base change\n" * 500})
+        self.git("push", "--quiet", "origin", "--delete", "stacked")
         gate.touch()
-        self.wait("base-clean")
+        output = self.wait("base-clean")
 
         state = self.state("base-clean")
         self.assertEqual([event["review"] for event in self.invocations()], [False, True])
         self.assertEqual([(entry["base"], entry["outcome"]) for entry in state["base_merges"]],
-                         [("origin/main", "passed")])
-        self.assertEqual(self.git("rev-parse", "origin/main"), upstream)
+                         [("upstream/main", "passed")])
+        self.assertEqual(state["base"], "upstream/main")
+        switched = state["base_switch"]
+        self.assertEqual((switched["from"], switched["to"]), ("upstream/stacked", "upstream/main"))
+        self.assertGreaterEqual(switched["at"], state["created"])
+        self.assertLessEqual(switched["at"], state["turn_finished"])
+        notice = "base upstream/stacked is gone; checked against upstream/main"
+        for text in (output, self.cli("status", "base-clean"), self.cli("status")):
+            self.assertEqual(text.splitlines().count(notice), 1)
+        self.assertIn("git merge-base upstream/main HEAD", self.review_invocations()[0]["prompt"])
+        self.assertEqual(self.git("rev-parse", "upstream/main"), upstream)
         self.assertEqual(len(self.git("-C", state["worktree"], "rev-list", "--parents", "-n", "1", "HEAD")
                              .split()), 2, "a clean merge check must not merge the base")
         self.assertFalse((Path(state["worktree"]) / "upstream.txt").exists())
         commands = [json.loads(line)["argv"] for line in calls.read_text().splitlines()]
         self.assertTrue(any("fetch" in command for command in commands))
         self.assertTrue(any("merge-tree" in command and "--write-tree" in command
-                            and command[-2:] == ["HEAD", "origin/main"] for command in commands))
+                            and command[-2:] == ["HEAD", "upstream/main"] for command in commands))
+        self.cli("say", "base-clean", "Finish the follow-up", "--review", timeout=60)
+        self.wait("base-clean")
+        self.assertIn("Task base is now upstream/main; use it instead of upstream/stacked.",
+                      self.invocations()[2]["prompt"])
+        self.assertEqual(self.state("base-clean")["base_switch"], switched)
+        self.assertEqual(self.state("base-clean")["base_merges"], [{"base": "upstream/main", "outcome": "passed"}])
+        self.assertIn("git merge-base upstream/main HEAD", self.review_invocations()[-1]["prompt"])
+        create, = [event for event in self.gh_invocations() if event["argv"][:2] == ["pr", "create"]]
+        self.assertEqual(create["argv"][create["argv"].index("--base") + 1], "main")
         self.cli("review", "base-clean", "--review-angles", "auto", timeout=60)
         self.wait("base-clean")
-        self.assertEqual(len(self.review_invocations()), 2)
+        self.assertEqual(len(self.review_invocations()), 3)
+        self.assertEqual(self.state("base-clean")["base_switch"], switched)
+        self.assertIn("git merge-base upstream/main HEAD", self.review_invocations()[-1]["prompt"])
+        commands = [json.loads(line)["argv"] for line in calls.read_text().splitlines()]
+        self.assertEqual(sum("fetch" in command and any("refs/heads/stacked:" in arg for arg in command)
+                             for command in commands), 1)
 
-    def test_base_merge_conflict_uses_a_merge_round_then_saved_check_and_first_review(self):
+    def test_base_merge_deleted_stacked_base_conflict_uses_default_for_merge_and_review(self):
         self.configure(language="en")
+        self.git("push", "--quiet", "origin", "main:stacked")
         gate = self.root / "finish-work"
         command = "printf 'full-saved-check\\n' >> check-runs"
         self.account(self.home, "A", self.reset, runs=[
@@ -70,10 +104,12 @@ class ReviewFixTests(RotationTestCase):
             {"mode": "complete", "reply": self.review_result(False)},
             {"mode": "complete", "reply": self.review_result(False)}])
         self.cli("start", "base-merge", "--brief", str(self.brief), "--repo", str(self.repo),
-                 "--review", "--review-angles", "correctness,tests", "--fix-rounds", "1",
+                 "--base", "origin/stacked", "--review", "--review-angles", "correctness,tests",
+                 "--fix-rounds", "1",
                  "--check", command, timeout=60)
         self.until(lambda: len(self.invocations()) == 1, timeout=60)
         upstream = self.advance_review_base({"tracked.txt": "base change\n"})
+        self.git("push", "--quiet", "origin", "--delete", "stacked")
         gate.touch()
         output = self.wait("base-merge")
 
@@ -90,12 +126,17 @@ class ReviewFixTests(RotationTestCase):
         self.assertTrue(merge["resume"])
         self.assertEqual(merge["thread"], work["thread"])
         self.assertIn("origin/main", merge["prompt"])
+        self.assertTrue(all("git merge-base origin/main HEAD" in event["prompt"] for event in reviews))
         self.assertIn("tracked.txt", merge["prompt"])
         self.assertIn("merge commit", merge["prompt"])
         self.assertIn("rebase", merge["prompt"])
         self.assertIn("force-push", merge["prompt"])
         self.assertIn(command, merge["prompt"])
         self.assertEqual([entry["outcome"] for entry in state["base_merges"]], ["conflict", "passed"])
+        self.assertEqual([entry["base"] for entry in state["base_merges"]], ["origin/main", "origin/main"])
+        self.assertEqual(state["base"], "origin/main")
+        self.assertEqual((state["base_switch"]["from"], state["base_switch"]["to"]),
+                         ("origin/stacked", "origin/main"))
         self.assertEqual(state["base_merges"][0]["files"], ["tracked.txt"])
         self.assertEqual(len(state["rounds"]), 1)
         self.assertIsNone(state["rounds"][0]["review"])
@@ -226,6 +267,15 @@ class ReviewFixTests(RotationTestCase):
 
     def test_base_merge_fetch_failure_is_recorded_and_review_still_runs(self):
         self.configure(language="en")
+        self.git("push", "--quiet", "origin", "main:stacked")
+        self.record_git_calls()
+        wrapper = self.root / "git"
+        wrapper.write_text(wrapper.read_text().replace(
+            "os.execv(",
+            "if 'fetch' in sys.argv and os.getcwd() != " + repr(str(self.repo)) + ":\n"
+            "    print('fatal: unable to access remote: Could not resolve host: example.invalid', file=sys.stderr)\n"
+            "    sys.exit(128)\n"
+            "os.execv("))
         gate = self.root / "finish-work"
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "delay_gate": str(gate),
@@ -233,10 +283,9 @@ class ReviewFixTests(RotationTestCase):
              "reply": self.work_result()},
             {"mode": "complete", "reply": self.review_result(False)}])
         self.cli("start", "base-fetch-failed", "--brief", str(self.brief), "--repo", str(self.repo),
-                 "--review", timeout=60)
+                 "--base", "origin/stacked", "--review", timeout=60)
         self.until(lambda: len(self.invocations()) == 1, timeout=60)
         self.advance_review_base({"tracked.txt": "base change\n"})
-        self.git("remote", "set-url", "origin", str(self.root / "missing-origin.git"))
         gate.touch()
         output = self.wait("base-fetch-failed")
 
@@ -244,10 +293,33 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual([event["review"] for event in self.invocations()], [False, True])
         self.assertEqual(len(state["base_merges"]), 1)
         self.assertEqual(state["base_merges"][0]["outcome"], "skipped")
+        self.assertEqual(state["base"], "origin/stacked")
+        self.assertNotIn("base_switch", state)
         self.assertIn("fetch", state["base_merges"][0]["reason"])
-        self.assertIn("== base merge origin/main: skipped (" + state["base_merges"][0]["reason"] + ")", output)
+        self.assertIn("Could not resolve host", state["base_merges"][0]["reason"])
+        self.assertIn("== base merge origin/stacked: skipped (" + state["base_merges"][0]["reason"] + ")", output)
         self.assertEqual(state["outcome"], "completed")
         self.assertFalse(state.get("auto_fix_stop"))
+
+    def test_base_merge_missing_default_or_unknown_remote_head_is_skipped(self):
+        self.configure(language="en")
+        worker = self.worker()
+        self.git("push", "--quiet", "origin", "main:stacked")
+        for branch, missing_head in (("main", False), ("stacked", True)):
+            with self.subTest(branch=branch):
+                slug = "missing-base-" + branch
+                (worker.config.TASKS / slug).mkdir(parents=True)
+                state = {"slug": slug, "base": "origin/" + branch, "worktree": str(self.repo)}
+                self.git("--git-dir", str(self.root / "origin.git"), "update-ref", "-d", "refs/heads/" + branch)
+                if missing_head:
+                    self.git("symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+                entry = worker.review_cycle.check_base_merge(state, lambda: False)
+                self.assertEqual(entry["outcome"], "skipped")
+                self.assertEqual(state["base"], "origin/" + branch)
+                self.assertNotIn("base_switch", state)
+                self.assertIn("couldn't find remote ref", entry["reason"])
+                if missing_head:
+                    self.assertIn("default", entry["reason"])
 
     def test_base_merge_stopped_fetch_does_not_record_a_skipped_probe(self):
         self.configure(language="en")

@@ -215,6 +215,9 @@ def describe(st, detail):
         line += "  push disabled (--no-push)"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
+    switch = st.get("base_switch")
+    if switch:
+        line += f"\nbase {switch['from']} is gone; checked against {switch['to']}"
     if not detail:
         return line
     if scouting:
