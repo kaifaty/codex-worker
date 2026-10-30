@@ -1,5 +1,6 @@
 """Review angles, review turns and automatic fixes."""
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -220,11 +221,32 @@ def check_base_merge(st, stopped):
     entry = {"base": base, "outcome": "skipped"}
     stage = "fetch"
     try:
-        remote, branch = base.split("/", 1)
-        subprocess.run(config.GIT + ["fetch", "--quiet", remote,
-                       f"+refs/heads/{branch}:refs/remotes/{base}"],
-                       cwd=st["worktree"], text=True, capture_output=True, errors="replace",
-                       timeout=60, check=True)
+        for _ in range(2):
+            remote, branch = base.split("/", 1)
+            try:
+                subprocess.run(config.GIT + ["fetch", "--quiet", remote,
+                               f"+refs/heads/{branch}:refs/remotes/{base}"],
+                               cwd=st["worktree"], text=True, capture_output=True, errors="replace",
+                               timeout=60, check=True, env=dict(os.environ, LC_ALL="C", LANGUAGE="C"))
+                break
+            except subprocess.CalledProcessError as exc:
+                if stopped():
+                    return None
+                missing = f"fatal: couldn't find remote ref refs/heads/{branch}"
+                if st.get("base_switch") or missing not in (exc.stderr or "").splitlines():
+                    raise
+                default = subprocess.run(config.GIT + ["symbolic-ref", "--short", f"refs/remotes/{remote}/HEAD"],
+                                         cwd=st["worktree"], text=True, capture_output=True, errors="replace",
+                                         timeout=60)
+                target = default.stdout.strip()
+                if default.returncode or not target.startswith(remote + "/"):
+                    raise ValueError(f"{missing}; cannot resolve default branch from refs/remotes/{remote}/HEAD") from exc
+                if target == base:
+                    raise
+                st["base_switch"] = {"from": base, "to": target, "at": clock.CLOCK.time()}
+                st["base"] = base = target
+                entry["base"] = base
+                task_state.save(st)
         stage = "merge-tree"
         merged = subprocess.run(config.GIT + ["merge-tree", "--write-tree", "--name-only", "-z", "HEAD", base],
                                 cwd=st["worktree"], text=True, capture_output=True, errors="replace", timeout=60)

@@ -60,6 +60,10 @@ class PromptTests(unittest.TestCase):
                 self.assertEqual(self.worker.prompts.capacity_resume_prompt({"language": language}), text)
 
     def test_followup_prompt_text_in_both_languages(self):
+        notices = {
+            "en": "Task base is now origin/main; use it instead of origin/stacked.",
+            "ru": "Теперь база задачи — origin/main; используй её вместо origin/stacked.",
+        }
         parts = {
             "en": ("## Continuation", "Messages from Claude and review, in order:",
                    "Current message — carry it out", "First inspect git status and git diff $(git merge-base origin/main HEAD)"),
@@ -72,9 +76,15 @@ class PromptTests(unittest.TestCase):
                 cfg = {"language": language}
                 st = dict(self.st, thread="existing-thread")
                 self.assertEqual(self.worker.threads.followup_prompt(st, message, cfg), message)
+                st["base_switch"] = {"from": "origin/stacked", "to": "origin/main", "at": 1000}
+                self.assertEqual(self.worker.threads.followup_prompt(st, message, cfg),
+                                 message + "\n\n" + notices[language])
                 with mock.patch.object(self.worker.procs, "sh", return_value="fixture git output"), \
                         mock.patch.object(self.worker.sandboxing, "workspace_filter_driver", return_value=None):
                     prompt = self.worker.threads.followup_prompt(self.st, message, cfg)
+                    switched = self.worker.threads.followup_prompt(
+                        dict(self.st, base_switch=st["base_switch"]), message, cfg)
+                self.assertIn(notices[language], switched)
                 for part in ("Implement the requested change.", message, "fixture git output") + parts[language]:
                     self.assertIn(part, prompt)
                 self.assertTrue(prompt.endswith("\n"))

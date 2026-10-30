@@ -18,6 +18,7 @@ task's base and runs `git merge-tree --write-tree HEAD <base>`. A clean merge pr
 without changing the task branch. If fetching or merge-tree fails (for example, without network
 access or with an older Git), the supervisor records the reason, skips this check and proceeds to
 review. Standalone `review`, the CI cycle and PR publication do not run this check.
+If a stacked remote base is missing, the supervisor switches once to the same remote's default branch from `refs/remotes/<remote>/HEAD` and checks that base; if the default cannot be resolved or another fetch error occurs, it records a skip reason.
 
 When the base conflicts and a `--fix-rounds` round remains, the supervisor uses that round to merge
 the base instead of starting review. The implementation prompt lists the conflicting files and asks

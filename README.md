@@ -159,6 +159,8 @@ Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
 `~/.codex/claude-tasks/<slug>/`. Turns continue independently of Claude's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
+If a stacked base branch has been deleted, the automatic merge check switches once to that remote's
+default branch; `wait` and `status` show the change, and later turns and new PRs use the new base.
 
 The supervisor keeps numeric stage telemetry in `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
 (default `~/.codex/`); `clean` preserves it. Use `report` to compare review findings, check success,
