@@ -25,10 +25,14 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     if st.get("kind") not in ("review", "scout"):
         st["result"] = None
     try:
+        control = turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3))
         result, _ = turn_monitor.monitor(st, cfg, account, prompts.wrapup_prompt(st, reason, cfg), effort, stopped,
-                            lambda *args: None, control=turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3)),
+                            lambda *args: None, control=control,
                             wrapup=True, wrapup_thread=thread)
         st["wrapup"]["outcome"] = result
+        if result in ("stuck", "budget_exhausted"):
+            st["turn_stops"].append(dict(control.reason, turn=st.get("turns", 0), phase="wrapup",
+                                         active_seconds=round(control.elapsed, 3), at=clock.CLOCK.time()))
     except (Exception, SystemExit) as exc:
         st["wrapup"].update(outcome="failed", error=str(exc))
     if st["wrapup"]["outcome"] != "completed":

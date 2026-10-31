@@ -11,7 +11,7 @@ JSON task records retain the `created` timestamp.
 
 The supervisor appends numeric counters and identifiers to `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
 (by default `~/.codex/`), without prompts or messages; `clean` preserves this journal.
-State and final turn journal rows retain `turn_stops` across turns (`turn`, stop details, `at`, and for `stuck` the last 300 output characters as `output_tail`); `report --json` includes the list, and [empty searches](results.md#turn-outcomes) also allow leading `NAME=value` assignments or `env NAME=value` prefixes, but no `env` options.
+State and final turn journal rows retain `turn_stops` across turns (`turn`, stop details, `at`, and for `stuck` the last 300 output characters as `output_tail`); wrap-up stops add `phase: "wrapup"` with the same turn number and preserve the parent's `turn_stop`; `report --json` includes the list, and [empty searches](results.md#turn-outcomes) also allow leading `NAME=value` assignments or `env NAME=value` prefixes, but no `env` options.
 `clean` also saves task and scout records in `~/.codex/claude-tasks/.archive/<slug>-YYYYmmddTHHMMSSZ` (UTC), except `events.jsonl` and `state.lock`.
 Journal errors, including a busy lock, go to the task's `stderr.log` without blocking execution.
 Creation time identifies each task, so reusing a slug after `clean` produces a separate report row.

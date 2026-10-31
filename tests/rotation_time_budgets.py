@@ -222,16 +222,26 @@ class TimeBudgetTests(RotationTestCase):
     def test_wrap_up_has_its_own_ten_minute_cap_without_recursing(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en")
+        command = {"command": "check-main", "exit_code": 2, "aggregated_output": "same main failure"}
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "hold"}, {"mode": "hold", "spawn_child": True}])
-        self.start("cap-wrap-timeout", "--max-minutes", "10", "--check", "printf 'checked\\n' > checked")
+            {"mode": "hold", "commands": [command] * 3}, {"mode": "hold", "spawn_child": True}])
+        self.start("cap-wrap-timeout", "--check", "printf 'checked\\n' > checked")
         output = self.wait("cap-wrap-timeout", timeout=12)
         state = self.state("cap-wrap-timeout")
-        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["outcome"], "stuck")
+        self.assertEqual(state["wrapup"]["outcome"], "budget_exhausted")
+        primary, wrapup = state["turn_stops"]
+        self.assertEqual(primary, dict(state["turn_stop"], turn=1))
+        self.assertEqual((state["turn_stop"]["outcome"], state["turn_stop"]["command"]),
+                         ("stuck", command["command"]))
+        self.assertEqual((wrapup["turn"], wrapup["phase"], wrapup["outcome"], wrapup["minutes"]),
+                         (1, "wrapup", "budget_exhausted", 10))
+        self.assertGreaterEqual(wrapup["at"], primary["at"])
+        self.assertLessEqual(wrapup["at"], state["turn_finished"])
         self.assertEqual(len(self.invocations()), 2, "a timed-out wrap-up must not start another wrap-up")
         self.assertIsNone(state["result"])
         self.assertEqual(state["checks"][-1]["outcome"], "passed")
-        self.assertIn("== turn stopped: time budget 10 min exhausted", output)
+        self.assertIn("== turn stopped: repeated failure ×3: " + command["command"], output)
         child = next(event["child_pid"] for event in self.trace() if event.get("command") == "exec-child")
         self.extra_pids.add(child)
         self.until(lambda: not self.process_is_live(child))
@@ -248,6 +258,13 @@ class TimeBudgetTests(RotationTestCase):
         state = self.state("cap-wrap-stuck")
         self.assertEqual(state["outcome"], "budget_exhausted")
         self.assertEqual(state["wrapup"]["outcome"], "stuck")
+        primary, wrapup = state["turn_stops"]
+        self.assertEqual(primary, dict(state["turn_stop"], turn=1))
+        self.assertEqual((state["turn_stop"]["outcome"], state["turn_stop"]["minutes"]),
+                         ("budget_exhausted", 10))
+        self.assertEqual((wrapup["turn"], wrapup["phase"], wrapup["outcome"],
+                          wrapup["command"], wrapup["output_tail"]),
+                         (1, "wrapup", "stuck", command["command"], command["aggregated_output"]))
         self.assertIsNone(state["result"])
         self.assertEqual(len(self.invocations()), 2)
         self.assertIn("== turn stopped: time budget 10 min exhausted", output)
