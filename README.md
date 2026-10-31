@@ -172,6 +172,7 @@ Quota sleeps are excluded from active time; weekly usage counts advances of each
 mark during execs, excluding gaps between them, and can include concurrent activity on a shared
 account. `report` sums recorded phase spend, with endpoint deltas as a fallback for older journals.
 `--json` exposes the same metrics and the task's `created` timestamp; date filters use UTC.
+Empty searches with environment assignments bypass the repeat guard; state and `report --json` retain [turn stop history](plugins/codex-worker/skills/codex-worker/references/telemetry.md#the-journal) across follow-ups.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
 add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and

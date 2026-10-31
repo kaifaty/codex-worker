@@ -456,6 +456,10 @@ class ClaudeReviewTests(RotationTestCase):
         output = self.wait("claude-timeout", timeout=10)
         state = self.state("claude-timeout")
         self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["turn_stops"], [dict(
+            state["turn_stop"], turn=1, at=state["turn_stops"][0]["at"])])
+        self.assertGreaterEqual(state["turn_stops"][0]["at"], state["turn_started"])
+        self.assertLessEqual(state["turn_stops"][0]["at"], state["turn_finished"])
         self.assertEqual(state["result"], work)
         self.assertEqual(len(self.claude_invocations()), 1)
         self.assertFalse(self.process_is_live(self.claude_invocations()[0]["pid"]))

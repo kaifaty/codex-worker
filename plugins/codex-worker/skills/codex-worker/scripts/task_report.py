@@ -127,6 +127,7 @@ def _task(repo, slug, created):
             "last_verdict": None, "outcome": None, "result_status": None,
             "auto_fix_stop": None, "ci": None,
             "max_task_weekly_percent": None, "budget_stop": None,
+            "turn_stops": [],
             "_reviews": {}, "_turns": [], "_latest_turn": 0}
 
 
@@ -271,6 +272,7 @@ def _accumulate_rows(rows, identities):
         if phase == "turn":
             # Final supervisor results carry no additional stage cost or usage.
             task["_turns"].append(row)
+            task["turn_stops"] = row.get("turn_stops", [])
             task["rounds"] = max(task["rounds"], _round(row.get("round")))
             continue
         is_turn = phase in MODEL_PHASES

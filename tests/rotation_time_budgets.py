@@ -58,6 +58,8 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual(report["summary"]["outcomes"], {"budget_exhausted": 1})
         self.assertEqual(report["summary"]["result_status"], {"partial": 1})
         self.assertEqual(report["tasks"][0]["budget_stop"], "minutes")
+        self.assertEqual(state["turn_stops"], [dict(state["turn_stop"], turn=1)])
+        self.assertEqual(report["tasks"][0]["turn_stops"], state["turn_stops"])
         self.assertIsNone(report["tasks"][0]["max_task_weekly_percent"])
         self.assertEqual(next(row for row in self.telemetry_journal()
                               if row["phase"] == "turn")["budget_stop"], "minutes")
@@ -261,8 +263,10 @@ class TimeBudgetTests(RotationTestCase):
                   {"command": "another-command", "exit_code": 9}, failures[2]]
         result = self.work_result("blocked", summary="Stopped after three identical failures.",
                                   remaining=["Resolve the fixture command failure."])
+        empty_failure = {"command": command, "exit_code": 7, "aggregated_output": ""}
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "hold", "commands": events}, {"mode": "complete", "reply": result}])
+            {"mode": "hold", "commands": events}, {"mode": "complete", "reply": result},
+            {"mode": "hold", "commands": [empty_failure] * 3}, {"mode": "complete", "reply": result}])
         self.start("repeat-cap", "--review", "--check", "printf 'checked\\n' > checked")
         output = self.wait("repeat-cap", timeout=12)
         state = self.state("repeat-cap")
@@ -282,6 +286,18 @@ class TimeBudgetTests(RotationTestCase):
         self.assertFalse(self.review_invocations())
         self.assertEqual(self.notification("repeat-cap", "stuck")["outcome"], "stuck")
         self.assertEqual(self.notification("repeat-cap", "turn_finished")["outcome"], "stuck")
+        self.assertEqual(state["turn_stops"], [dict(state["turn_stop"], turn=1)])
+        first_stop = state["turn_stops"][0]
+        self.assertEqual(first_stop["output_tail"], tail[-300:])
+        self.assertGreaterEqual(first_stop["at"], state["turn_started"])
+        self.assertLessEqual(first_stop["at"], state["turn_finished"])
+        self.cli("say", "repeat-cap", "Retry the command")
+        self.wait("repeat-cap", timeout=12)
+        state = self.state("repeat-cap")
+        self.assertEqual(state["turn_stops"], [first_stop, dict(state["turn_stop"], turn=2)])
+        self.assertEqual(state["turn_stops"][1]["output_tail"], "")
+        report = json.loads(self.cli("report", "--slug", "repeat-cap", "--json"))
+        self.assertEqual(report["tasks"][0]["turn_stops"], state["turn_stops"])
 
     def test_different_failures_success_and_other_event_types_do_not_trigger_stuck(self):
         self.configure()
@@ -313,12 +329,21 @@ class TimeBudgetTests(RotationTestCase):
             "pgrep -f fixture", "grep fixture", "egrep fixture", "fgrep fixture", "rg fixture",
             "git grep fixture", "/bin/zsh -lc 'pgrep -f fixture'", "/bin/sh -c 'git grep fixture'",
             "ps | grep fixture", "/bin/zsh -lc 'ps | grep fixture'",
+            "LC_ALL=C pgrep -fl '^/[^ ]*/fixture( |$)'",
+            "LC_ALL=C LABEL='two words' pgrep -x fixture", "env LC_ALL=C rg fixture",
+            '/bin/zsh -lc "LC_ALL=C pgrep -fl \'^/[^ ]*/fixture( |$)\'"',
+            '/bin/zsh -lc "env LC_ALL=C LABEL=\'two words\' rg fixture"',
+            "ps | LC_ALL=C grep fixture", "ps | env LC_ALL=C rg fixture",
             "pgrep -fl x 2>&1", "pgrep x >&1", "pgrep x &>search.log",
             "rg foo 2>/dev/null", "ps aux | grep x 2>&1", '/bin/zsh -lc "rg foo 2>&1"')]
         cases += [("pgrep fixture", 1, " \t\n", False),
                   ("grep fixture", 1, "search failed", True),
                   ("pgrep fixture", 2, "", True),
                   ("false", 1, "", True),
+                  ("env -i pgrep fixture", 1, "", True),
+                  ("FOO=1 make", 1, "", True),
+                  ("LC_ALL=C LABEL='two words'", 1, "", True),
+                  ("env LC_ALL=C", 1, "", True),
                   ("grep fixture | false", 1, "", True),
                   ("pgrep fixture; false", 1, "", True),
                   ("pgrep fixture && false", 1, "", True),

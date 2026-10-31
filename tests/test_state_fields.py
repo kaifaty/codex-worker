@@ -109,7 +109,7 @@ st[dynamic_key] = 1
         unused = registered - used
         self.assertFalse(missing, "Unregistered state keys: " + ", ".join(sorted(missing)))
         self.assertFalse(unused, "Unused state registry keys: " + ", ".join(sorted(unused)))
-        self.assertEqual(len(registered), 78)
+        self.assertEqual(len(registered), 79)
         for key, field in self.worker.task_state.STATE_FIELDS.items():
             with self.subTest(key=key):
                 self.assertIn(field.lifetime, {"task", "history", "cursor", "turn", "attempt", "runtime"})
@@ -148,6 +148,7 @@ st[dynamic_key] = 1
             "stop_request": {"pid": 103}, "thread": "old-thread",
             "threads": [{"account": "old-work", "thread": "old-thread", "started": 1000}],
             "turn_finished": 1002, "turn_started": 1001, "turn_stop": {"reason": "budget"},
+            "turn_stops": [{"turn": 11, "outcome": "budget_exhausted", "minutes": 1, "at": 1002}],
             "turns": 11, "weekly_budget_warning": {"used_percent": 20},
             "weekly_marks": {"old-work": {"used_percent": 10}}, "weekly_used_percent": 20,
             "work_completed": True, "worktree": str(self.home), "wrapup": {"status": "done"},
@@ -219,7 +220,7 @@ st[dynamic_key] = 1
 
     def test_load_keeps_the_same_defaults_and_insertion_order(self):
         expected = {"account": "main", "threads": [], "rotations": [], "reviews": [],
-                    "checks": [], "result": None, "fix_rounds": 0, "rounds": [],
+                    "checks": [], "turn_stops": [], "result": None, "fix_rounds": 0, "rounds": [],
                     "guards": [], "base_check": False, "sandbox": "off", "writable_dirs": [],
                     "reviewer": "codex"}
         loaded = self.load_state({})

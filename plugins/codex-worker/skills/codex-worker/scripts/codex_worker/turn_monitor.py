@@ -3,6 +3,7 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import selectors
 import shlex
 import subprocess
@@ -38,6 +39,10 @@ def _search_command(command):
             return False
         while "|" in words:
             words = words[words.index("|") + 1:]
+        if words and Path(words[0]).name == "env":
+            words = words[1:]
+        while words and re.match(r"[A-Za-z_][A-Za-z_0-9]*=", words[0]):
+            words = words[1:]
         return bool(words) and (Path(words[0]).name in ("pgrep", "grep", "egrep", "fgrep", "rg")
                                 or (Path(words[0]).name == "git" and words[1:2] == ["grep"]))
 
@@ -92,7 +97,7 @@ class TurnControl:
         self.failures[command] = (signature, count)
         if count >= self.repeat_limit:
             self.reason = {"outcome": "stuck", "command": command, "exit_code": code,
-                           "output_sha256": digest, "count": count}
+                           "output_sha256": digest, "count": count, "output_tail": output[-300:]}
             return True
         return False
 

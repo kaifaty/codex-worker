@@ -12,6 +12,7 @@ def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
 def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     """Publish the typed stop and allow exactly one short resume on its thread."""
     st["turn_stop"] = dict(reason, at=clock.CLOCK.time())
+    st.setdefault("turn_stops", []).append(dict(st["turn_stop"], turn=st.get("turns", 0)))
     st["outcome"] = reason["outcome"]
     st["review_skipped"] = reason["outcome"]
     st["wrapup"] = {"outcome": "not_run", "result": None}
