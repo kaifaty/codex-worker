@@ -195,6 +195,8 @@ def run(st, cfg, prompt, stopped):
                 if clock.CLOCK.monotonic() - started >= minutes * config.MINUTE_SECONDS:
                     response["outcome"] = "budget_exhausted"
                     st["turn_stop"] = {"outcome": "budget_exhausted", "minutes": minutes}
+                    st.setdefault("turn_stops", []).append(dict(
+                        st["turn_stop"], turn=st.get("turns", 0), at=clock.CLOCK.time()))
                     break
                 for key, _ in selector.select(0.2):
                     chunk = os.read(key.fileobj.fileno(), 65536)

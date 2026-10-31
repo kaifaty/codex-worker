@@ -68,7 +68,7 @@ def record_turn_result(st, stopped):
                "ci": st.get("ci"),
                "capacity_retries": st.get("capacity_retries", 0),
                "max_task_weekly_percent": st.get("max_task_weekly_percent"),
-               "budget_stop": budgets.budget_stop(st)}
+               "budget_stop": budgets.budget_stop(st), "turn_stops": st.get("turn_stops", [])}
         write_telemetry(st, row, stopped)
     except Exception as exc:
         telemetry_error(st, exc)

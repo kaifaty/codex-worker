@@ -61,6 +61,7 @@ def stop_at_weekly_budget(st):
     if budget_stop(st) != "weekly":
         st["turn_stop"] = {"outcome": "budget_exhausted", "weekly": st["max_task_weekly_percent"],
                            "spent": st["weekly_used_percent"], "at": clock.CLOCK.time()}
+        st.setdefault("turn_stops", []).append(dict(st["turn_stop"], turn=st.get("turns", 0)))
     if st.get("fix_rounds"):
         st["auto_fix_stop"] = "budget"
     return True

@@ -58,6 +58,8 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual(report["summary"]["outcomes"], {"budget_exhausted": 1})
         self.assertEqual(report["summary"]["result_status"], {"partial": 1})
         self.assertEqual(report["tasks"][0]["budget_stop"], "minutes")
+        self.assertEqual(state["turn_stops"], [dict(state["turn_stop"], turn=1)])
+        self.assertEqual(report["tasks"][0]["turn_stops"], state["turn_stops"])
         self.assertIsNone(report["tasks"][0]["max_task_weekly_percent"])
         self.assertEqual(next(row for row in self.telemetry_journal()
                               if row["phase"] == "turn")["budget_stop"], "minutes")
@@ -220,16 +222,26 @@ class TimeBudgetTests(RotationTestCase):
     def test_wrap_up_has_its_own_ten_minute_cap_without_recursing(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
         self.configure(language="en")
+        command = {"command": "check-main", "exit_code": 2, "aggregated_output": "same main failure"}
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "hold"}, {"mode": "hold", "spawn_child": True}])
-        self.start("cap-wrap-timeout", "--max-minutes", "10", "--check", "printf 'checked\\n' > checked")
+            {"mode": "hold", "commands": [command] * 3}, {"mode": "hold", "spawn_child": True}])
+        self.start("cap-wrap-timeout", "--check", "printf 'checked\\n' > checked")
         output = self.wait("cap-wrap-timeout", timeout=12)
         state = self.state("cap-wrap-timeout")
-        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual(state["outcome"], "stuck")
+        self.assertEqual(state["wrapup"]["outcome"], "budget_exhausted")
+        primary, wrapup = state["turn_stops"]
+        self.assertEqual(primary, dict(state["turn_stop"], turn=1))
+        self.assertEqual((state["turn_stop"]["outcome"], state["turn_stop"]["command"]),
+                         ("stuck", command["command"]))
+        self.assertEqual((wrapup["turn"], wrapup["phase"], wrapup["outcome"], wrapup["minutes"]),
+                         (1, "wrapup", "budget_exhausted", 10))
+        self.assertGreaterEqual(wrapup["at"], primary["at"])
+        self.assertLessEqual(wrapup["at"], state["turn_finished"])
         self.assertEqual(len(self.invocations()), 2, "a timed-out wrap-up must not start another wrap-up")
         self.assertIsNone(state["result"])
         self.assertEqual(state["checks"][-1]["outcome"], "passed")
-        self.assertIn("== turn stopped: time budget 10 min exhausted", output)
+        self.assertIn("== turn stopped: repeated failure ×3: " + command["command"], output)
         child = next(event["child_pid"] for event in self.trace() if event.get("command") == "exec-child")
         self.extra_pids.add(child)
         self.until(lambda: not self.process_is_live(child))
@@ -246,6 +258,13 @@ class TimeBudgetTests(RotationTestCase):
         state = self.state("cap-wrap-stuck")
         self.assertEqual(state["outcome"], "budget_exhausted")
         self.assertEqual(state["wrapup"]["outcome"], "stuck")
+        primary, wrapup = state["turn_stops"]
+        self.assertEqual(primary, dict(state["turn_stop"], turn=1))
+        self.assertEqual((state["turn_stop"]["outcome"], state["turn_stop"]["minutes"]),
+                         ("budget_exhausted", 10))
+        self.assertEqual((wrapup["turn"], wrapup["phase"], wrapup["outcome"],
+                          wrapup["command"], wrapup["output_tail"]),
+                         (1, "wrapup", "stuck", command["command"], command["aggregated_output"]))
         self.assertIsNone(state["result"])
         self.assertEqual(len(self.invocations()), 2)
         self.assertIn("== turn stopped: time budget 10 min exhausted", output)
@@ -261,8 +280,10 @@ class TimeBudgetTests(RotationTestCase):
                   {"command": "another-command", "exit_code": 9}, failures[2]]
         result = self.work_result("blocked", summary="Stopped after three identical failures.",
                                   remaining=["Resolve the fixture command failure."])
+        empty_failure = {"command": command, "exit_code": 7, "aggregated_output": ""}
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "hold", "commands": events}, {"mode": "complete", "reply": result}])
+            {"mode": "hold", "commands": events}, {"mode": "complete", "reply": result},
+            {"mode": "hold", "commands": [empty_failure] * 3}, {"mode": "complete", "reply": result}])
         self.start("repeat-cap", "--review", "--check", "printf 'checked\\n' > checked")
         output = self.wait("repeat-cap", timeout=12)
         state = self.state("repeat-cap")
@@ -282,6 +303,18 @@ class TimeBudgetTests(RotationTestCase):
         self.assertFalse(self.review_invocations())
         self.assertEqual(self.notification("repeat-cap", "stuck")["outcome"], "stuck")
         self.assertEqual(self.notification("repeat-cap", "turn_finished")["outcome"], "stuck")
+        self.assertEqual(state["turn_stops"], [dict(state["turn_stop"], turn=1)])
+        first_stop = state["turn_stops"][0]
+        self.assertEqual(first_stop["output_tail"], tail[-300:])
+        self.assertGreaterEqual(first_stop["at"], state["turn_started"])
+        self.assertLessEqual(first_stop["at"], state["turn_finished"])
+        self.cli("say", "repeat-cap", "Retry the command")
+        self.wait("repeat-cap", timeout=12)
+        state = self.state("repeat-cap")
+        self.assertEqual(state["turn_stops"], [first_stop, dict(state["turn_stop"], turn=2)])
+        self.assertEqual(state["turn_stops"][1]["output_tail"], "")
+        report = json.loads(self.cli("report", "--slug", "repeat-cap", "--json"))
+        self.assertEqual(report["tasks"][0]["turn_stops"], state["turn_stops"])
 
     def test_different_failures_success_and_other_event_types_do_not_trigger_stuck(self):
         self.configure()
@@ -313,12 +346,21 @@ class TimeBudgetTests(RotationTestCase):
             "pgrep -f fixture", "grep fixture", "egrep fixture", "fgrep fixture", "rg fixture",
             "git grep fixture", "/bin/zsh -lc 'pgrep -f fixture'", "/bin/sh -c 'git grep fixture'",
             "ps | grep fixture", "/bin/zsh -lc 'ps | grep fixture'",
+            "LC_ALL=C pgrep -fl '^/[^ ]*/fixture( |$)'",
+            "LC_ALL=C LABEL='two words' pgrep -x fixture", "env LC_ALL=C rg fixture",
+            '/bin/zsh -lc "LC_ALL=C pgrep -fl \'^/[^ ]*/fixture( |$)\'"',
+            '/bin/zsh -lc "env LC_ALL=C LABEL=\'two words\' rg fixture"',
+            "ps | LC_ALL=C grep fixture", "ps | env LC_ALL=C rg fixture",
             "pgrep -fl x 2>&1", "pgrep x >&1", "pgrep x &>search.log",
             "rg foo 2>/dev/null", "ps aux | grep x 2>&1", '/bin/zsh -lc "rg foo 2>&1"')]
         cases += [("pgrep fixture", 1, " \t\n", False),
                   ("grep fixture", 1, "search failed", True),
                   ("pgrep fixture", 2, "", True),
                   ("false", 1, "", True),
+                  ("env -i pgrep fixture", 1, "", True),
+                  ("FOO=1 make", 1, "", True),
+                  ("LC_ALL=C LABEL='two words'", 1, "", True),
+                  ("env LC_ALL=C", 1, "", True),
                   ("grep fixture | false", 1, "", True),
                   ("pgrep fixture; false", 1, "", True),
                   ("pgrep fixture && false", 1, "", True),

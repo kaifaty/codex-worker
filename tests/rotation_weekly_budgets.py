@@ -47,6 +47,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(state["turn_stop"]["weekly"], 10)
         self.assertAlmostEqual(state["turn_stop"]["spent"], 10.4)
         self.assertNotIn("minutes", state["turn_stop"])
+        self.assertEqual(state["turn_stops"], [dict(state["turn_stop"], turn=1)])
         self.assertAlmostEqual(state["weekly_used_percent"], 10.6)
         self.assertEqual(state["result"], result)
         self.assertEqual(state["checks"][-1]["outcome"], "passed")
@@ -465,6 +466,7 @@ class WeeklyBudgetTests(RotationTestCase):
         self.assertEqual(state["outcome"], "budget_exhausted")
         self.assertEqual((state["turn_stop"]["outcome"], state["turn_stop"]["weekly"],
                           state["turn_stop"]["spent"]), ("budget_exhausted", 3, 4))
+        self.assertEqual(state["turn_stops"], [dict(state["turn_stop"], turn=2)])
         self.assertEqual(len(self.invocations()), 2)
         self.assertFalse(self.review_invocations())
         self.assertIn("== turn stopped: weekly budget 3% exhausted (spent 4%)", output)

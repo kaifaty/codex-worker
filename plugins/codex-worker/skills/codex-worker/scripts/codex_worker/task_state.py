@@ -46,6 +46,7 @@ STATE_FIELDS = {
     "rotations": StateField("history", load_default=lambda st: []),
     "reviews": StateField("history", load_default=lambda st: []),
     "checks": StateField("history", load_default=lambda st: []),
+    "turn_stops": StateField("history", load_default=lambda st: []),
     # Last work result survives standalone review; only work/scout spawn clears it.
     "result": StateField("turn", load_default=lambda st: None),
     "pending": StateField("turn", spawn_reset=lambda st, turn: turn["pending"]),
