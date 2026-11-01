@@ -133,7 +133,7 @@ def run(st, cfg, prompt, stopped):
     """Run one review angle; the caller owns review history and phase telemetry."""
     response = {"outcome": "unavailable", "result": None, "reason": None,
                 "telemetry": {"usage": {}, "cost_usd": None, "session_id": None,
-                              "model": None, "num_turns": None}}
+                              "model": None, "reasoning_effort": None, "num_turns": None}}
     if stopped():
         response["outcome"] = task_state.stop_outcome(st, stopped)
         return response
@@ -180,6 +180,7 @@ def run(st, cfg, prompt, stopped):
     except OSError:
         response["reason"] = "Claude CLI could not be started"
         return response
+    response["telemetry"].update(model=settings.get("model"), reasoning_effort=settings.get("effort"))
     started = clock.CLOCK.monotonic()
     minutes = cfg["max_review_minutes"]
     st["codex_pid"] = proc.pid

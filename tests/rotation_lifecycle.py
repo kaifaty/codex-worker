@@ -24,6 +24,41 @@ from worker_loader import WORKER_BOOTSTRAP
 
 
 class LifecycleTests(RotationTestCase):
+    def test_task_type_validation_persistence_and_followups(self):
+        self.configure()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)},
+            {"mode": "complete", "reply": self.work_result()}])
+        self.start("typed-task", "--task-type", "feature")
+        self.wait("typed-task")
+        self.assertEqual(self.state("typed-task")["task_type"], "feature")
+        self.cli("say", "typed-task", "Continue the task.")
+        self.wait("typed-task")
+        self.assertEqual(self.state("typed-task")["task_type"], "feature")
+        self.cli("review", "typed-task")
+        self.wait("typed-task")
+        self.assertEqual(self.state("typed-task")["task_type"], "feature")
+        self.cli("say", "typed-task", "Continue with a new label.", "--task-type", "logic")
+        self.wait("typed-task")
+        self.assertEqual(self.state("typed-task")["task_type"], "logic")
+        self.until(lambda: len([row for row in self.telemetry_journal() if row["phase"] == "turn"]) == 4)
+        rows = self.telemetry_journal()
+        self.assertEqual([row["task_type"] for row in rows], ["feature"] * 6 + ["logic"] * 2)
+        report = json.loads(self.cli("report", "--json"))
+        self.assertEqual(report["tasks"][0]["task_type"], "logic")
+        self.assertEqual(self.worker().cli.task_type("a" * 32), "a" * 32)
+        for label in ("Feature", "a" * 33):
+            with self.subTest(label=label):
+                result = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "invalid-label",
+                                         "--brief", str(self.brief), "--task-type", label],
+                                        cwd=self.repo, env=self.env, text=True,
+                                        capture_output=True, timeout=15)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertIn("task type must be 1-32 characters", result.stderr)
+        self.assertFalse((self.home / "claude-tasks" / "invalid-label").exists())
+
     def test_clean_keeps_reviewed_task_record_and_allows_reusing_slug(self):
         self.configure()
         clock = self.enable_fake_clock()

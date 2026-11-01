@@ -158,6 +158,8 @@ class ClaudeReviewTests(RotationTestCase):
         reviews = [row for row in self.phase_telemetry_journal() if row["phase"] == "review"]
         self.assertEqual([row["reviewer"] for row in reviews], ["claude"] * count)
         for row in reviews:
+            self.assertEqual(row["model"], "fake-claude")
+            self.assertEqual(row["usage"][0]["model"], "fake-claude")
             self.assertEqual(row["cost_usd"], 0.125)
             self.assertEqual(row["tokens"], {"input": 150, "cached_input": 30, "output": 40,
                                              "reasoning": None})
@@ -206,6 +208,9 @@ class ClaudeReviewTests(RotationTestCase):
             self.assertEqual(set(schema["properties"]), set(self.review_result()))
         self.assertEqual(len(self.security_trace_path.read_text().splitlines()), 2)
         self.assert_claude_review_telemetry(2)
+        reviews = [row for row in self.phase_telemetry_journal() if row["phase"] == "review"]
+        self.assertEqual([row["reasoning_effort"] for row in reviews], ["high", "high"])
+        self.assertEqual([row["usage"][0]["reasoning_effort"] for row in reviews], ["high", "high"])
         status = self.cli("status", "claude-fix")
         self.assertIn(self.review_result(False)["summary"], status)
         self.assertEqual(json.loads((self.home / "claude-tasks" / "claude-fix" / "review.md").read_text()),
@@ -241,6 +246,8 @@ class ClaudeReviewTests(RotationTestCase):
             self.assertIn("Review angle: " + angle, claude[index]["argv"][1])
             self.assertRegex(output, r"== review angle " + angle + r" by claude \(\d+(?:\.\d+)? min\)")
         self.assert_claude_review_telemetry(4)
+        self.assertEqual([row["reasoning_effort"] for row in self.phase_telemetry_journal()
+                          if row["phase"] == "review"], [None] * 4)
 
     def test_claude_unavailable_events_fall_back_to_codex(self):
         cases = (("rejected", {"limits": {"status": "rejected", "rateLimitType": "seven_day",
