@@ -123,6 +123,8 @@ new session `status` and `wait` pick it up again.
 
 When parallel tasks touch the same shared files, land the sibling PRs that are ready together, then send each branch still open one `say` to merge the base; or tell Codex to merge `origin/<base>` once, right before its final push. Merging siblings one at a time costs every open branch a merge round and a full CI wait each time.
 
+A PR far behind its base (hundreds of commits) is not a plain merge task. Before the brief, compare what its scenarios or tests do on the base now, name in the brief the base commits that rewrote the files it touches, and decide whether to port the change onto the base instead of merging. Do not run it while sibling tasks are rewriting the same files: land them first, or the base moves under the task every round.
+
 Scouts need no `--parallel`: run several at once, one question each, alongside tasks. `say` continues a
 scout's read-only thread; `--check`, `--review`, `--review-angles`, `--fix-rounds` and `review` don't
 apply to scouts. `clean` on a scout archives its record the same way, never the inspected directory.

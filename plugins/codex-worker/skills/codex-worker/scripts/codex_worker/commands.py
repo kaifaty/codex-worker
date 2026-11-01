@@ -57,7 +57,16 @@ def cmd_start(a):
     procs.sh(config.GIT + ["worktree", "add", "--quiet", "-b", branch, str(wt), a.base], cwd=repo)
     d = config.TASKS / a.slug
     d.mkdir(parents=True)
-    prompt = brief.rstrip() + "\n\n" + rules.replace("{branch}", branch).replace("{base}", a.base.removeprefix("origin/"))
+    base = a.base.removeprefix("origin/")
+    prompt = brief.rstrip() + "\n\n" + rules.replace("{branch}", branch).replace("{base}", base)
+    if a.check:
+        prompt += "\n" + (
+            f'- Перед `status: "done"` запусти сохранённую проверку целиком: `{a.check}` — '
+            f'и укажи её в `checks`. Если она падает и на чистой {base}, укажи это с числами, а не чини.'
+            if cfg.get("language", "en") == "ru" else
+            f'- Before finishing with status "done", run the saved check in full: `{a.check}`, '
+            f'and report it in `checks`. If it also fails on a clean {base}, '
+            'report that with the numbers instead of fixing it.')
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
           "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],

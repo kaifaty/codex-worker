@@ -71,6 +71,7 @@ does not enable CI. Waiting and repair mechanics are in [ci.md](ci.md).
 `~/.codex/codex-worker-rules.md`, if present, replaces either file: use it for another language or your
 own rules. `{branch}` and `{base}` in it are replaced with the task's branch and PR target. Scouts use
 their own read-only instructions instead of task rules.
+With `--check`, `start` appends a rule to run the saved check in full before finishing with status `done`, including when a custom rules file is used.
 
 ## Repository trust
 

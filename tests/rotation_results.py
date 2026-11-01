@@ -575,18 +575,34 @@ class ResultScoutConfigTests(RotationTestCase):
     def test_rules_override_replaces_both_languages(self):
         worker = self.worker()
         override = self.home / "codex-worker-rules.md"
-        override.write_text("Custom instructions for {branch}, targeting {base}.\n")
-        for language in ("en", "ru"):
-            with self.subTest(language=language):
-                (self.home / "codex-worker.json").write_text(json.dumps({"language": language}))
-                self.assertEqual(worker.sandboxing.rules_path(), override)
-                self.assertEqual(worker.sandboxing.rules_text(), override.read_text())
-        self.start("custom-rules")
-        self.wait("custom-rules")
-        prompt = self.invocations()[0]["prompt"]
-        self.assertIn("Custom instructions for codex/custom-rules, targeting main.", prompt)
-        self.assertNotIn("## Как работать", prompt)
-        self.assertNotIn("{branch}", prompt)
+        check = "git diff --check"
+        for language, check_rule in (
+                ("en", '- Before finishing with status "done", run the saved check in full: '
+                 '`git diff --check`, and report it in `checks`. If it also fails on a clean main, '
+                 'report that with the numbers instead of fixing it.'),
+                ("ru", '- Перед `status: "done"` запусти сохранённую проверку целиком: '
+                 '`git diff --check` — и укажи её в `checks`. Если она падает и на чистой main, '
+                 'укажи это с числами, а не чини.')):
+            (self.home / "codex-worker.json").write_text(json.dumps({"language": language}))
+            for custom in (False, True):
+                if custom:
+                    override.write_text("Custom instructions for {branch}, targeting {base}.\n")
+                else:
+                    override.unlink(missing_ok=True)
+                rules = override if custom else SKILL / "references" / (
+                    "rules.ru.md" if language == "ru" else "rules.md")
+                self.assertEqual(worker.sandboxing.rules_path(), rules)
+                self.assertEqual(worker.sandboxing.rules_text(), rules.read_text())
+                for saved in (False, True):
+                    with self.subTest(language=language, custom=custom, check=saved):
+                        slug = f"rules-{language}-{int(custom)}-{int(saved)}"
+                        self.start(slug, *(["--check", check] if saved else []))
+                        self.wait(slug)
+                        prompt = (worker.config.TASKS / slug / "brief.md").read_text()
+                        expected = self.brief.read_text().rstrip() + "\n\n" + rules.read_text().replace(
+                            "{branch}", f"codex/{slug}").replace("{base}", "main")
+                        self.assertEqual(prompt, expected + ("\n" + check_rule if saved else ""))
+                        self.assertEqual(self.invocations()[-1]["prompt"], prompt)
 
     def test_settings_without_accounts_skip_monitoring_and_use_english(self):
         (self.home / "codex-worker.json").write_text('{"credits":true,"wait_for_reset":true}')
