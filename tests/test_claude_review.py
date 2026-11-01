@@ -21,7 +21,9 @@ from pathlib import Path
 
 with Path(os.environ["CODEX_FAKE_SECURITY_TRACE"]).open("a") as stream:
     stream.write(json.dumps(sys.argv[1:]) + "\n")
-if sys.argv[1:] != ["find-generic-password", "-s", "codex-worker-claude-reviewer", "-a", "fixture-user", "-w"]:
+if (sys.argv[1:3] != ["find-generic-password", "-s"]
+        or not sys.argv[3].startswith("codex-worker-claude-")
+        or sys.argv[4:] != ["-a", "fixture-user", "-w"]):
     sys.exit("unexpected fake keychain lookup")
 print("fixture-claude-reviewer-oauth-secret")
 '''
@@ -140,6 +142,7 @@ class ClaudeReviewTests(RotationTestCase):
                                   "seven_day": {"utilization": 0.5, "resetsAt": self.reset}}}
         self.claude_fixture_path.write_text(json.dumps({
             "runs": runs or [{"reply": self.review_result(False)}], "limits": self.claude_limits}))
+        (self.home / "claude-tasks" / "claude-limits.json").unlink(missing_ok=True)
         options = {"config_dir": str(self.claude_config_dir)}
         options.update(settings.pop("claude", {}))
         self.configure(language="en", claude=options, **settings)
@@ -151,6 +154,13 @@ class ClaudeReviewTests(RotationTestCase):
 
     def claude_invocations(self):
         return [entry for entry in self.claude_trace() if entry["command"] == "review"]
+
+    def claude_pool_fixture(self, runs=None, names=("first", "second")):
+        accounts = [{"name": name, "config_dir": str(self.root / ("claude-" + name)),
+                     "token_keychain": "codex-worker-claude-" + name}
+                    for name in names]
+        self.claude_fixture(runs=runs, claude={"accounts": accounts})
+        return accounts
 
     def assert_claude_review_telemetry(self, count):
         self.until(lambda: len([row for row in self.phase_telemetry_journal()
@@ -186,7 +196,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertIn(self.review_result()["findings"][0]["detail"], codex[1]["prompt"])
         invocations = self.claude_invocations()
         self.assertEqual(len(invocations), 2)
-        self.assertRegex(output, r"== review by claude \(\d+(?:\.\d+)? min\)")
+        self.assertRegex(output, r"== review by claude/default \(\d+(?:\.\d+)? min\)")
         self.assertNotRegex(output, r"review by claude[^\n]*%")
         for entry in invocations:
             self.assertTrue(entry["token_matches"])
@@ -239,7 +249,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(len({entry["pid"] for entry in claude}), 4)
         for index, angle in enumerate(("correctness", "concurrency", "correctness", "concurrency")):
             self.assertIn("Review angle: " + angle, claude[index]["argv"][1])
-            self.assertRegex(output, r"== review angle " + angle + r" by claude \(\d+(?:\.\d+)? min\)")
+            self.assertRegex(output, r"== review angle " + angle + r" by claude/default \(\d+(?:\.\d+)? min\)")
         self.assert_claude_review_telemetry(4)
 
     def test_claude_unavailable_events_fall_back_to_codex(self):
@@ -263,7 +273,10 @@ class ClaudeReviewTests(RotationTestCase):
                 output = self.wait(slug)
                 self.assertEqual(self.state(slug)["review_result"]["verdict"], "clean")
                 self.assertTrue(self.invocations()[-1]["review"])
-                self.assertRegex(output, r"== reviewer claude unavailable: [^\n]+; review by codex")
+                if label in ("rejected", "auth401", "auth403"):
+                    self.assertRegex(output, r"== claude account default limited until [^\n]+; review by codex")
+                else:
+                    self.assertRegex(output, r"== reviewer claude unavailable: [^\n]+; review by codex")
                 self.assertNotIn(TEST_TOKEN, output)
                 rows = [row for row in self.phase_telemetry_journal()
                         if row["slug"] == slug and row["phase"] == "review"]
@@ -308,7 +321,7 @@ class ClaudeReviewTests(RotationTestCase):
                 slug = "claude-" + mode.replace("_", "-")
                 self.start(slug, "--review", "--reviewer", "claude")
                 output = self.wait(slug)
-                self.assertIn("== reviewer claude unavailable: usage limit; review by codex", output)
+                self.assertRegex(output, r"== claude account default limited until [^\n]+; review by codex")
                 rows = [row for row in self.phase_telemetry_journal()
                         if row["slug"] == slug and row["phase"] == "review"]
                 self.assertEqual([row["reviewer"] for row in rows], ["claude", "codex"])
@@ -348,7 +361,6 @@ class ClaudeReviewTests(RotationTestCase):
                 state = self.state(slug)
                 self.assertEqual(state["outcome"], "failed")
                 self.assertIn("reviewer modified the worktree", state.get("error", "") + output)
-                self.assertNotIn("review by codex", output)
                 self.assertFalse(self.review_invocations())
                 if mode == "modify":
                     self.assertEqual((Path(state["worktree"]) / "reviewer-change.txt").read_text(),
@@ -370,7 +382,7 @@ class ClaudeReviewTests(RotationTestCase):
         state = self.state("claude-filter-guard")
         self.assertEqual(state["outcome"], "completed")
         self.assertIn("filter driver project is configured", state["publish"]["error"])
-        self.assertIn("== review by claude", output)
+        self.assertIn("== review by claude/default", output)
         self.assertEqual(marker.read_text(), "untouched\n")
         self.assertEqual((Path(state["worktree"]) / "tracked.txt").read_text(), "worker change\n")
 
@@ -393,7 +405,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertFalse((worktree / "local-submodule" / ".git").exists())
         self.assertTrue(self.git("-C", str(worktree), "submodule", "status").startswith("-"))
         self.assertEqual(state["outcome"], "completed")
-        self.assertIn("== review by claude", output)
+        self.assertIn("== review by claude/default", output)
         self.assertNotIn("review by codex", output)
         self.assertEqual(len(self.claude_invocations()), 1)
         self.assertFalse(self.review_invocations())
@@ -428,7 +440,6 @@ class ClaudeReviewTests(RotationTestCase):
                 self.assertIn("reviewer modified the worktree", output)
                 self.assertIsNone(state["reviews"][-1]["result"])
                 self.assertFalse(self.review_invocations())
-                self.assertNotIn("review by codex", output)
 
     def test_stop_interrupts_claude_review_process_group_without_fallback(self):
         self.claude_fixture(runs=[{"mode": "hold"}])
@@ -480,7 +491,7 @@ class ClaudeReviewTests(RotationTestCase):
         output = self.wait("claude-say")
         self.assertEqual(self.state("claude-say")["reviewer"], "claude")
         self.assertEqual(len(self.claude_invocations()), 1)
-        self.assertIn("== review by claude", output)
+        self.assertIn("== review by claude/default", output)
         self.cli("say", "claude-say", "Continue using Codex review", "--review", "--reviewer", "codex")
         self.wait("claude-say")
         self.assertEqual(self.state("claude-say")["reviewer"], "codex")
@@ -489,7 +500,7 @@ class ClaudeReviewTests(RotationTestCase):
 
     def test_claude_limits_accounts_and_default_cli_settings(self):
         self.claude_fixture(reviewer="claude")
-        self.assertIn("claude reviewer: unknown", self.cli("accounts"))
+        self.assertIn("claude default: 5h unknown", self.cli("accounts"))
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
         self.start("claude-limits", "--review")
         self.wait("claude-limits")
@@ -499,9 +510,9 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(self.state("claude-limits")["result"], work)
         self.assertEqual(len(self.claude_invocations()), 2)
         saved = json.loads((self.home / "claude-tasks" / "claude-limits.json").read_text())
-        self.assertEqual(saved["unifiedWindows"], self.claude_limits["unifiedWindows"])
+        self.assertEqual(saved["default"]["unifiedWindows"], self.claude_limits["unifiedWindows"])
         output = self.cli("accounts")
-        line = next(line for line in output.splitlines() if line.startswith("claude reviewer"))
+        line = next(line for line in output.splitlines() if line.startswith("claude default"))
         self.assertIn("25%", line)
         self.assertIn("50%", line)
         for window in self.claude_limits["unifiedWindows"].values():
@@ -511,6 +522,122 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(argv[argv.index("--max-turns") + 1], "40")
         self.assertNotIn("--model", argv)
         self.assertNotIn("--effort", argv)
+
+    def test_claude_pool_selects_both_windows_then_earliest_long_reset(self):
+        self.claude_pool_fixture()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        cfg.update(soft_switch_at=80, switch_at=99)
+        path = self.home / "claude-tasks" / "claude-limits.json"
+        path.parent.mkdir(exist_ok=True)
+
+        def limits(short, long, reset):
+            return {"unifiedWindows": {"five_hour": {"utilization": short, "resetsAt": self.reset},
+                                       "seven_day": {"utilization": long, "resetsAt": reset}}}
+
+        cases = [
+            ({"first": limits(.8, .2, self.reset),
+              "second": limits(.2, .5, self.reset + 3600)}, (), (), "second"),
+            ({"first": limits(.2, .2, self.reset),
+              "second": limits(.2, .5, self.reset + 3600)}, (), (), "first"),
+            ({"first": limits(.2, .9, self.reset),
+              "second": limits(.8, .5, self.reset + 3600)}, (), (), "first"),
+            ({"first": limits(.99, .1, self.reset)}, ("second",), (), None),
+            ({}, ("second",), (), "first"),
+            ({}, (), ("first",), "second"),
+            ({"first": limits(1, 1, self.reset - 9000)}, ("second",), (), None),
+        ]
+        for entries, excluded, used, expected in cases:
+            with self.subTest(entries=entries, excluded=excluded, used=used):
+                path.write_text(json.dumps(entries))
+                account = worker.claude_accounts.select(cfg, "review", exclude=excluded, prefer_unused=used)
+                self.assertEqual(account["name"] if account else None, expected)
+        expired = limits(1, 1, self.reset - 9000)
+        expired["unifiedWindows"]["five_hour"]["resetsAt"] = self.reset - 9000
+        path.write_text(json.dumps({"first": dict(expired, status="rejected", limited_until=self.reset - 9000)}))
+        self.assertEqual(worker.claude_accounts.select(cfg, "review", exclude=("second",))["name"], "first")
+
+    def test_claude_pool_reads_legacy_settings_and_limit_file(self):
+        self.claude_fixture()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        self.assertEqual(cfg["claude"]["accounts"], [{
+            "name": "default", "config_dir": str(self.claude_config_dir),
+            "token_keychain": "codex-worker-claude-reviewer"}])
+        path = self.home / "claude-tasks" / "claude-limits.json"
+        path.parent.mkdir(exist_ok=True)
+        path.write_text(json.dumps(self.claude_limits))
+        self.assertEqual(worker.claude_accounts.read_limits(), {"default": self.claude_limits})
+        worker.claude_accounts.save_limits("default", self.claude_limits)
+        self.assertIn("default", json.loads(path.read_text()))
+        self.configure(claude={})
+        defaults = worker.config.accounts_config()["claude"]["accounts"]
+        self.assertEqual(defaults[0]["name"], "default")
+        self.assertTrue(defaults[0]["config_dir"].endswith("/.claude-accounts/reviewer"))
+        self.assertEqual(defaults[0]["token_keychain"], "codex-worker-claude-reviewer")
+
+    def test_claude_pool_retries_limited_and_unauthorized_accounts_once(self):
+        cases = (("limit", {"limits": {"status": "rejected", "resetsAt": self.reset}}),
+                 ("auth", {"mode": "auth_error", "status": 401}))
+        for label, first in cases:
+            with self.subTest(case=label):
+                names = ("first", "codex" if label == "auth" else "second")
+                accounts = self.claude_pool_fixture(runs=[first, {"reply": self.review_result(False)}], names=names)
+                self.claude_fixture_path.with_suffix(".count").unlink(missing_ok=True)
+                self.claude_trace_path.unlink(missing_ok=True)
+                (self.home / "exec-count").unlink(missing_ok=True)
+                self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+                slug = "claude-pool-" + label
+                self.start(slug, "--review", "--reviewer", "claude")
+                output = self.wait(slug)
+                self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()],
+                                 [account["config_dir"] for account in accounts])
+                self.assertEqual([entry["account"] for entry in self.state(slug)["reviews"]], list(names))
+                self.assertEqual(self.state(slug)["review_result"]["verdict"], "clean")
+                switch = [line for line in output.splitlines() if line.startswith("== claude account ")]
+                self.assertEqual(len(switch), 1, output)
+                self.assertRegex(switch[0], r"^== claude account first limited until .+; review by " + names[1] + r"$")
+                self.assertEqual(self.review_invocations(), [])
+                rows = [row for row in self.phase_telemetry_journal()
+                        if row["slug"] == slug and row["phase"] == "review"]
+                self.assertEqual([row["account"] for row in rows], list(names))
+
+    def test_claude_pool_falls_back_only_after_every_account_is_limited(self):
+        self.claude_pool_fixture(runs=[{"limits": {"status": "rejected", "resetsAt": self.reset}}])
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("claude-pool-empty", "--review", "--reviewer", "claude")
+        output = self.wait("claude-pool-empty")
+        self.assertEqual(len(self.claude_invocations()), 2)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertEqual([entry["account"] for entry in self.state("claude-pool-empty")["reviews"]],
+                         ["first", "second", "main"])
+        self.assertEqual(len([line for line in output.splitlines() if line.startswith("== claude account ")]), 2)
+        self.assertRegex(output, r"== claude account second limited until [^\n]+; review by codex")
+        accounts = self.cli("accounts")
+        for name in ("first", "second"):
+            line = next(line for line in accounts.splitlines() if line.startswith("claude " + name + ":"))
+            self.assertIn("limited", line)
+
+    def test_claude_pool_spreads_angles_and_lists_per_account_limits(self):
+        accounts = self.claude_pool_fixture()
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+        self.start("claude-pool-angles", "--reviewer", "claude", "--review-angles", "correctness,concurrency")
+        output = self.wait("claude-pool-angles")
+        self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()],
+                         [account["config_dir"] for account in accounts])
+        state = self.state("claude-pool-angles")
+        self.assertEqual([entry["account"] for entry in state["review_result"]["angles"]], ["first", "second"])
+        self.assertIn("== review angle correctness by claude/first", output)
+        self.assertIn("== review angle concurrency by claude/second", output)
+        listing = self.cli("accounts")
+        for name in ("first", "second"):
+            line = next(line for line in listing.splitlines() if line.startswith("claude " + name + ":"))
+            self.assertIn("25%", line)
+            self.assertIn("50%", line)
+            for window in self.claude_limits["unifiedWindows"].values():
+                self.assertIn(datetime.datetime.fromtimestamp(window["resetsAt"]).strftime("%Y-%m-%d %H:%M"), line)
 
     def test_report_splits_reviewer_cost_and_treats_historical_reviews_as_codex(self):
         self.claude_fixture()
@@ -527,6 +654,9 @@ class ClaudeReviewTests(RotationTestCase):
         (self.home / "codex-worker-log.jsonl").write_text(
             "".join(json.dumps(row) + "\n" for row in rows))
         report = json.loads(self.cli("report", "--json"))
+        task = next(task for task in report["tasks"] if task["slug"] == "claude-report")
+        self.assertEqual(task["reviews"][0]["account"], "default")
+        self.assertEqual(claude["account"], "default")
         self.assertEqual(report["summary"]["reviewers"], {
             "codex": {"reviews": 1, "cost_usd": 0}, "claude": {"reviews": 1, "cost_usd": 0.125}})
         text = self.cli("report")

@@ -9,7 +9,7 @@ import subprocess
 import threading
 from pathlib import Path
 
-from . import clock, config, procs, result_schema, task_state
+from . import claude_accounts, clock, config, procs, result_schema, task_state
 
 
 def worktree_snapshot(st):
@@ -62,29 +62,7 @@ def numeric(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
-def save_limits(info):
-    """Keep only documented limit fields, never arbitrary stream text."""
-    selected = {}
-    if info.get("status") in ("allowed", "allowed_warning", "rejected"):
-        selected["status"] = info["status"]
-    for key in ("utilization", "resetsAt"):
-        if numeric(info.get(key)):
-            selected[key] = info[key]
-    windows = info.get("unifiedWindows")
-    if isinstance(windows, dict):
-        selected["unifiedWindows"] = {
-            name: {key: window[key] for key in ("utilization", "resetsAt")
-                   if numeric(window.get(key))}
-            for name in ("five_hour", "seven_day")
-            for window in [windows.get(name)] if isinstance(window, dict)}
-    path = config.TASKS / "claude-limits.json"
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(".%s.tmp" % os.getpid())
-    temporary.write_text(json.dumps(selected), encoding="utf-8")
-    temporary.replace(path)
-
-
-def event_result(event, telemetry, token):
+def event_result(event, telemetry, token, account):
     """Decode selected stream fields; return (result, unavailability reason)."""
     if not isinstance(event, dict):
         return None, "invalid JSON output"
@@ -100,7 +78,7 @@ def event_result(event, telemetry, token):
     if kind == "rate_limit_event":
         info = event.get("rate_limit_info")
         if isinstance(info, dict):
-            save_limits(info)
+            claude_accounts.save_limits(account, info)
             if info.get("status") == "rejected":
                 return None, "usage limit"
     if kind != "result":
@@ -129,7 +107,7 @@ def event_result(event, telemetry, token):
     return result, None
 
 
-def run(st, cfg, prompt, stopped):
+def run(st, cfg, prompt, stopped, account):
     """Run one review angle; the caller owns review history and phase telemetry."""
     response = {"outcome": "unavailable", "result": None, "reason": None,
                 "telemetry": {"usage": {}, "cost_usd": None, "session_id": None,
@@ -144,7 +122,7 @@ def run(st, cfg, prompt, stopped):
     settings = cfg["claude"]
     environment = {key: value for key, value in os.environ.items()
                    if not key.startswith(("CLAUDE", "ANTHROPIC"))}
-    environment["CLAUDE_CONFIG_DIR"] = str(Path(settings["config_dir"]).expanduser())
+    environment["CLAUDE_CONFIG_DIR"] = str(Path(account["config_dir"]).expanduser())
     args = [executable, "-p", prompt, "--output-format", "stream-json", "--verbose",
             "--json-schema", json.dumps(result_schema.REVIEW_SCHEMA),
             "--permission-mode", "dontAsk", "--allowedTools", "Read,Grep,Glob,Bash",
@@ -158,7 +136,7 @@ def run(st, cfg, prompt, stopped):
     # task artifact contains the token or the raw output of either process.
     try:
         credential = subprocess.run(
-            ["security", "find-generic-password", "-s", settings["token_keychain"],
+            ["security", "find-generic-password", "-s", account["token_keychain"],
              "-a", os.environ.get("USER", ""), "-w"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
             timeout=config.ACCOUNT_TIMEOUT, env=environment)
@@ -215,7 +193,7 @@ def run(st, cfg, prompt, stopped):
                             response["reason"] = response["reason"] or "invalid JSON output"
                             response["result"] = None
                             continue
-                        result, reason = event_result(event, response["telemetry"], token)
+                        result, reason = event_result(event, response["telemetry"], token, account["name"])
                         if reason is not None:
                             response["reason"] = response["reason"] or reason
                             response["result"] = None

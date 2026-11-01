@@ -10,6 +10,7 @@ Layer 2:
     sandboxing (implemented): workspace filters and sandbox rules.
     notifications (implemented): notification processes and delivery.
     accounts (implemented): account homes, RPC, limits, and availability.
+    claude_accounts (implemented): role-neutral Claude account pool and cached limits.
 Layer 3:
     credit_resets (implemented): credit reset journal and actions.
     threads (implemented): thread messages, rollout files, and handoffs.

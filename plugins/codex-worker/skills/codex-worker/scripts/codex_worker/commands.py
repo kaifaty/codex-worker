@@ -10,7 +10,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import accounts, budgets, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, threads
+from . import accounts, budgets, claude_accounts, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, threads
 
 
 def main_repo(path):
@@ -334,7 +334,7 @@ def cmd_clean(a):
 def cmd_accounts(a):
     cfg = config.accounts_config()
     print_accounts(accounts.snapshots(cfg), cfg)
-    print(accounts.claude_reviewer_line())
+    print("\n".join(accounts.claude_account_lines(cfg)))
 
 
 def print_accounts(infos, cfg):
@@ -403,3 +403,49 @@ def cmd_login(a):
     accounts.prepare_home(account)
     binary = config.codex_binary()
     os.execvpe(binary, [binary, "login"] + ([] if a.browser else ["--device-auth"]), accounts.account_env(account))
+
+
+def cmd_claude_login(a):
+    if not re.fullmatch(r"[a-z0-9-]+", a.name):
+        procs.die("Claude account name must contain only a-z, 0-9 and '-'")
+    config.require_claude()
+    cfg = config.accounts_config()
+    path = config.CODEX_HOME / "codex-worker.json"
+    source = path if path.exists() else config.CODEX_HOME / "claude-accounts.json"
+    settings = json.loads(source.read_text(encoding="utf-8")) if source.exists() else {}
+    configured = settings.get("claude", {})
+    pool = cfg["claude"]["accounts"] if any(
+        key in configured for key in ("accounts", "config_dir", "token_keychain")) else []
+    previous = next((account for account in pool if account["name"] == a.name), None)
+    directory = a.config_dir or (previous["config_dir"] if previous else
+                                 str(Path.home() / ".claude-accounts" / a.name))
+    service = a.keychain or (previous["token_keychain"] if previous else
+                             "codex-worker-claude-" + a.name)
+    directory = str(Path(directory).expanduser().resolve())
+    environment = {key: os.environ[key] for key in ("HOME", "USER", "PATH") if key in os.environ}
+    environment.update(LANG="en_US.UTF-8", CLAUDE_CONFIG_DIR=directory)
+    Path(directory).mkdir(mode=0o700, parents=True, exist_ok=True)
+    # setup-token displays the credential for the person to paste into the
+    # Keychain prompt. Keep both interactive tools off captured command output.
+    try:
+        with open("/dev/tty", "r+b", buffering=0) as terminal:
+            for argv in ([config.claude_binary(), "setup-token"],
+                         ["security", "add-generic-password", "-U", "-s", service,
+                          "-a", os.environ.get("USER", ""), "-w"]):
+                if subprocess.run(argv, env=environment, stdin=terminal,
+                                  stdout=terminal, stderr=terminal).returncode:
+                    procs.die("Claude login failed; account settings were not changed")
+    except OSError:
+        procs.die("Claude login requires a terminal and the Claude CLI and Keychain tools")
+    account = {"name": a.name, "config_dir": directory, "token_keychain": service}
+    if previous is None:
+        pool.append(account)
+    else:
+        pool[pool.index(previous)] = account
+    settings.setdefault("claude", {})["accounts"] = pool
+    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temporary = path.with_suffix(f".{os.getpid()}.tmp")
+    temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(path)
+    claude_accounts.clear_limits(a.name)
+    print(f"Claude account {a.name} saved")

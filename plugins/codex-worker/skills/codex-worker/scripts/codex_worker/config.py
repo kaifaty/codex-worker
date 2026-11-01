@@ -140,15 +140,28 @@ def accounts_config():
     claude = cfg["claude"]
     if not isinstance(claude, dict):
         procs.die("claude must be an object")
-    claude.setdefault("config_dir", "~/.claude-accounts/reviewer")
-    claude.setdefault("token_keychain", "codex-worker-claude-reviewer")
+    if "accounts" not in claude:
+        claude["accounts"] = [{
+            "name": "default",
+            "config_dir": claude.get("config_dir", "~/.claude-accounts/reviewer"),
+            "token_keychain": claude.get("token_keychain", "codex-worker-claude-reviewer")}]
+    if not isinstance(claude["accounts"], list) or not claude["accounts"]:
+        procs.die("claude.accounts must be a nonempty list")
+    claude_names = set()
+    for account in claude["accounts"]:
+        if not isinstance(account, dict):
+            procs.die("each Claude account must be an object with name, config_dir and token_keychain")
+        name = account.get("name")
+        if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9-]+", name) or name in claude_names:
+            procs.die(f"invalid or duplicate Claude account name: {name!r}")
+        claude_names.add(name)
+        for key in ("config_dir", "token_keychain"):
+            if not isinstance(account.get(key), str) or not account[key]:
+                procs.die("claude.accounts." + key + " must be a nonempty string")
+        account["config_dir"] = str(Path(account["config_dir"]).expanduser().resolve())
     claude.setdefault("model", None)
     claude.setdefault("effort", None)
     claude.setdefault("max_turns", 40)
-    for key in ("config_dir", "token_keychain"):
-        if not isinstance(claude[key], str) or not claude[key]:
-            procs.die("claude." + key + " must be a nonempty string")
-    claude["config_dir"] = str(Path(claude["config_dir"]).expanduser().resolve())
     for key in ("model", "effort"):
         if claude[key] is not None and (not isinstance(claude[key], str) or not claude[key]):
             procs.die("claude." + key + " must be a nonempty string or null")

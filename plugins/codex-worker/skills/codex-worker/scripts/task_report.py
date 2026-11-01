@@ -127,7 +127,7 @@ def _task(repo, slug, created):
             "last_verdict": None, "outcome": None, "result_status": None,
             "auto_fix_stop": None, "ci": None,
             "max_task_weekly_percent": None, "budget_stop": None,
-            "turn_stops": [],
+            "turn_stops": [], "reviews": [],
             "_reviews": {}, "_turns": [], "_latest_turn": 0}
 
 
@@ -243,6 +243,10 @@ def _accumulate_checks_and_reviews(row, task, totals):
             task["outcome"] = outcome
     if phase == "review":
         reviewer = "claude" if row.get("reviewer") == "claude" else "codex"
+        task["reviews"].append({"reviewer": reviewer, "account": _identifier(row.get("account")),
+                                "turn": _round(row.get("turn")), "round": _round(row.get("round")),
+                                "angle": _identifier(row.get("angle")),
+                                "outcome": _identifier(row.get("outcome"))})
         totals["reviewers"][reviewer]["reviews"] += 1
         totals["reviewers"][reviewer]["cost_usd"] += _number(row.get("cost_usd")) or 0
         group = (_round(row.get("turn")), _round(row.get("round")))

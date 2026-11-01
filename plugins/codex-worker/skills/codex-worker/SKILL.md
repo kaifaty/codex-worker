@@ -99,7 +99,7 @@ If a command prints a codex-worker version warning, set `T` again using the path
 Run every command below as `python3 -I "$T" …`. The CLI is resolved from `CODEX_TASK_CODEX`, then the
 ChatGPT.app bundle if present, then `codex` on `PATH`. Model and reasoning defaults come from the user's
 Codex configuration; `--effort` overrides reasoning effort for a task.
-Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolated Anthropic subscription; Codex still implements and fixes ([setup](references/accounts.md#claude-reviewer-account)).
+Use `--reviewer claude` on `start`, `say`, or `review` for reviews from the isolated Claude account pool; Codex still implements and fixes ([setup](references/accounts.md#claude-account-pool)).
 
 | Step | Command arguments |
 |---|---|
@@ -112,7 +112,7 @@ Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolate
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
 | Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` |
 | Accounts | `accounts` — logins, plans, limits, reset times and credits; `reset-credit <account> [--credit ID] [--yes]` |
-| Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser |
+| Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` adds an isolated Claude CLI account with a token entered at the Keychain prompt |
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
 | Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock` |
 

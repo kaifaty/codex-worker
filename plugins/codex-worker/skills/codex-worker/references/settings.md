@@ -19,17 +19,20 @@ that file is absent.
 | `soft_switch_at` | value of `switch_at` | number in `(0, switch_at]`; prefer accounts below this usage percentage in both windows, then use the reserve up to `switch_at`; see [accounts.md](accounts.md#rotation) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
 
-## Claude reviewer
+## Claude accounts
 
-`--reviewer claude` uses an isolated Claude Code CLI account for reviews. Work and fix rounds still
-run in Codex. Settings belong in the `claude` object:
+`claude.accounts` configures a pool of isolated Claude Code CLI accounts without assigned roles.
+`--reviewer claude` selects from it before each review or angle; work and fix rounds still run in
+Codex. Settings belong in the `claude` object:
 
 ```json
 {
   "reviewer": "claude",
   "claude": {
-    "config_dir": "~/.claude-accounts/reviewer",
-    "token_keychain": "codex-worker-claude-reviewer",
+    "accounts": [
+      {"name": "first", "config_dir": "~/.claude-accounts/first", "token_keychain": "codex-worker-claude-first"},
+      {"name": "second", "config_dir": "~/.claude-accounts/second", "token_keychain": "codex-worker-claude-second"}
+    ],
     "max_turns": 40
   }
 }
@@ -37,15 +40,22 @@ run in Codex. Settings belong in the `claude` object:
 
 | `claude` key | Default | Effect |
 |---|---|---|
-| `config_dir` | `"~/.claude-accounts/reviewer"` | isolated `CLAUDE_CONFIG_DIR` |
-| `token_keychain` | `"codex-worker-claude-reviewer"` | macOS Keychain service; account is `$USER` |
-| `model` | omitted | optional Claude `--model` |
-| `effort` | omitted | optional Claude `--effort`; independent of Codex `--effort` |
-| `max_turns` | `40` | positive integer passed as Claude `--max-turns` |
+| `accounts` | legacy account named `default` | nonempty list of accounts; each has a unique `name` using only `[a-z0-9-]`, an isolated `config_dir` and a `token_keychain` service for `$USER` |
+| `config_dir` | `"~/.claude-accounts/reviewer"` | legacy isolated `CLAUDE_CONFIG_DIR`, used when `accounts` is absent |
+| `token_keychain` | `"codex-worker-claude-reviewer"` | legacy macOS Keychain service, used when `accounts` is absent |
+| `model` | omitted | optional Claude `--model`, shared by all accounts |
+| `effort` | omitted | optional Claude `--effort`, shared by all accounts and independent of Codex `--effort` |
+| `max_turns` | `40` | positive integer passed as Claude `--max-turns`, shared by all accounts |
+
+The top-level `soft_switch_at` and `switch_at` thresholds also apply to Claude's five-hour and
+seven-day windows. Below-soft accounts are preferred, then below-hard accounts, with the earliest
+seven-day reset first in each group. Unknown limits count as available. Legacy settings, including
+a missing `claude` object, remain a one-account pool named `default`.
 
 The executable is `CODEX_TASK_CLAUDE`, or `claude` on `PATH`. `start` and `review` fail before
-launching when Claude is selected but its CLI is missing. See [accounts.md](accounts.md#claude-reviewer-account)
-for token setup and [review-cycle.md](review-cycle.md#review-provider) for fallback behavior.
+launching when Claude is selected but its CLI is missing. See [accounts.md](accounts.md#claude-account-pool)
+for `claude-login` and token setup, and [review-cycle.md](review-cycle.md#review-provider) for retries
+and fallback behavior.
 
 ## Task CI options
 

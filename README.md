@@ -150,8 +150,9 @@ Run all commands as `python3 -I "$T" <command>`.
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` | Summarize persistent costs and outcomes by task, account, and period (default: seven days). |
-| `accounts` | Show login, plan, limits, reset times, credits, and availability in English. |
-| `login <name> [--browser]` | Have the human sign in to an account; writes `codex-worker.json`. |
+| `accounts` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account. |
+| `login <name> [--browser]` | Have the human sign in to a Codex account; writes `codex-worker.json`. |
+| `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human add an isolated Claude CLI account and store its token at the Keychain prompt. |
 | `stop <slug>` | Interrupt the task; send the next instructions with `say`. |
 | `clean <slug> [--keep-branch]` | Remove the worktree and task logs and archive threads; optionally retain the local branch. |
 
@@ -392,6 +393,46 @@ into the same ChatGPT account share limits and are not separate subscriptions.
 `use_reset_credits` defaults to `false`; enable it to spend one free reset before sleeping when the natural reset is more than `reset_credit_min_hours` (default `12`) away.
 `reset-credit <account> [--credit ID]` previews the earliest-expiring reset; add `--yes` to consume it and show the RPC response and refreshed limits.
 Authentication errors get one retry, then rotation; `needs login` means run `login <account>` to restore that account.
+
+### Claude account pool
+
+Use `--reviewer claude` on `start`, `say`, or `review` to review through a pool of isolated Claude
+Code CLI accounts; implementation and fixes remain in Codex. The human adds each subscription with
+`python3 -I "$T" claude-login first`, which runs isolated `claude setup-token`, prompts for the token
+through macOS Keychain, and appends to `claude.accounts` in `~/.codex/codex-worker.json`. Defaults are
+`~/.claude-accounts/first` and the `codex-worker-claude-first` Keychain service. Override them with
+`--config-dir DIR` and `--keychain SERVICE`. Tokens stay out of arguments, settings, state and logs.
+
+```json
+{
+  "claude": {
+    "accounts": [
+      {"name": "first", "config_dir": "~/.claude-accounts/first", "token_keychain": "codex-worker-claude-first"},
+      {"name": "second", "config_dir": "~/.claude-accounts/second", "token_keychain": "codex-worker-claude-second"}
+    ],
+    "max_turns": 40
+  }
+}
+```
+
+Names use only lowercase letters, digits and hyphens and are unique. The pool has no assigned roles;
+review is its first consumer. Legacy `claude.config_dir` / `claude.token_keychain` settings and the
+original defaults still form one account named `default`. `model`, `effort` and `max_turns` remain
+shared settings under `claude`.
+
+Before each review or angle, accounts below `soft_switch_at` in both the five-hour and seven-day
+windows come first, then those below `switch_at`; each group prefers the earliest seven-day reset.
+Unknown limits count as available. Angles in one review prefer different available accounts. A
+rejected rate limit or 401/403 marks the account unavailable until reset and retries on the next
+Claude account. `wait` prints `== claude account <a> limited until <time>; review by <b>`. Only when
+no Claude account is available does that failure fall back to Codex; timeout and stop behavior stays
+the same.
+
+`accounts` shows each account's name, both window percentages and resets, and its limit marker.
+`claude-limits.json` stores limits by name; an old unnamed cache belongs to `default`. Review state,
+journal rows and `report --json` include the Claude account name. See
+[account setup](plugins/codex-worker/skills/codex-worker/references/accounts.md#claude-account-pool) and
+[settings](plugins/codex-worker/skills/codex-worker/references/settings.md#claude-accounts).
 
 ## Optional desktop-app notifications
 

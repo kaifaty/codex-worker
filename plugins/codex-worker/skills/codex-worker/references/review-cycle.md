@@ -38,9 +38,13 @@ merge the base outside the sandbox before continuing with `say`.
 overridden. `--reviewer` selects the provider; `--review` still enables automatic review.
 
 With `--reviewer claude`, each review uses a fresh Claude Code CLI process with the same review prompt
-and result schema. Work and fix rounds remain in Codex. The reviewer uses its isolated Anthropic
-subscription; its usage does not add to the task's Codex weekly percentage. `wait` prints
-`== review by claude (N min)` or `== review angle X by claude (N min)`.
+and result schema. Work and fix rounds remain in Codex. Before each review or angle, the supervisor
+selects an account from the role-neutral `claude.accounts` pool: below `soft_switch_at` in both the
+five-hour and seven-day windows first, then below `switch_at`, ordered by earliest seven-day reset.
+Unknown limits count as available. Angles in the same review prefer different available accounts.
+Claude usage does not add to the task's Codex weekly percentage. Review state, journal rows,
+`report --json`, and `wait` identify the selected Claude account. `wait` prints
+`== review by claude/<name> (N min)` or `== review angle X by claude/<name> (N min)`.
 
 The supervisor removes inherited `CLAUDE*` and `ANTHROPIC*` environment variables, reads the reviewer
 token from macOS Keychain immediately before launch, and supplies the isolated config directory and
@@ -50,14 +54,18 @@ and compares `HEAD`, `git status --porcelain`, and raw contents of tracked and n
 files before and after review: any change fails with `reviewer modified the worktree`, preserving
 the worktree for inspection.
 
-A rejected rate limit, 401/403 authentication failure, missing executable during the cycle, error
-result, or invalid structured output falls back to an ordinary Codex review. `wait` reports
-`== reviewer claude unavailable: <reason>; review by codex`. Review timeouts, `stop`, and external
+A rejected rate limit or 401/403 authentication failure marks the account unavailable until its
+reported reset and repeats the same review on the next available Claude account. An unreported
+reset is shown as `unknown`. `wait` prints
+`== claude account <a> limited until <time>; review by <b>` once for that switch. Only when no Claude
+account is available does this failure fall back to an ordinary Codex review. A missing executable
+during the cycle, error result, or invalid structured output retains the immediate Codex fallback;
+`wait` reports `== reviewer claude unavailable: <reason>; review by codex`. Review timeouts, `stop`, and external
 signals keep their usual outcomes and do not fall back. Cancellation sends SIGINT to Claude's
 process group, waits up to 10 seconds, then sends SIGTERM if needed.
 
-Account setup is in [accounts.md](accounts.md#claude-reviewer-account); optional model, effort and turn
-limits are in [settings.md](settings.md#claude-reviewer).
+Account setup is in [accounts.md](accounts.md#claude-account-pool); optional model, effort and turn
+limits are in [settings.md](settings.md#claude-accounts).
 
 ## Angles
 
