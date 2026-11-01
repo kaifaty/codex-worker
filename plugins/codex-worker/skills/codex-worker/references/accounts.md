@@ -52,7 +52,9 @@ unique. Re-running the command for an existing name refreshes its login instead 
 explicit path or service overrides update that entry after successful setup. Adding to legacy settings
 preserves their account as `default`, including when its paths come entirely from defaults.
 Concurrent logins merge their account entries into the latest settings after sign-in finishes.
-Both sign-in and the Keychain prompt use the human's terminal;
+Both sign-in and the Keychain prompt use the human's terminal, opened by its device path from
+stdin, stdout or stderr (`/dev/tty` only as a fallback: macOS kqueue rejects it, and the Claude CLI
+watches its input with kqueue);
 the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
 
 For example:

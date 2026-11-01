@@ -59,6 +59,7 @@ class AccountAuthTests(RotationTestCase):
 
         custom = self.root / "custom-claude"
         with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.commands.os, "ttyname", return_value="/dev/fixture-tty"), \
                 mock.patch.object(worker.commands, "open", create=True,
                                   side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)) as opened_terminal, \
                 mock.patch.object(worker.commands.subprocess, "run", wraps=worker.commands.subprocess.run) as launched, \
@@ -96,7 +97,7 @@ class AccountAuthTests(RotationTestCase):
                 self.assertNotIn("ANTHROPIC_API_KEY", row["env"])
                 self.assertNotIn(token, json.dumps(row))
         self.assertNotIn("second", worker.claude_accounts.read_limits())
-        self.assertEqual([call.args[0] for call in opened_terminal.call_args_list], ["/dev/tty"] * 3)
+        self.assertEqual([call.args[0] for call in opened_terminal.call_args_list], ["/dev/fixture-tty"] * 3)
         for invocation in launched.call_args_list:
             self.assertIs(invocation.kwargs["stdin"], invocation.kwargs["stdout"])
             self.assertIs(invocation.kwargs["stdin"], invocation.kwargs["stderr"])
@@ -120,6 +121,19 @@ class AccountAuthTests(RotationTestCase):
                  "token_keychain": "codex-worker-claude-reviewer"},
                 {"name": "second", "config_dir": str(self.root / ".claude-accounts" / "second"),
                  "token_keychain": "codex-worker-claude-second"}]})
+
+    def test_claude_login_opens_the_terminal_by_its_device_path(self):
+        worker = self.worker()
+
+        def ttyname(descriptor):
+            if descriptor == 0:
+                raise OSError(25, "Inappropriate ioctl for device")
+            return f"/dev/fixture-tty{descriptor}"
+
+        with mock.patch.object(worker.commands.os, "ttyname", side_effect=ttyname):
+            self.assertEqual(worker.commands.terminal_device(), "/dev/fixture-tty1")
+        with mock.patch.object(worker.commands.os, "ttyname", side_effect=OSError(25, "not a terminal")):
+            self.assertEqual(worker.commands.terminal_device(), "/dev/tty")
 
     def test_concurrent_claude_logins_merge_the_latest_settings_after_interaction(self):
         worker = self.worker()
