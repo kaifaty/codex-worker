@@ -84,6 +84,60 @@ class TelemetryReportTests(RotationTestCase):
         self.assertEqual([(row["model"], row["reasoning_effort"]) for row in rows[-2:]],
                          [("native-session-model", "high")] * 2)
 
+        settings.write_text('model = "configured-work"\nreview_model = "configured-review"\n')
+        (self.home / "exec-count").unlink()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.review_result(False) if review else self.work_result()}
+            for review in (False, True, False, True, False, True, True, False, True, True, True)])
+        count = len(self.invocations())
+        self.start("model-choice", "--model", "Task.1_a", "--review-model", "Review.2_b",
+                   "--effort", "high", "--review")
+        output = self.wait("model-choice")
+        for text in (output, self.cli("status", "model-choice")):
+            self.assertIn("model Task.1_a  effort high", text)
+        self.assertEqual((self.state("model-choice")["task_model"],
+                          self.state("model-choice")["review_model"]), ("Task.1_a", "Review.2_b"))
+        self.cli("say", "model-choice", "Keep the saved models.", "--review")
+        self.wait("model-choice")
+        self.cli("say", "model-choice", "Replace both models.", "--model", "Fast-2",
+                 "--review-model", "Strong-2", "--review")
+        output = self.wait("model-choice")
+        self.assertIn("model Fast-2  effort high", output)
+        self.assertEqual((self.state("model-choice")["task_model"],
+                          self.state("model-choice")["review_model"]), ("Fast-2", "Strong-2"))
+        self.cli("review", "model-choice", "--review-model", "Strong-3")
+        self.wait("model-choice")
+        self.cli("say", "model-choice", "Use the configuration again.", "--model", "default",
+                 "--review-model", "default", "--review")
+        output = self.wait("model-choice")
+        self.assertIsNone(self.state("model-choice")["task_model"])
+        self.assertIsNone(self.state("model-choice")["review_model"])
+        for text in (output, self.cli("status", "model-choice")):
+            self.assertNotIn("model Fast-2  effort high", text)
+        self.cli("review", "model-choice", "--review-model", "Strong-4")
+        self.wait("model-choice")
+        self.cli("review", "model-choice", "--review-model", "default")
+        self.wait("model-choice")
+        self.assertIsNone(self.state("model-choice")["review_model"])
+        executions = self.invocations()[count:]
+        expected = ("Task.1_a", "Review.2_b", "Task.1_a", "Review.2_b", "Fast-2", "Strong-2",
+                    "Strong-3", None, None, "Strong-4", None)
+        self.assertEqual(len(executions), len(expected))
+        for execution, model in zip(executions, expected):
+            with self.subTest(model=model, argv=execution["argv"]):
+                overrides = [arg for arg in execution["argv"] if arg.startswith(("model=", "review_model="))]
+                self.assertEqual(overrides, ([f'model="{model}"', f'review_model="{model}"']
+                                             if execution["review"] else [f'model="{model}"'])
+                                 if model else [])
+        for args in (("start", "bad-model", "--brief", str(self.brief), "--model", "bad/name"),
+                     ("say", "model-choice", "Continue.", "--model", ""),
+                     ("review", "model-choice", "--review-model", "x" * 65)):
+            result = subprocess.run([PYTHON, "-I", str(SCRIPT), *args], cwd=self.repo,
+                                    env=self.env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+            self.assertIn("model must be 1-64 characters", result.stderr)
+        self.assertEqual(len(self.invocations()), count + len(expected))
+
     def test_telemetry_records_work_checks_reviews_and_fix_with_rollout_deltas(self):
         self.configure(language="en")
         (self.home / "config.toml").write_text('model = "fake-model"\nreview_model = "review-model"\n')

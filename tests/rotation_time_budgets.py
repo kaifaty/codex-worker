@@ -21,6 +21,7 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "hold", "spawn_child": True},
             {"mode": "complete", "reply": result, "write_files": {"wrapped.txt": "saved\n"}}])
         self.start("time-cap", "--max-minutes", "90", "--review", "--fix-rounds", "2",
+                   "--model", "checkpoint-model",
                    "--check", "test -f wrapped.txt && printf 'checked\\n' > cap-check")
         self.until(lambda: any(event.get("command") == "exec-child" for event in self.trace()))
         child = next(event["child_pid"] for event in self.trace() if event.get("command") == "exec-child")
@@ -33,6 +34,8 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual((Path(state["worktree"]) / "cap-check").read_text(), "checked\n")
         executions = self.invocations()
         self.assertEqual(len(executions), 2)
+        for execution in executions:
+            self.assertIn('model="checkpoint-model"', execution["argv"])
         self.assertTrue(executions[1]["resume"])
         self.assertEqual(executions[1]["thread"], executions[0]["thread"])
         self.assert_output_schema(executions[1], "time-cap")
@@ -472,7 +475,7 @@ class TimeBudgetTests(RotationTestCase):
             {"mode": "complete", "reply": work},
             {"mode": "hold"}, {"mode": "complete", "reply": checkpoint},
             {"mode": "hold"}, {"mode": "complete", "reply": "Scouting checkpoint"}])
-        self.start("cap-review-default", "--review")
+        self.start("cap-review-default", "--review", "--model", "work-model", "--review-model", "checkpoint-review")
         review_output = self.wait("cap-review-default", timeout=12)
         state = self.state("cap-review-default")
         self.assertEqual(state["outcome"], "budget_exhausted")
@@ -481,6 +484,9 @@ class TimeBudgetTests(RotationTestCase):
         self.assertEqual(state["reviews"][-1]["result"], checkpoint)
         executions = self.invocations()
         self.assertEqual(len(executions), 3)
+        self.assertIn('model="work-model"', executions[0]["argv"])
+        for execution in executions[1:]:
+            self.assertIn('model="checkpoint-review"', execution["argv"])
         self.assertTrue(executions[1]["review"])
         self.assertTrue(executions[2]["resume"])
         self.assertEqual(executions[2]["thread"], executions[1]["thread"])

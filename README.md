@@ -26,6 +26,12 @@ Install [Codex CLI](https://github.com/openai/codex) if needed (`npm install -g 
 `codex login`. The worker uses your existing Codex model, reasoning, and permission settings. There is
 no required model or reasoning level.
 
+Choose a model per task with `start --model M`, and a separate Codex review model with
+`--review-model M` on `start`, `say`, or `review`. Follow-ups inherit both choices; `say --model default`
+or `--review-model default` restores the corresponding Codex configuration default. Before choosing,
+use `accounts --json` to read account limits as structured data. See
+[task models and account JSON](plugins/codex-worker/skills/codex-worker/references/settings.md#task-models).
+
 The worker finds Codex in this order:
 
 1. `CODEX_TASK_CODEX`, if set to the executable to use.
@@ -142,15 +148,15 @@ Run all commands as `python3 -I "$T" <command>`.
 
 | Command | Purpose |
 |---|---|
-| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--no-push] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--max-weekly P] [--review [--review-angles LIST] [--fix-rounds N]] [--ci] [--ci-rounds N] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths; `--no-push` keeps commits local and disables branch and PR publication throughout the task. |
+| `start <slug> --brief FILE [--repo DIR] [--base origin/BRANCH] [--no-push] [--model M] [--review-model M] [--effort E] [--sandbox off\|workspace] [--max-minutes M] [--max-weekly P] [--review [--review-angles LIST] [--fix-rounds N]] [--ci] [--ci-rounds N] [--check CMD] [--guard GLOB] [--base-check]` | Create a worktree and start implementation; `--brief -` reads stdin; repeat `--guard` for extra protected paths; `--no-push` keeps commits local and disables branch and PR publication throughout the task. |
 | `scout <slug> "question"` or `scout <slug> --file FILE [--repo DIR] [--effort E]` | Read the existing directory and return a concise report with source references. |
 | `wait <slug> [--timeout SEC] [--through-sleep]` | Wait for the turn, show its report and changes; optionally wait through limit resets. |
-| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--effort E`, `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N`, change saved CI with `--ci` / `--no-ci` or `--ci-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
-| `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` | Run the first review in a fresh Codex thread while the task is idle. |
+| `say <slug> "message"` or `say <slug> --file FILE` | Follow up while idle; set `--model M`, `--review-model M`, `--effort E`, `--max-minutes M` or `--max-weekly P`, add `--review [--review-angles LIST] --fix-rounds N`, change saved CI with `--ci` / `--no-ci` or `--ci-rounds N`, replace the check with `--check CMD`, remove it with `--no-check`, or disable base tests with `--no-base-check`. |
+| `review <slug> [--review-model M] [--effort E] [--review-angles LIST] [--max-weekly P]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model] [--json]` | Summarize persistent costs and outcomes (default: seven days); combine grouping dimensions with commas. |
-| `accounts` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account. |
+| `accounts [--json]` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account; `--json` emits one object with `codex`, `claude`, and `thresholds`. |
 | `login <name> [--browser]` | Have the human sign in to a Codex account; writes `codex-worker.json`. |
 | `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human add an isolated Claude CLI account and store its token at the Keychain prompt. |
 | `stop <slug>` | Interrupt the task; send the next instructions with `say`. |

@@ -187,6 +187,11 @@ def monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup,
         schema = last.parent / ("review-schema.json" if reviewing else "result-schema.json")
         schema.write_text(json.dumps(result_schema.REVIEW_SCHEMA if reviewing else result_schema.RESULT_SCHEMA, indent=2), encoding="utf-8")
         args += ["--output-schema", str(schema)]
+    model = st.get("review_model" if reviewing else "task_model")
+    if model:
+        args += ["-c", f'model="{model}"']
+        if args[1:3] == ["exec", "review"]:
+            args += ["-c", f'review_model="{model}"']
     return args + threads.effort_args(effort) + [prompt], prompt
 
 

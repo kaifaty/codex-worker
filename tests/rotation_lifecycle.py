@@ -809,11 +809,13 @@ worker.notifications.reap_notifications = reap
         fixture["review_prompt_conflict"] = True
         (self.home / "fixture.json").write_text(json.dumps(fixture))
         working = self.state("review-fallback")
-        self.cli("review", "review-fallback")
+        self.cli("review", "review-fallback", "--review-model", "fallback-model")
         output = self.wait("review-fallback")
         executions = self.invocations()
         self.assertEqual(len(executions), 3)
         rejected, fallback = executions[1:]
+        for execution in (rejected, fallback):
+            self.assertIn('model="fallback-model"', execution["argv"])
         self.assertEqual(rejected["mode"], "review_prompt_conflict")
         self.assertFalse(rejected["thread"])
         self.assertFalse(fallback["review"])
@@ -1395,6 +1397,21 @@ worker.notifications.reap_notifications = reap
         self.account(self.other, "A", self.reset)
         config_path = self.home / "claude-accounts.json"
         config = json.loads(config_path.read_text())
+        token = "fixture-private-account-token"
+        claude_home = self.root / "claude-credentials"
+        config.update(soft_switch_at=80, claude={"accounts": [
+            {"name": "reviewer", "config_dir": str(claude_home), "token_keychain": token},
+            {"name": "unknown", "config_dir": str(self.root / "unknown-credentials"),
+             "token_keychain": "fixture-unknown-service"}]})
+        fixture_path = self.home / "fixture.json"
+        fixture = json.loads(fixture_path.read_text())
+        fixture["account"]["access_token"] = token
+        fixture["credits"]["access_token"] = token
+        expires = self.reset + 86400
+        fixture["rateLimitResetCredits"] = {"availableCount": 2, "credits": [
+            {"id": token, "status": "available", "resetType": "codexRateLimits", "expiresAt": expires},
+            {"id": "fixture-no-expiry", "status": "available", "resetType": "codexRateLimits"}]}
+        fixture_path.write_text(json.dumps(fixture))
         for name, changes in (("logged-out", {"account": None}),
                               ("rpc-error", {"rpc_error": True})):
             home = self.root / name
@@ -1404,16 +1421,52 @@ worker.notifications.reap_notifications = reap
             (home / "fixture.json").write_text(json.dumps(fixture))
             config["accounts"].append({"name": name, "home": str(home)})
         config_path.write_text(json.dumps(config))
+        worker = self.worker()
+        worker.config.TASKS.mkdir(parents=True)
+        (worker.config.TASKS / "claude-limits.json").write_text(json.dumps({
+            "reviewer": {"unifiedWindows": {
+                "five_hour": {"utilization": 0.25, "resetsAt": self.reset - 1800},
+                "seven_day": {"utilization": 0.8, "resetsAt": self.reset}},
+                "limited_until": self.reset, "token_unavailable": True, "access_token": token}}))
         output = self.cli("accounts")
-        rows = {line.split("\t")[0]: line for line in output.splitlines()[1:]}
-        self.assertIn("a@example.test", rows["main"])
-        self.assertIn("pro", rows["main"])
-        self.assertIn("123.45", rows["main"])
-        self.assertIn("available", rows["main"])
-        self.assertIn("same account as main", rows["second"])
-        self.assertIn("not logged in", rows["logged-out"])
-        self.assertIn("unknown", rows["rpc-error"])
-        self.assertNotIn("not logged in", rows["rpc-error"])
+        local_time = worker.config.local_time
+        self.assertEqual(output, "\n".join([
+            "soft_switch_at: 80% (switch_at: 99%)",
+            "NAME\tEMAIL\tPLAN\tWEEKLY %\tRESET (LOCAL)\tCREDITS\tRESETS\tSTATUS",
+            "main\ta@example.test\tpro\t10\t" + local_time(self.reset) +
+            "\t123.45\t2 (exp " + local_time(expires).split()[0] + ")\tavailable",
+            "second\ta@example.test\tpro\t10\t" + local_time(self.reset) + "\t123.45\t0\tsame account as main",
+            "logged-out\t—\t—\t—\tunknown\t0\t0\tnot logged in",
+            "rpc-error\t—\t—\t—\tunknown\t0\t0\tunknown (rpc error: " +
+            "{'code': -32000, 'message': 'fixture account unavailable'})",
+            "claude reviewer: 5h 25% (reset " + local_time(self.reset - 1800) +
+            "); 7d 80% (reset " + local_time(self.reset) + "); limited until " + local_time(self.reset),
+            "claude unknown: 5h unknown (reset unknown); 7d unknown (reset unknown)", ""]))
+        encoded = self.cli("accounts", "--json")
+        report = json.loads(encoded)
+        iso_time = lambda stamp: datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        main = {"name": "main", "plan": "pro",
+                "primary": {"used_percent": 10, "window_minutes": 10080, "resets_at": iso_time(self.reset)},
+                "secondary": {"used_percent": 2, "window_minutes": 300, "resets_at": iso_time(self.reset - 1800)},
+                "credits": {"balance": "123.45", "unlimited": False, "has_credits": True},
+                "reset_credits": {"available_count": 2, "expires_at": [iso_time(expires), None]},
+                "status": "available"}
+        missing = {"plan": None, "primary": None, "secondary": None,
+                   "credits": {"balance": None, "unlimited": None, "has_credits": None},
+                   "reset_credits": {"available_count": None, "expires_at": None}}
+        self.assertEqual(report, {
+            "codex": [main, dict(main, name="second", status="duplicate",
+                                 reset_credits={"available_count": 0, "expires_at": []}),
+                      dict(missing, name="logged-out", status="not_logged_in"),
+                      dict(missing, name="rpc-error", status=None)],
+            "claude": [{"name": "reviewer", "five_hour": {"used_percent": 25, "resets_at": iso_time(self.reset - 1800)},
+                        "seven_day": {"used_percent": 80, "resets_at": iso_time(self.reset)},
+                        "limited_until": iso_time(self.reset), "token_unavailable": True},
+                       {"name": "unknown", "five_hour": None, "seven_day": None,
+                        "limited_until": None, "token_unavailable": None}],
+            "thresholds": {"soft_switch_at": 80, "switch_at": 99}})
+        for private in (token, str(self.home), str(self.other), str(claude_home)):
+            self.assertNotIn(private, encoded)
         self.assertFalse(self.invocations())
 
     def test_account_read_distinguishes_explicit_logout_from_rpc_errors_and_timeouts(self):

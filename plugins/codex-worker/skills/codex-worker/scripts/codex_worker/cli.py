@@ -1,16 +1,16 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--effort E] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--effort E] [--task-type LABEL] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
-  codex_task.py review <slug> [--effort E] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
+  codex_task.py say <slug> "message" | --file FILE [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py review <slug> [--effort E] [--review-model M] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
   codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model] [--json]
   codex_task.py stop <slug>                           interrupt without rotating
   codex_task.py clean <slug> [--keep-branch]          remove worktree, archive all threads
-  codex_task.py accounts                             read account limits and login status
+  codex_task.py accounts [--json]                    read account limits and login status
   codex_task.py reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
   codex_task.py claude-login <name> [--config-dir DIR] [--keychain SERVICE]  add/sign in to a Claude account
@@ -43,6 +43,12 @@ HELP_TEXT = __doc__
 def task_type(value):
     if not re.fullmatch(r"[a-z0-9-]{1,32}", value):
         raise argparse.ArgumentTypeError("task type must be 1-32 characters of a-z, 0-9 and '-'")
+    return value
+
+
+def model_name(value):
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", value):
+        raise argparse.ArgumentTypeError("model must be 1-64 characters of A-Z, a-z, 0-9, '.', '_' and '-'")
     return value
 
 
@@ -119,6 +125,12 @@ OPTION_REGISTRY = (
      "synopsis": "[--effort E]",
      "commands": {"start": {"help": "default: model_reasoning_effort from ~/.codex/config.toml"},
                   "say": {}, "review": {}}},
+    {"names": ("--model",),
+     "argparse": {"type": model_name, "metavar": "M", "help": "Codex work model; default clears the saved override"},
+     "synopsis": "[--model M]", "commands": {"start": {}, "say": {}}},
+    {"names": ("--review-model",),
+     "argparse": {"type": model_name, "metavar": "M", "help": "Codex review model; default clears the saved override"},
+     "synopsis": "[--review-model M]", "commands": {"start": {}, "say": {}, "review": {}}},
     {"names": ("--task-type",), "argparse": {"type": task_type, "metavar": "LABEL"},
      "synopsis": "[--task-type LABEL]",
      "commands": {"start": {"help": "optional task label for telemetry"},
@@ -283,7 +295,8 @@ def main():
     s = sub.add_parser("clean")
     s.add_argument("slug")
     s.add_argument("--keep-branch", action="store_true")
-    sub.add_parser("accounts", help="read each account's limits (no task is started)")
+    s = sub.add_parser("accounts", help="read each account's limits (no task is started)")
+    s.add_argument("--json", action="store_true", help="print account limits as JSON")
     s = sub.add_parser("reset-credit", help="preview or consume a free limit reset")
     s.add_argument("account")
     s.add_argument("--credit", help="choose an available reset by ID")

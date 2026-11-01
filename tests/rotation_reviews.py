@@ -531,7 +531,8 @@ class ReviewFixTests(RotationTestCase):
             {"mode": "complete", "reply": clean},
             {"mode": "complete", "reply": clean}])
 
-        self.start("angles-fix", "--review-angles", "correctness,concurrency,tests", "--fix-rounds", "1")
+        self.start("angles-fix", "--review-angles", "correctness,concurrency,tests", "--fix-rounds", "1",
+                   "--model", "work-model", "--review-model", "angle-model")
         self.wait("angles-fix")
         state = self.state("angles-fix")
         self.assertEqual([entry["angle"] for entry in state["reviews"]],
@@ -543,6 +544,11 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(state["review_result"]["verdict"], "clean")
         executions = self.invocations()
         self.assertEqual(len(executions), 7)
+        for index, execution in enumerate(executions):
+            self.assertIn('model="work-model"' if index in (0, 4) else 'model="angle-model"',
+                          execution["argv"])
+            if execution["review"]:
+                self.assertIn('review_model="angle-model"', execution["argv"])
         self.assertTrue(executions[4]["resume"])
         self.assertEqual(executions[4]["thread"], executions[0]["thread"])
         self.assertIn("F1", executions[4]["prompt"])
