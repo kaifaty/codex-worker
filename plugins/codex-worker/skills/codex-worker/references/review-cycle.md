@@ -62,8 +62,10 @@ reset is shown as `unknown`. `wait` prints
 `== claude account <a> limited until <time>; review by <b>` once for that switch. Only when no Claude
 account is available does this failure fall back to an ordinary Codex review.
 The Codex fallback starts a new review with its own full `max_review_minutes` budget.
-A missing Keychain token marks that account unavailable until its next `claude-login` and retries
-another account within the same angle budget; the switch line includes `token unavailable`.
+A missing Keychain token marks that account unavailable for one hour and retries another account
+within the same angle budget; the switch line includes `token unavailable`. After the hour the
+account is tried again: a successful token read clears the mark, a still missing token sets it for
+another hour, and `claude-login <name>` clears it at once.
 A missing executable
 during the cycle, error result, or invalid structured output retains the immediate Codex fallback;
 `wait` reports `== reviewer claude unavailable: <reason>; review by codex`. Review timeouts, `stop`, and external

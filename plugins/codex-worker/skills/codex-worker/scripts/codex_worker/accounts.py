@@ -216,6 +216,7 @@ def claude_account_lines(cfg):
             percent = f"{used * 100:g}%" if type(used) in (int, float) else "unknown"
             parts.append(f"{label} {percent} (reset {config.local_time(window.get('resetsAt'))})")
         if claude_accounts.limited(info):
-            parts.append("limited until " + config.local_time(info.get("limited_until", info.get("resetsAt"))))
+            reason = " (token unavailable)" if claude_accounts.token_marked(info) else ""
+            parts.append("limited until " + config.local_time(info.get("limited_until", info.get("resetsAt"))) + reason)
         lines.append("claude " + account["name"] + ": " + "; ".join(parts))
     return lines

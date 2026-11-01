@@ -686,12 +686,22 @@ class ClaudeReviewTests(RotationTestCase):
                         if row["slug"] == slug and row["phase"] == "review"]
                 self.assertEqual([row["account"] for row in rows], list(names))
 
-    def test_claude_pool_retries_missing_token_and_keeps_account_unavailable_until_login(self):
+    def missing_token_fixture(self, missing=("default",)):
         accounts = self.claude_pool_fixture(names=("default", "first"))
         fixture = json.loads(self.claude_fixture_path.read_text())
-        fixture["security"] = {"codex-worker-claude-default": {"unavailable": True}}
+        fixture["security"] = {"codex-worker-claude-" + name: {"unavailable": True} for name in missing}
         self.claude_fixture_path.write_text(json.dumps(fixture))
+        return accounts
+
+    def security_lookups(self):
+        return [json.loads(line)[2] for line in self.security_trace_path.read_text().splitlines()]
+
+    def test_claude_pool_skips_missing_token_account_for_one_hour_then_marks_it_again(self):
+        accounts = self.missing_token_fixture()
+        clock = self.enable_fake_clock()
         worker = self.worker()
+        hour = worker.claude_accounts.TOKEN_RETRY_SECONDS
+        self.assertEqual(hour, 3600)
         worker.claude_accounts.save_limits("default", self.claude_limits)
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
         self.start("claude-pool-token", "--review", "--reviewer", "claude")
@@ -700,25 +710,166 @@ class ClaudeReviewTests(RotationTestCase):
         state = self.state("claude-pool-token")
         self.assertEqual([entry["account"] for entry in state["reviews"]], ["default", "first"])
         self.assertEqual(state["review_result"]["verdict"], "clean")
-        switches = [line for line in output.splitlines() if line.startswith("== claude account ")]
-        self.assertEqual(switches, ["== claude account default limited until unknown (token unavailable); review by first"])
         self.assertFalse(self.review_invocations())
         marked = worker.claude_accounts.read_limits()["default"]
         self.assertTrue(marked["token_unavailable"])
-        self.assertIsNone(marked["limited_until"])
+        self.assertEqual(marked["limited_until"], marked["limited_at"] + hour)
+        self.assertEqual(state["reviews"][0]["limited_until"], marked["limited_until"])
+        switches = [line for line in output.splitlines() if line.startswith("== claude account ")]
+        self.assertEqual(switches, ["== claude account default limited until " +
+                                    worker.config.local_time(marked["limited_until"]) +
+                                    " (token unavailable); review by first"])
+        # A fresh allowed snapshot does not lift the token mark early.
         worker.claude_accounts.save_limits("default", self.claude_limits, marked["limited_at"] + 1)
-        worker.claude_accounts.mark_limited("default")
-        with mock.patch.object(worker.clock.CLOCK, "time", return_value=self.reset + 1):
-            self.assertIsNone(worker.claude_accounts.select(worker.config.accounts_config(), "review", exclude=("first",)))
+        cfg = worker.config.accounts_config()
+        self.assertIsNone(worker.claude_accounts.select(cfg, "review", exclude=("first",)))
+        listing = next(line for line in self.cli("accounts").splitlines() if line.startswith("claude default:"))
+        self.assertTrue(listing.endswith("; limited until " + worker.config.local_time(marked["limited_until"]) +
+                                         " (token unavailable)"), listing)
+        reported = json.loads(self.cli("accounts", "--json"))["claude"][0]
+        self.assertTrue(reported["token_unavailable"])
+        self.assertEqual(reported["limited_until"], datetime.datetime.fromtimestamp(
+            marked["limited_until"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
         self.cli("review", "claude-pool-token", "--reviewer", "claude")
         self.wait("claude-pool-token")
-        lookups = [json.loads(line)[2] for line in self.security_trace_path.read_text().splitlines()]
-        self.assertEqual(lookups, ["codex-worker-claude-default", "codex-worker-claude-first", "codex-worker-claude-first"])
-        self.assertEqual(len(self.claude_invocations()), 2)
+        self.assertEqual(self.security_lookups(), ["codex-worker-claude-default", "codex-worker-claude-first",
+                                                   "codex-worker-claude-first"])
+        clock.sleep(marked["limited_until"] - clock.time() + 1)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review", exclude=("first",))["name"], "default")
+        listing = next(line for line in self.cli("accounts").splitlines() if line.startswith("claude default:"))
+        self.assertNotIn("limited", listing)
+        reported = json.loads(self.cli("accounts", "--json"))["claude"][0]
+        self.assertIsNone(reported["token_unavailable"])
+        self.assertIsNone(reported["limited_until"])
+        self.cli("review", "claude-pool-token", "--reviewer", "claude")
+        output = self.wait("claude-pool-token")
+        self.assertEqual(self.security_lookups()[3:], ["codex-worker-claude-default", "codex-worker-claude-first"])
+        self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()],
+                         [accounts[1]["config_dir"]] * 3)
+        again = worker.claude_accounts.read_limits()["default"]
+        self.assertTrue(again["token_unavailable"])
+        self.assertGreater(again["limited_at"], marked["limited_until"])
+        self.assertEqual(again["limited_until"], again["limited_at"] + hour)
+        self.assertIn("== claude account default limited until " + worker.config.local_time(again["limited_until"]) +
+                      " (token unavailable); review by first", output)
         self.assertFalse(self.review_invocations())
-        worker.claude_accounts.clear_limits("default")
-        selected = worker.claude_accounts.select(worker.config.accounts_config(), "review", exclude=("first",))
-        self.assertEqual(selected["name"], "default")
+
+    def test_claude_pool_reviews_on_account_whose_token_returns_after_one_hour(self):
+        accounts = self.missing_token_fixture(missing=())
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        worker.claude_accounts.save_limits("default", self.claude_limits)
+        until = worker.claude_accounts.mark_limited("default", token_unavailable=True)
+        self.assertEqual(until, worker.claude_accounts.read_limits()["default"]["limited_at"] + 3600)
+        clock.sleep(until - clock.time() + 1)
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+        self.start("claude-pool-token-back", "--review", "--reviewer", "claude")
+        output = self.wait("claude-pool-token-back")
+        self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()], [accounts[0]["config_dir"]])
+        state = self.state("claude-pool-token-back")
+        self.assertEqual([entry["account"] for entry in state["reviews"]], ["default"])
+        self.assertEqual(state["review_result"]["verdict"], "clean")
+        self.assertNotIn("== claude account ", output)
+        self.assertEqual(self.security_lookups(), ["codex-worker-claude-default"])
+        cleared = worker.claude_accounts.read_limits()["default"]
+        for key in ("token_unavailable", "token_retry_at", "limited_until", "limited_at"):
+            self.assertNotIn(key, cleared)
+        reported = json.loads(self.cli("accounts", "--json"))["claude"][0]
+        self.assertIsNone(reported["token_unavailable"])
+        self.assertIsNone(reported["limited_until"])
+
+    def test_claude_token_read_keeps_a_later_rate_limit(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        pool = worker.claude_accounts
+        cfg = worker.config.accounts_config()
+        later = clock.time() + 5 * 3600
+        # Token mark first, then a rate limit reported by a concurrent review.
+        token_until = pool.mark_limited("first", token_unavailable=True)
+        pool.save_limits("first", {"status": "rejected", "resetsAt": later})
+        self.assertEqual(pool.mark_limited("first"), later)
+        # Rate limit first, then a token failure on the same account.
+        pool.save_limits("second", {"status": "rejected", "resetsAt": later})
+        self.assertEqual(pool.mark_limited("second"), later)
+        self.assertEqual(pool.mark_limited("second", token_unavailable=True), later)
+        for name in ("first", "second"):
+            with self.subTest(account=name):
+                self.assertTrue(pool.token_marked(pool.read_limits()[name]))
+                pool.token_available(name)
+                info = pool.read_limits()[name]
+                self.assertNotIn("token_unavailable", info)
+                self.assertEqual(info["limited_until"], later)
+                self.assertFalse(pool.token_marked(info))
+                self.assertTrue(pool.limited(info))
+        clock.sleep(token_until - clock.time() + 1)
+        self.assertIsNone(pool.select(cfg, "review"))
+        listing = self.cli("accounts")
+        self.assertNotIn("token unavailable", listing)
+        self.assertTrue(all(entry["token_unavailable"] is None
+                            for entry in json.loads(self.cli("accounts", "--json"))["claude"]))
+        # An earlier rate limit is part of the token mark and is cleared with it.
+        pool.clear_limits("first")
+        pool.save_limits("first", {"status": "allowed"})
+        pool.mark_limited("first", token_unavailable=True)
+        pool.token_available("first")
+        self.assertFalse(pool.limited(pool.read_limits()["first"]))
+        self.assertEqual(pool.select(cfg, "review")["name"], "first")
+
+    def test_claude_token_mark_bounds_an_unknown_rate_limit_reset_to_one_hour(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        pool = self.worker().claude_accounts
+        cfg = self.worker().config.accounts_config()
+        # Token mark first, then a rejection without any known reset.
+        token_until = pool.mark_limited("first", token_unavailable=True)
+        pool.save_limits("first", {"status": "rejected"})
+        self.assertEqual(pool.mark_limited("first"), token_until)
+        # A rejection without a known reset first, then a token failure.
+        pool.save_limits("second", {"status": "rejected"})
+        self.assertIsNone(pool.mark_limited("second"))
+        self.assertEqual(pool.mark_limited("second", token_unavailable=True), token_until)
+        for name in ("first", "second"):
+            info = pool.read_limits()[name]
+            self.assertEqual(info["limited_until"], info["token_retry_at"])
+        self.assertIsNone(pool.select(cfg, "review"))
+        clock.sleep(token_until - clock.time() + 1)
+        self.assertEqual({pool.select(cfg, "review", exclude=(name,))["name"] for name in ("first", "second")},
+                         {"first", "second"})
+
+    def test_claude_expired_token_flag_lets_a_fresh_allowance_lift_a_later_rate_limit(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        pool = self.worker().claude_accounts
+        cfg = self.worker().config.accounts_config()
+        token_until = pool.mark_limited("first", token_unavailable=True)
+        clock.sleep(token_until - clock.time() + 1)
+        later = clock.time() + 5 * 3600
+        pool.save_limits("first", {"status": "rejected", "resetsAt": later})
+        self.assertEqual(pool.mark_limited("first"), later)
+        marked = pool.read_limits()["first"]
+        self.assertTrue(marked["token_unavailable"])
+        self.assertFalse(pool.token_marked(marked))
+        self.assertIsNone(pool.select(cfg, "review", exclude=("second",)))
+        pool.save_limits("first", {"status": "allowed", "resetsAt": later}, marked["limited_at"] + 1)
+        self.assertNotIn("limited_until", pool.read_limits()["first"])
+        self.assertEqual(pool.select(cfg, "review", exclude=("second",))["name"], "first")
+
+    def test_claude_token_mark_from_an_earlier_version_expires_after_one_hour(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        now = clock.time()
+        worker.config.TASKS.mkdir(parents=True, exist_ok=True)
+        (worker.config.TASKS / "claude-limits.json").write_text(json.dumps({
+            "first": {"limited_until": None, "limited_at": now - 60, "token_unavailable": True},
+            "second": {"limited_until": None, "limited_at": now - 3601, "token_unavailable": True}}))
+        limits = worker.claude_accounts.read_limits()
+        self.assertTrue(worker.claude_accounts.limited(limits["first"]))
+        self.assertEqual(limits["first"]["limited_until"], now - 60 + 3600)
+        self.assertFalse(worker.claude_accounts.limited(limits["second"]))
+        cfg = worker.config.accounts_config()
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "second")
 
     def test_claude_pool_falls_back_only_after_every_account_is_limited(self):
         self.claude_pool_fixture(runs=[{"limits": {"status": "rejected", "resetsAt": self.reset}}])

@@ -49,8 +49,8 @@ All timestamps below are UTC ISO 8601 strings; unknown values are `null`.
 | `codex[].status` | `available`, `exhausted`, `duplicate`, `not_logged_in`, or `null` when unknown |
 | `claude` | List of pool accounts with `name`, `five_hour`, `seven_day`, `limited_until`, and `token_unavailable` |
 | `claude[].five_hour`, `claude[].seven_day` | Window object with `used_percent` and `resets_at`, or `null` when unknown |
-| `claude[].limited_until` | Cached account cooldown timestamp, or `null` |
-| `claude[].token_unavailable` | Cached token availability flag, or `null` when unknown |
+| `claude[].limited_until` | Active account cooldown timestamp, or `null` |
+| `claude[].token_unavailable` | `true` while a missing Keychain token excludes the account (one hour from the failure), otherwise `null` |
 | `thresholds` | Object with configured `soft_switch_at` and `switch_at` used-percentage thresholds |
 
 The JSON includes no tokens, credential paths, or raw account errors.

@@ -1427,7 +1427,8 @@ worker.notifications.reap_notifications = reap
             "reviewer": {"unifiedWindows": {
                 "five_hour": {"utilization": 0.25, "resetsAt": self.reset - 1800},
                 "seven_day": {"utilization": 0.8, "resetsAt": self.reset}},
-                "limited_until": self.reset, "token_unavailable": True, "access_token": token}}))
+                "limited_until": self.reset, "token_unavailable": True, "token_retry_at": self.reset,
+                "access_token": token}}))
         output = self.cli("accounts")
         local_time = worker.config.local_time
         self.assertEqual(output, "\n".join([
@@ -1440,7 +1441,8 @@ worker.notifications.reap_notifications = reap
             "rpc-error\t—\t—\t—\tunknown\t0\t0\tunknown (rpc error: " +
             "{'code': -32000, 'message': 'fixture account unavailable'})",
             "claude reviewer: 5h 25% (reset " + local_time(self.reset - 1800) +
-            "); 7d 80% (reset " + local_time(self.reset) + "); limited until " + local_time(self.reset),
+            "); 7d 80% (reset " + local_time(self.reset) + "); limited until " + local_time(self.reset) +
+            " (token unavailable)",
             "claude unknown: 5h unknown (reset unknown); 7d unknown (reset unknown)", ""]))
         encoded = self.cli("accounts", "--json")
         report = json.loads(encoded)

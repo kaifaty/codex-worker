@@ -67,7 +67,8 @@ class AccountAuthTests(RotationTestCase):
                                "--keychain", "fixture-custom-service")):
                 with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py"] + list(arguments)):
                     worker.cli.main()
-            worker.claude_accounts.mark_limited("second")
+            worker.claude_accounts.mark_limited("second", token_unavailable=True)
+            self.assertTrue(worker.claude_accounts.token_marked(worker.claude_accounts.read_limits()["second"]))
             self.assertTrue(worker.claude_accounts.limited(worker.claude_accounts.read_limits()["second"]))
             with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "second"]):
                 worker.cli.main()
