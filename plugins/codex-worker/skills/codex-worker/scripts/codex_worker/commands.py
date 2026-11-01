@@ -401,12 +401,13 @@ def accounts_json(infos, cfg):
     for account in claude_accounts.accounts(cfg):
         info = cached.get(account["name"], {})
         windows = info.get("unifiedWindows") or {}
-        limited_until = info.get("limited_until", info.get("resetsAt") if claude_accounts.limited(info) else None)
+        active = claude_accounts.limited(info)
+        limited_until = info.get("limited_until", info.get("resetsAt")) if active else None
         claude.append({"name": account["name"],
                        "five_hour": window(windows.get("five_hour"), claude=True),
                        "seven_day": window(windows.get("seven_day"), claude=True),
                        "limited_until": iso_time(limited_until),
-                       "token_unavailable": info.get("token_unavailable")})
+                       "token_unavailable": True if claude_accounts.token_marked(info) else None})
     return {"codex": codex, "claude": claude,
             "thresholds": {"soft_switch_at": cfg.get("soft_switch_at", cfg["switch_at"]),
                            "switch_at": cfg["switch_at"]}}

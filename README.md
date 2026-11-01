@@ -440,7 +440,8 @@ Before each review or angle, accounts below `soft_switch_at` in both the five-ho
 windows come first, then those below `switch_at`; each group prefers the earliest seven-day reset.
 Unknown limits count as available. Angles in one review prefer different available accounts. A
 rejected rate limit or 401/403 marks the account unavailable until reset and retries on the next
-Claude account. `wait` prints `== claude account <a> limited until <time>; review by <b>`. Only when
+Claude account. `wait` prints `== claude account <a> limited until <time>; review by <b>`. A missing
+Keychain token excludes the account for one hour, then it is tried again. Only when
 no Claude account is available does that failure fall back to Codex; timeout and stop behavior stays
 the same.
 

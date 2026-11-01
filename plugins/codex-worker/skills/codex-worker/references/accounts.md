@@ -86,7 +86,8 @@ the review falls back to Codex. See [review-cycle.md](review-cycle.md#review-pro
 fallback causes and cancellation behavior.
 
 `accounts` prints one Claude line per account, with its name, five-hour and seven-day utilization
-percentages, local reset times and any limit marker. Before a rate-limit event, limits are
+percentages, local reset times and any limit marker; a missing Keychain token adds
+`(token unavailable)` for the hour it excludes the account. Before a rate-limit event, limits are
 `unknown`. The cache `~/.codex/claude-tasks/claude-limits.json` stores a dictionary by account name;
 an older unnamed cache is read as `default`. Every Claude review record and journal row carries its
 account name; `report --json` includes it in each task's `reviews` list. Claude review costs and tokens remain separate from Codex.

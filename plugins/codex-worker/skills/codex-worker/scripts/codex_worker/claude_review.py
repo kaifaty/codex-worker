@@ -173,6 +173,7 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
     if credential is None or credential.returncode or not token:
         response["reason"] = "token unavailable"
         return response
+    claude_accounts.token_available(account["name"])
     environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
     if stopped():
         response["outcome"] = task_state.stop_outcome(st, stopped)
