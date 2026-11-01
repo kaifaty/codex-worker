@@ -145,7 +145,7 @@ class MonitorEvents:
     exit_code: Optional[int] = None
     model: Optional[str] = None
     reasoning_effort: Optional[str] = None
-    native_review: bool = False
+    review_model: Optional[str] = None
 
 
 @dataclass
@@ -395,10 +395,10 @@ def finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
     final_path = usage.path
     try:
         final_path = usage.path or threads.rollout_path(account["home"], stream.thread)
-        # Native review runs a delegate with review_model; the parent's context
-        # describes the outer session rather than that model invocation.
-        if not stream.native_review:
-            settings.update(threads.rollout_model_settings(final_path, usage.usage_offset))
+        reported = threads.rollout_model_settings(final_path, usage.usage_offset)
+        # Native review inherits the parent model unless review_model replaces it.
+        if stream.review_model is None or stream.review_model == reported.get("model"):
+            settings.update(reported)
     except Exception as exc:
         telemetry_log.telemetry_error(st, exc)
     st.update(model=settings["model"], reasoning_effort=settings["reasoning_effort"])
@@ -432,7 +432,7 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     args, prompt = monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last)
     settings = threads.configured_model_settings(account["home"], args)
     stream.model, stream.reasoning_effort = settings["model"], settings["reasoning_effort"]
-    stream.native_review = args[1:3] == ["exec", "review"]
+    stream.review_model = settings["review_model"] if args[1:3] == ["exec", "review"] else None
     path = threads.rollout_path(account["home"], thread) if thread else None
     previous_size = path.stat().st_size if path else 0
     telemetry = telemetry_log.telemetry_phase(st)

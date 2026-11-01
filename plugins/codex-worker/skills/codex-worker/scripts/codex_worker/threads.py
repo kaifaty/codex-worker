@@ -74,11 +74,14 @@ def configured_model_settings(home, args):
     if isinstance(profile, dict):
         selected.update(profile)
     selected.update(overrides)
-    model = (selected.get("review_model") or selected.get("model")
+    review_model = selected.get("review_model")
+    review_model = review_model if isinstance(review_model, str) and review_model else None
+    model = (review_model or selected.get("model")
              if args[1:3] == ["exec", "review"] else selected.get("model"))
     effort = selected.get("model_reasoning_effort")
     return {"model": model if isinstance(model, str) and model else None,
-            "reasoning_effort": effort if isinstance(effort, str) and effort else None}
+            "reasoning_effort": effort if isinstance(effort, str) and effort else None,
+            "review_model": review_model}
 
 
 def rollout_model_settings(path, offset=0):

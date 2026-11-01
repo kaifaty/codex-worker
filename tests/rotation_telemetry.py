@@ -27,7 +27,7 @@ class TelemetryReportTests(RotationTestCase):
         args = [str(self.fake), "exec", "-c", 'model_reasoning_effort="high"', "Task prompt."]
         with mock.patch.object(worker.threads, "TOML_AVAILABLE", False):
             self.assertEqual(worker.threads.configured_model_settings(self.home, args),
-                             {"model": "profile-model", "reasoning_effort": "high"})
+                             {"model": "profile-model", "reasoning_effort": "high", "review_model": None})
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "reply": self.work_result()},
             {"mode": "complete", "reply": self.work_result()},
@@ -35,7 +35,9 @@ class TelemetryReportTests(RotationTestCase):
                 "model": "session-model", "effort": "low", "collaboration_mode": {
                     "settings": {"model": "reported-model", "reasoning_effort": "xhigh"}}}},
             {"mode": "complete", "reply": self.work_result()},
-            {"mode": "complete", "omit_rollout": True, "reply": self.work_result()}])
+            {"mode": "complete", "omit_rollout": True, "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False),
+             "turn_context": {"model": "native-session-model", "effort": "high"}}])
         for slug, flags, expected in (
                 ("metadata-effort", ("--effort", "high"), ("profile-model", "high")),
                 ("metadata-profile", (), ("profile-model", "medium")),
@@ -71,7 +73,16 @@ class TelemetryReportTests(RotationTestCase):
                             'model = "embedded-prompt-text"\nmodel_reasoning_effort = "secret"\n\'\'\'\n')
         with mock.patch.object(worker.threads, "TOML_AVAILABLE", False):
             self.assertEqual(worker.threads.configured_model_settings(self.home, args),
-                             {"model": None, "reasoning_effort": "high"})
+                             {"model": None, "reasoning_effort": "high", "review_model": None})
+        # Native review inherits the reported parent model without review_model.
+        settings.write_text('model_reasoning_effort = "medium"\n')
+        self.cli("review", "metadata-profile")
+        self.wait("metadata-profile")
+        self.until(lambda: len([row for row in self.telemetry_journal()
+                                if row["slug"] == "metadata-profile" and row["phase"] == "turn"]) == 2)
+        rows = [row for row in self.telemetry_journal() if row["slug"] == "metadata-profile"]
+        self.assertEqual([(row["model"], row["reasoning_effort"]) for row in rows[-2:]],
+                         [("native-session-model", "high")] * 2)
 
     def test_telemetry_records_work_checks_reviews_and_fix_with_rollout_deltas(self):
         self.configure(language="en")
