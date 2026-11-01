@@ -36,6 +36,7 @@ FAKE_CODEX = r'''import datetime
 import fcntl
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -195,12 +196,33 @@ def execute():
     prompt = argv[-1]
     output = Path(argv[argv.index("-o") + 1]) if "-o" in argv else None
     schema = Path(argv[argv.index("--output-schema") + 1]) if "--output-schema" in argv else None
+    # Resolve the model independently of the worker, including Codex profile precedence.
+    root, profiles, section = {}, {}, ""
+    settings = home / "config.toml"
+    for line in settings.read_text().splitlines() if settings.exists() else []:
+        line = line.strip()
+        if line.startswith("["):
+            match = re.fullmatch(r'\[profiles\.(?:"([^\"]+)"|([A-Za-z0-9_-]+))\]', line)
+            section = (match[1] or match[2]) if match else None
+            continue
+        match = re.match(r"(model|review_model|profile)\s*=\s*[\"']([^\"']+)[\"']", line)
+        if match and section is not None:
+            (root if section == "" else profiles.setdefault(section, {}))[match[1]] = match[2]
+    for index, arg in enumerate(argv[:-1]):
+        if arg == "-c":
+            key, separator, raw = argv[index + 1].partition("=")
+            if separator and key in ("model", "review_model", "profile"):
+                root[key] = json.loads(raw)
+    selected = dict(root, **profiles.get(root.get("profile"), {}))
+    model = argv[argv.index("--model") + 1] if "--model" in argv else selected.get("model")
+    if review:
+        model = selected.get("review_model") or model
     invocation = {"command": "exec", "resume": resumed, "review": review,
                   "prompt": prompt, "pid": os.getpid(), "ppid": os.getppid(),
                   "argv": sys.argv[1:], "cwd": os.getcwd(),
                   "output": str(output) if output else None,
                   "schema_path": str(schema) if schema else None,
-                  "output_schema": json.loads(schema.read_text()) if schema else None}
+                  "output_schema": json.loads(schema.read_text()) if schema else None, "model": model}
     if review and value.get("review_prompt_conflict"):
         trace(dict(invocation, thread="", mode="review_prompt_conflict"))
         print("error: the argument '--base <BRANCH>' cannot be used with '[PROMPT]'", file=sys.stderr,

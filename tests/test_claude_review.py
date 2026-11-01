@@ -210,7 +210,7 @@ class ClaudeReviewTests(RotationTestCase):
         codex = self.invocations()
         self.assertEqual([entry["review"] for entry in codex], [False, False])
         for entry in codex:
-            self.assertIn('model="work-model"', entry["argv"])
+            self.assertEqual(entry["argv"][entry["argv"].index("--model") + 1], "work-model")
         self.assertTrue(codex[1]["resume"])
         self.assertIn(self.review_result()["findings"][0]["detail"], codex[1]["prompt"])
         invocations = self.claude_invocations()

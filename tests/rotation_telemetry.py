@@ -84,7 +84,8 @@ class TelemetryReportTests(RotationTestCase):
         self.assertEqual([(row["model"], row["reasoning_effort"]) for row in rows[-2:]],
                          [("native-session-model", "high")] * 2)
 
-        settings.write_text('model = "configured-work"\nreview_model = "configured-review"\n')
+        settings.write_text('model = "root-work"\nreview_model = "configured-review"\n'
+                            'profile = "focused"\n[profiles.focused]\nmodel = "configured-work"\n')
         (self.home / "exec-count").unlink()
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "reply": self.review_result(False) if review else self.work_result()}
@@ -125,10 +126,14 @@ class TelemetryReportTests(RotationTestCase):
         self.assertEqual(len(executions), len(expected))
         for execution, model in zip(executions, expected):
             with self.subTest(model=model, argv=execution["argv"]):
-                overrides = [arg for arg in execution["argv"] if arg.startswith(("model=", "review_model="))]
-                self.assertEqual(overrides, ([f'model="{model}"', f'review_model="{model}"']
-                                             if execution["review"] else [f'model="{model}"'])
-                                 if model else [])
+                self.assertEqual(execution["model"], model or
+                                 ("configured-review" if execution["review"] else "configured-work"))
+                argv = execution["argv"]
+                self.assertEqual(argv[argv.index("--model") + 1] if "--model" in argv else None, model)
+                overrides = [arg for arg in argv if arg.startswith(("model=", "review_model="))]
+                self.assertEqual(overrides, [f'review_model="{model}"'] if model and execution["review"] else [])
+        rows = [row for row in self.phase_telemetry_journal() if row["slug"] == "model-choice"]
+        self.assertEqual([row["model"] for row in rows], [execution["model"] for execution in executions])
         for args in (("start", "bad-model", "--brief", str(self.brief), "--model", "bad/name"),
                      ("say", "model-choice", "Continue.", "--model", ""),
                      ("review", "model-choice", "--review-model", "x" * 65)):

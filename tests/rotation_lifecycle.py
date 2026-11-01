@@ -815,7 +815,7 @@ worker.notifications.reap_notifications = reap
         self.assertEqual(len(executions), 3)
         rejected, fallback = executions[1:]
         for execution in (rejected, fallback):
-            self.assertIn('model="fallback-model"', execution["argv"])
+            self.assertEqual(execution["argv"][execution["argv"].index("--model") + 1], "fallback-model")
         self.assertEqual(rejected["mode"], "review_prompt_conflict")
         self.assertFalse(rejected["thread"])
         self.assertFalse(fallback["review"])

@@ -62,9 +62,11 @@ def configured_model_settings(home, args):
             continue
         target = root if section == "" else profiles.setdefault(section, {})
         target[key] = config_string(raw)
-    overrides = {}
+    overrides, cli_model = {}, None
     for index, arg in enumerate(args[:-1]):
-        if arg in ("-c", "--config") and index + 1 < len(args) - 1:
+        if arg == "--model":
+            cli_model = args[index + 1]
+        elif arg in ("-c", "--config") and index + 1 < len(args) - 1:
             key, separator, raw = args[index + 1].partition("=")
             if separator and key in ("model", "review_model", "model_reasoning_effort", "profile"):
                 overrides[key] = config_string(raw) if raw.strip().startswith(("'", '"')) else raw.strip()
@@ -74,6 +76,8 @@ def configured_model_settings(home, args):
     if isinstance(profile, dict):
         selected.update(profile)
     selected.update(overrides)
+    if cli_model is not None:
+        selected["model"] = cli_model
     review_model = selected.get("review_model")
     review_model = review_model if isinstance(review_model, str) and review_model else None
     model = (review_model or selected.get("model")

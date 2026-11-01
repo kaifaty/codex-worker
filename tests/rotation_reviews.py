@@ -545,8 +545,8 @@ class ReviewFixTests(RotationTestCase):
         executions = self.invocations()
         self.assertEqual(len(executions), 7)
         for index, execution in enumerate(executions):
-            self.assertIn('model="work-model"' if index in (0, 4) else 'model="angle-model"',
-                          execution["argv"])
+            self.assertEqual(execution["argv"][execution["argv"].index("--model") + 1],
+                             "work-model" if index in (0, 4) else "angle-model")
             if execution["review"]:
                 self.assertIn('review_model="angle-model"', execution["argv"])
         self.assertTrue(executions[4]["resume"])
