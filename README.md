@@ -156,7 +156,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model] [--json]` | Summarize persistent costs and outcomes (default: seven days); combine grouping dimensions with commas. |
-| `accounts [--json]` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account; `--json` emits one object with `codex`, `claude`, and `thresholds`. |
+| `accounts [--json]` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account; `--json` emits one object with `codex`, `claude`, `thresholds`, and the active `credits_floor`. |
 | `login <name> [--browser]` | Have the human sign in to a Codex account; writes `codex-worker.json`. |
 | `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human add an isolated Claude CLI account and store its token at the Keychain prompt. |
 | `stop <slug>` | Interrupt the task; send the next instructions with `say`. |
@@ -280,6 +280,8 @@ A minimal configuration is:
 | `accounts` | Absent | Explicit account list; its presence enables automatic limit monitoring and rotation. Without it, tasks use the existing `~/.codex` login. |
 | `switch_at` | `99` | Used-percentage threshold for configured accounts, greater than 0 and at most 100. |
 | `credits` | `false` | Allow continuing on credits if no configured account has ordinary usage available. |
+| `credits_floor` | `0` | Credit reserve: an account runs on credits only while its own balance stays above this number. |
+| `credits_floor_until` | Absent | `YYYY-MM-DD`; the floor applies through the end of this local date, then drops to `0`. |
 | `wait_for_reset` | `true` | When configured accounts are exhausted, wait for reset and continue; `false` stops instead. |
 | `max_turn_minutes` | Absent | Default active implementation exec budget for `start` and `say`; `--max-minutes M` overrides it. Unset means no time cap. |
 | `max_review_minutes` | `30` | Separate active exec budget for each review or scout turn. |

@@ -69,6 +69,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     rotations = 0
     rotation = None
     soft_rotation = False
+    floor_rotation = False
     capacity_retried = False
     resume_thread = None
     if new_turn:
@@ -90,18 +91,27 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                 chosen = current
             else:
                 soft_rotation = True
+        floor_reason = None
         if not chosen and cfg["credits"]:
-            chosen = current if current.get("logged_in") and accounts.has_credits(current) else None
+            if current.get("logged_in") and accounts.has_credits(current, cfg):
+                chosen = current
+            else:
+                floor_reason = accounts.credit_floor_reason(current, cfg) if current.get("logged_in") else None
+                chosen = accounts.credit_account(infos, cfg)
         if stopped():
             return
         if not chosen:
-            chosen = account_rotation.wait_for_account(st, infos, cfg, "all accounts unavailable", stopped, sleep)
+            chosen = account_rotation.wait_for_account(
+                st, infos, cfg, "all accounts unavailable" + (f"; {floor_reason}" if floor_reason else ""),
+                stopped, sleep)
             if not chosen:
                 return
         if resuming and chosen["name"] != st["account"]:
             prompt = threads.handoff(st, current_message=current_message, cfg=cfg)
             st["rotations"].append({"at": clock.CLOCK.time(), "from": st["account"], "to": chosen["name"],
-                                    "reason": account_rotation.limit_reason(current, cfg, soft=soft_rotation), "thread": ""})
+                                    "reason": floor_reason or account_rotation.limit_reason(current, cfg, soft=soft_rotation),
+                                    "thread": ""})
+            floor_rotation = floor_reason is not None
             rotation = st["rotations"][-1]
             if not soft_rotation:
                 rotations += 1
@@ -118,7 +128,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
     task_state.save(st)
     if rotation is not None:
         notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}" +
-               (f": {rotation['reason']}" if soft_rotation else ""),
+               (f": {rotation['reason']}" if soft_rotation or floor_rotation else ""),
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
     def on_limit(local, reason, allow_credits, cancelled):
@@ -150,8 +160,15 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             return None
         current["ordinary"] = False
         chosen = accounts.available(infos, cfg, excluded) if rotations < len(cfg["accounts"]) else None
-        if allow_credits and not chosen and cfg["credits"] and current.get("logged_in") and accounts.has_credits(current):
-            return None
+        if allow_credits and not chosen and cfg["credits"] and current.get("logged_in"):
+            # Each limit sample re-reads the balance, so a live exec on credits stops at the floor.
+            if accounts.has_credits(current, cfg):
+                return None
+            if rotations < len(cfg["accounts"]):
+                chosen = accounts.credit_account(infos, cfg, excluded)
+            floor_reason = accounts.credit_floor_reason(current, cfg)
+            if floor_reason:
+                return {"reason": floor_reason, "infos": infos, "chosen": chosen, "floor": True}
         return {"reason": reason, "infos": infos, "chosen": chosen}
 
     while not stopped():
@@ -276,6 +293,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         else:
             st.update(account=account["name"], thread="")
         soft_rotation = decision.get("soft", False)
+        floor_rotation = decision.get("floor", False)
         if soft_rotation:
             # Its reserve remains usable after the other accounts reach the soft threshold.
             visited.discard(rotation["from"])
@@ -283,7 +301,7 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             rotations += 1
         task_state.save(st)
         notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}" +
-               (f": {rotation['reason']}" if soft_rotation else ""),
+               (f": {rotation['reason']}" if soft_rotation or floor_rotation else ""),
                **{"from": rotation["from"], "to": rotation["to"], "account": account["name"]})
 
 

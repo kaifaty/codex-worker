@@ -1378,6 +1378,70 @@ worker.notifications.reap_notifications = reap
         self.wait("use-credits")
         self.assertEqual(len(self.invocations()), 1)
 
+    def set_credit_balance(self, home, balance):
+        path = home / "fixture.json"
+        fixture = json.loads(path.read_text())
+        fixture["credits"]["balance"] = balance
+        path.write_text(json.dumps(fixture))
+
+    def test_live_exec_at_the_credit_floor_rotates_to_spendable_credits(self):
+        self.configure(credits=True, credits_floor=200)
+        self.account(self.home, "A", self.reset,
+                     runs=[{"mode": "hold", "rollout_used": 99}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.set_credit_balance(self.other, "500")
+        self.start("credit-floor")
+        output = self.wait("credit-floor")
+        state = self.state("credit-floor")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["account"], "second")
+        self.assertEqual([(r["from"], r["to"], r["reason"]) for r in state["rotations"]],
+                         [("main", "second", "credits of main at the floor 200")])
+        self.assertIn("== rotated main → second: credits of main at the floor 200", output)
+        self.assertEqual([event["home"] for event in self.invocations()], [str(self.home), str(self.other)])
+
+    def test_live_exec_at_the_credit_floor_pauses_without_spendable_credits(self):
+        self.configure(credits=True, credits_floor=200, wait_for_reset=False)
+        self.account(self.home, "A", self.reset,
+                     runs=[{"mode": "hold", "rollout_used": 99}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.start("credit-floor-pause")
+        output = self.wait("credit-floor-pause")
+        state = self.state("credit-floor-pause")
+        self.assertEqual(state["exhausted"]["reason"], "credits of main at the floor 200")
+        self.assertFalse(state.get("rotations"))
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertIn("== paused: credits of main at the floor 200", output)
+        self.assertIn("== all accounts at limit; earliest reset", output)
+
+    def test_accounts_show_the_active_credit_floor(self):
+        self.configure(credits=True, credits_floor=200, credits_floor_until="2030-06-15")
+        self.set_credit_balance(self.other, "500")
+        self.enable_fake_clock()
+        clock_path = Path(self.env["CODEX_TASK_CLOCK_FILE"])
+
+        def at_local(*parts):
+            value = json.loads(clock_path.read_text())
+            value["wall"] = time.mktime(parts + (0, 0, -1))
+            clock_path.write_text(json.dumps(value))
+
+        at_local(2030, 6, 15, 23, 59, 0)
+        lines = self.cli("accounts").splitlines()
+        self.assertEqual(lines[0], "credits_floor: 200 through 2030-06-15")
+        rows = {line.split("\t")[0]: line.split("\t") for line in lines[1:4]}
+        self.assertEqual(rows["main"][5], "123.45 (at floor)")
+        self.assertEqual(rows["second"][5], "500")
+        report = json.loads(self.cli("accounts", "--json"))
+        self.assertEqual((report["credits_floor"], report["credits_floor_until"]), (200, "2030-06-15"))
+        self.assertEqual([account["credits"]["spendable"] for account in report["codex"]], [0, 300])
+        at_local(2030, 6, 16, 0, 0, 1)
+        lines = self.cli("accounts").splitlines()
+        self.assertTrue(lines[0].startswith("NAME\t"))
+        self.assertFalse(any("at floor" in line for line in lines))
+        report = json.loads(self.cli("accounts", "--json"))
+        self.assertEqual((report["credits_floor"], report["credits_floor_until"]), (0, "2030-06-15"))
+        self.assertEqual([account["credits"]["spendable"] for account in report["codex"]], [123.45, 500])
+
     def test_credits_false_stops_a_live_exhausted_exec(self):
         self.configure(credits=False, wait_for_reset=False)
         self.account(self.home, "A", self.reset,
@@ -1450,11 +1514,11 @@ worker.notifications.reap_notifications = reap
         main = {"name": "main", "plan": "pro",
                 "primary": {"used_percent": 10, "window_minutes": 10080, "resets_at": iso_time(self.reset)},
                 "secondary": {"used_percent": 2, "window_minutes": 300, "resets_at": iso_time(self.reset - 1800)},
-                "credits": {"balance": "123.45", "unlimited": False, "has_credits": True},
+                "credits": {"balance": "123.45", "unlimited": False, "has_credits": True, "spendable": 123.45},
                 "reset_credits": {"available_count": 2, "expires_at": [iso_time(expires), None]},
                 "status": "available"}
         missing = {"plan": None, "primary": None, "secondary": None,
-                   "credits": {"balance": None, "unlimited": None, "has_credits": None},
+                   "credits": {"balance": None, "unlimited": None, "has_credits": None, "spendable": None},
                    "reset_credits": {"available_count": None, "expires_at": None}}
         self.assertEqual(report, {
             "codex": [main, dict(main, name="second", status="duplicate",
@@ -1466,7 +1530,8 @@ worker.notifications.reap_notifications = reap
                         "limited_until": iso_time(self.reset), "token_unavailable": True},
                        {"name": "unknown", "five_hour": None, "seven_day": None,
                         "limited_until": None, "token_unavailable": None}],
-            "thresholds": {"soft_switch_at": 80, "switch_at": 99}})
+            "thresholds": {"soft_switch_at": 80, "switch_at": 99},
+            "credits_floor": 0, "credits_floor_until": None})
         for private in (token, str(self.home), str(self.other), str(claude_home)):
             self.assertNotIn(private, encoded)
         self.assertFalse(self.invocations())

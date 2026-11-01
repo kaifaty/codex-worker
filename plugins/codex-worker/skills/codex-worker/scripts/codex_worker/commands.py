@@ -391,7 +391,8 @@ def accounts_json(infos, cfg):
             "name": info["name"], "plan": info.get("account", {}).get("planType"),
             "primary": window(limits.get("primary")), "secondary": window(limits.get("secondary")),
             "credits": {"balance": credits.get("balance"), "unlimited": credits.get("unlimited"),
-                        "has_credits": credits.get("hasCredits", credits.get("has_credits"))},
+                        "has_credits": credits.get("hasCredits", credits.get("has_credits")),
+                        "spendable": accounts.spendable_credits(info, cfg)},
             "reset_credits": {
                 "available_count": resets.get("availableCount", len(available) if "credits" in resets else None),
                 "expires_at": [iso_time(credit.get("expiresAt")) for credit in available] if "credits" in resets else None},
@@ -410,12 +411,18 @@ def accounts_json(infos, cfg):
                        "token_unavailable": True if claude_accounts.token_marked(info) else None})
     return {"codex": codex, "claude": claude,
             "thresholds": {"soft_switch_at": cfg.get("soft_switch_at", cfg["switch_at"]),
-                           "switch_at": cfg["switch_at"]}}
+                           "switch_at": cfg["switch_at"]},
+            "credits_floor": accounts.credits_floor(cfg), "credits_floor_until": cfg.get("credits_floor_until")}
 
 
 def print_accounts(infos, cfg):
     if cfg.get("soft_switch_at", cfg["switch_at"]) != cfg["switch_at"]:
         print(f"soft_switch_at: {cfg['soft_switch_at']:g}% (switch_at: {cfg['switch_at']:g}%)")
+    floor = accounts.credits_floor(cfg)
+    if floor > 0:
+        until = cfg.get("credits_floor_until")
+        print(f"credits_floor: {floor:g}" + (f" through {until}" if until else "") +
+              ("" if cfg.get("credits") else " (credits off)"))
     print("NAME\tEMAIL\tPLAN\tWEEKLY %\tRESET (LOCAL)\tCREDITS\tRESETS\tSTATUS")
     for info in infos:
         w = accounts.longest_window(info)
@@ -437,7 +444,8 @@ def print_accounts(infos, cfg):
         reset_label = str(count) + (f" (exp {config.local_time(nearest).split()[0]})" if nearest is not None else "")
         print("\t".join((info["name"], account.get("email") or "—", account.get("planType") or "—",
                          f"{w['used']:g}" if w else "—", config.local_time(w.get("reset")),
-                         "unlimited" if credits.get("unlimited") else str(credits.get("balance") or "0"),
+                         ("unlimited" if credits.get("unlimited") else str(credits.get("balance") or "0")) +
+                         (" (at floor)" if accounts.at_credit_floor(info, cfg) else ""),
                          reset_label, status)))
 
 

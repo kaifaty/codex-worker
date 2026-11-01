@@ -3,6 +3,7 @@ import json
 import os
 import sys
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -470,6 +471,170 @@ class AccountAuthTests(RotationTestCase):
         self.assertTrue(worker.accounts.exhausted({"limits": clear, "ordinary": False}, cfg))
         clear["reached"] = "workspace_member_credits_depleted"
         self.assertTrue(worker.accounts.exhausted({"limits": clear}, cfg))
+
+    def set_fake_wall(self, stamp):
+        path = Path(self.env["CODEX_TASK_CLOCK_FILE"])
+        value = json.loads(path.read_text())
+        value["wall"] = stamp
+        path.write_text(json.dumps(value))
+
+    def credit_info(self, name, balance, used=99, has_credits=True, unlimited=False):
+        home = str(self.home if name == "main" else self.other)
+        return {"name": name, "home": home, "logged_in": True, "account_id": name,
+                "limits": {"primary": {"used": used, "minutes": 10080, "reset": self.reset},
+                           "credits": {"hasCredits": has_credits, "unlimited": unlimited, "balance": balance}}}
+
+    def test_credit_floor_gate_and_spendable_credits(self):
+        worker = self.worker()
+        cfg = {"credits": True, "credits_floor": 50, "credits_floor_until": None}
+        for balance, expected, spendable in (("80", True, 30), ("50", False, 0), ("50.01", True, 0.01),
+                                             ("20", False, 0), (None, False, None), ("invalid", False, None),
+                                             ("nan", False, None)):
+            with self.subTest(balance=balance):
+                info = self.credit_info("main", balance)
+                self.assertEqual(worker.accounts.has_credits(info, cfg), expected)
+                self.assertEqual(worker.accounts.spendable_credits(info, cfg), spendable)
+                self.assertEqual(worker.accounts.at_credit_floor(info, cfg), balance in ("50", "20"))
+        self.assertTrue(worker.accounts.has_credits(self.credit_info("main", None, unlimited=True), cfg))
+        self.assertFalse(worker.accounts.at_credit_floor(self.credit_info("main", "1", unlimited=True), cfg))
+        self.assertFalse(worker.accounts.has_credits(self.credit_info("main", "80", has_credits=False), cfg))
+        # Without a floor, the gate keeps its original rule: a known balance above 0.
+        for balance, expected in (("0.5", True), ("0", False), (None, False)):
+            with self.subTest(floor=0, balance=balance):
+                info = self.credit_info("main", balance)
+                self.assertEqual(worker.accounts.has_credits(info, dict(cfg, credits_floor=0)), expected)
+                self.assertEqual(worker.accounts.has_credits(info), expected)
+        self.assertEqual(worker.accounts.credit_floor_reason(self.credit_info("main", "20"), cfg),
+                         "credits of main at the floor 50")
+        self.assertIsNone(worker.accounts.credit_floor_reason(self.credit_info("main", "0"), cfg))
+        self.assertIsNone(worker.accounts.credit_floor_reason(self.credit_info("main", "20"),
+                                                              dict(cfg, credits=False)))
+        infos = [self.credit_info("main", "90"), self.credit_info("second", "200"),
+                 dict(self.credit_info("third", "900"), duplicate="main")]
+        self.assertEqual(worker.accounts.credit_account(infos, cfg)["name"], "second")
+        self.assertEqual(worker.accounts.credit_account(infos, cfg, {"second"})["name"], "main")
+        self.assertIsNone(worker.accounts.credit_account(infos, dict(cfg, credits=False)))
+        self.assertIsNone(worker.accounts.credit_account(infos, dict(cfg, credits_floor=500)))
+
+    def test_credit_floor_applies_through_its_local_end_date(self):
+        self.enable_fake_clock()
+        worker = self.worker()
+        cfg = {"credits": True, "credits_floor": 50, "credits_floor_until": "2030-06-15"}
+        info = self.credit_info("main", "20")
+        for stamp, floor in ((time.mktime((2030, 6, 15, 0, 0, 0, 0, 0, -1)), 50),
+                             (time.mktime((2030, 6, 15, 23, 59, 59, 0, 0, -1)), 50),
+                             (time.mktime((2030, 6, 16, 0, 0, 0, 0, 0, -1)), 0)):
+            with self.subTest(local=time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(stamp))):
+                self.set_fake_wall(stamp)
+                self.assertEqual(worker.accounts.credits_floor(cfg), floor)
+                self.assertEqual(worker.accounts.has_credits(info, cfg), floor == 0)
+                self.assertEqual(worker.accounts.spendable_credits(info, cfg), 20 if floor == 0 else 0)
+        self.assertEqual(worker.accounts.credits_floor(dict(cfg, credits_floor_until=None)), 50)
+
+    def test_credit_floor_settings_are_validated(self):
+        worker = self.worker()
+        path = self.home / "codex-worker.json"
+        path.write_text(json.dumps({}))
+        cfg = worker.config.accounts_config()
+        self.assertEqual((cfg["credits_floor"], cfg["credits_floor_until"]), (0, None))
+        path.write_text(json.dumps({"credits_floor": 12.5, "credits_floor_until": "2030-02-28"}))
+        cfg = worker.config.accounts_config()
+        self.assertEqual((cfg["credits_floor"], cfg["credits_floor_until"]), (12.5, "2030-02-28"))
+        for value in (-1, "5", True, None, float("inf"), float("nan")):
+            with self.subTest(credits_floor=value):
+                path.write_text(json.dumps({"credits_floor": value}))
+                with self.assertRaises(SystemExit) as error:
+                    worker.config.accounts_config()
+                self.assertIn("credits_floor must be a finite nonnegative number", str(error.exception))
+        for value in ("2030-02-30", "2030-13-01", "2030-6-15", "15.06.2030", "", 20300615, True):
+            with self.subTest(credits_floor_until=value):
+                path.write_text(json.dumps({"credits_floor": 5, "credits_floor_until": value}))
+                with self.assertRaises(SystemExit) as error:
+                    worker.config.accounts_config()
+                self.assertIn("credits_floor_until must be a date YYYY-MM-DD or null", str(error.exception))
+
+    def run_credit_floor_turn(self, balances, monitor_balances=None, **settings):
+        """Run one turn with fake snapshots; the main exec re-reads limits twice while it runs."""
+        worker = self.worker()
+        cfg = {"enabled": True, "switch_at": 99, "credits": True, "credits_floor": 200,
+               "credits_floor_until": None, "wait_for_reset": True,
+               "accounts": [{"name": "main", "home": str(self.home)},
+                            {"name": "second", "home": str(self.other)}]}
+        cfg.update(settings)
+        st = {"slug": "credit-floor", "account": "main", "thread": "original-thread",
+              "threads": [], "rotations": []}
+        balances = dict(balances)
+        decisions, execs, sleeps = [], [], []
+        stop = [False]
+
+        def snapshots(config, cancelled, prepare=False):
+            return [self.credit_info(name, balances[name]) for name in ("main", "second")]
+
+        def monitor(st, cfg, account, prompt, effort, stopped, on_limit, **kwargs):
+            execs.append(account["name"])
+            if account["name"] != "main":
+                return "completed", None
+            local = self.credit_info("main", "0")
+            for balance in monitor_balances or ():
+                balances["main"] = balance
+                decision = on_limit(local, "weekly limit 99%", True, lambda: False)
+                decisions.append(decision)
+                if decision is not None:
+                    return "limit", decision
+            return "completed", None
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            stop[0] = True
+
+        with mock.patch.object(worker.accounts, "snapshots", side_effect=snapshots), \
+                mock.patch.object(worker.turn_monitor, "monitor", side_effect=monitor), \
+                mock.patch.object(worker.threads, "handoff", return_value="handoff with the original task"), \
+                mock.patch.object(worker.task_state, "save"):
+            worker.turns.run_turn(st, cfg, "original prompt", None, False, lambda: stop[0], sleep)
+        return st, execs, decisions, sleeps
+
+    def test_live_exec_on_credits_rotates_to_another_account_at_the_floor(self):
+        st, execs, decisions, _ = self.run_credit_floor_turn({"main": "300", "second": "500"},
+                                                             monitor_balances=("300", "200"))
+        self.assertEqual(execs, ["main", "second"])
+        self.assertIsNone(decisions[0], "a balance above the floor keeps the live exec")
+        self.assertEqual(decisions[1]["chosen"]["name"], "second")
+        self.assertEqual(st["account"], "second")
+        self.assertEqual(st["outcome"], "completed")
+        self.assertEqual([(r["from"], r["to"], r["reason"]) for r in st["rotations"]],
+                         [("main", "second", "credits of main at the floor 200")])
+
+    def test_turn_start_skips_an_account_at_the_credit_floor(self):
+        st, execs, _, _ = self.run_credit_floor_turn({"main": "150", "second": "500"})
+        self.assertEqual(execs, ["second"])
+        self.assertEqual([(r["from"], r["to"], r["reason"]) for r in st["rotations"]],
+                         [("main", "second", "credits of main at the floor 200")])
+        self.assertEqual(st["outcome"], "completed")
+
+    def test_live_exec_at_the_credit_floor_without_spendable_credits_follows_the_exhausted_path(self):
+        st, execs, decisions, sleeps = self.run_credit_floor_turn(
+            {"main": "300", "second": "150"}, monitor_balances=("200",))
+        self.assertEqual(execs, ["main"])
+        self.assertIsNone(decisions[0]["chosen"])
+        self.assertTrue(sleeps)
+        sleep = next(r for r in st["rotations"] if r.get("event") == "sleep")
+        self.assertEqual(sleep["reason"], "credits of main at the floor 200")
+        st, execs, _, sleeps = self.run_credit_floor_turn(
+            {"main": "300", "second": "150"}, monitor_balances=("200",), wait_for_reset=False)
+        self.assertEqual(execs, ["main"])
+        self.assertFalse(sleeps)
+        self.assertEqual(st["outcome"], "exhausted")
+        self.assertEqual(st["exhausted"]["reason"], "credits of main at the floor 200")
+        # Without credits the floor never applies: the turn waits before any exec, as before.
+        st, execs, _, _ = self.run_credit_floor_turn({"main": "300", "second": "500"},
+                                                     credits=False, wait_for_reset=False)
+        self.assertEqual(execs, [])
+        self.assertEqual(st["exhausted"]["reason"], "all accounts unavailable")
+        # An unknown balance never passes an active floor, also for the other account.
+        st, execs, _, _ = self.run_credit_floor_turn({"main": None, "second": None}, wait_for_reset=False)
+        self.assertEqual(execs, [])
+        self.assertEqual(st["exhausted"]["reason"], "all accounts unavailable")
 
     def test_unknown_stale_and_nearby_resets_wait_before_rechecking(self):
         worker = self.worker()
