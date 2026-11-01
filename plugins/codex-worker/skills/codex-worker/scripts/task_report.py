@@ -147,8 +147,9 @@ def _accumulate_model_settings(row, task):
                 task[key].append(value)
 
 
-def _account(name):
-    return {"account": name, "turns": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0}
+def _account(provider, name):
+    return {"provider": provider, "account": name, "turns": 0,
+            "tokens": _empty_tokens(), "weekly_used_percent": 0}
 
 
 def _review_verdict(rows):
@@ -234,13 +235,16 @@ def _accumulate_usage(row, task, accounts, is_turn):
         name = _identifier(segment.get("account")) or _identifier(row.get("account"))
         if name is None:
             continue
-        account = accounts.setdefault(name, _account(name))
+        provider = ("claude" if (segment.get("provider") or row.get("provider")
+                                 or row.get("reviewer")) == "claude" else "codex")
+        key = (provider, name)
+        account = accounts.setdefault(key, _account(provider, name))
         account["weekly_used_percent"] += delta
         _add_tokens(account["tokens"], segment.get("tokens"))
         if is_turn:
-            touched.add(name)
-    for name in touched:
-        accounts[name]["turns"] += 1
+            touched.add(key)
+    for key in touched:
+        accounts[key]["turns"] += 1
 
 
 def _accumulate_checks_and_reviews(row, task, totals):
@@ -329,7 +333,7 @@ def _accumulate_rows(rows, identities):
 
     for account in accounts.values():
         account["tokens"] = _token_summary(account["tokens"])
-    return tasks, sorted(accounts.values(), key=lambda account: account["account"]), totals
+    return tasks, sorted(accounts.values(), key=lambda account: (account["account"], account["provider"])), totals
 
 
 def _reconcile_tasks(tasks):
@@ -509,7 +513,8 @@ def render_report(report):
     ]
     if report["accounts"]:
         for account in report["accounts"]:
-            lines.append(f"  {account['account']}: {account['weekly_used_percent']:.2f}% "
+            label = "claude/" + account["account"] if account.get("provider") == "claude" else account["account"]
+            lines.append(f"  {label}: {account['weekly_used_percent']:.2f}% "
                          f"({account['tokens']['total']:,.0f} tokens, {account['turns']} turns)")
     else:
         lines.append("  none")

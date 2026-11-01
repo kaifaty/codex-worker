@@ -78,6 +78,7 @@ def merge_reviews(angles):
 def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
     """Retry a limited Claude account before allowing a Codex fallback."""
     attempted = set()
+    deadline = None
     account = claude_accounts.select(cfg, "review", prefer_unused=used_accounts)
     while account is not None:
         name = account["name"]
@@ -95,7 +96,8 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
             task_state.save(st)
             last = config.TASKS / st["slug"] / "review.md"
             last.unlink(missing_ok=True)
-            response = claude_review.run(st, cfg, prompt, stopped, account)
+            response = claude_review.run(st, cfg, prompt, stopped, account, deadline)
+            deadline = response["deadline"]
             if response["outcome"] == "completed":
                 last.write_text(json.dumps(response["result"], ensure_ascii=False, indent=2), encoding="utf-8")
             st["outcome"] = response["outcome"]

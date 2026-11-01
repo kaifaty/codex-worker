@@ -50,7 +50,9 @@ completes sign-in, then pastes the issued token at the Keychain password prompt.
 `~/.codex/codex-worker.json`. Names contain only lowercase letters, digits and hyphens and must be
 unique. Re-running the command for an existing name refreshes its login instead of duplicating it;
 explicit path or service overrides update that entry after successful setup. Adding to legacy settings
-preserves their account as `default`. Both sign-in and the Keychain prompt use the human's terminal;
+preserves their account as `default`, including when its paths come entirely from defaults.
+Concurrent logins merge their account entries into the latest settings after sign-in finishes.
+Both sign-in and the Keychain prompt use the human's terminal;
 the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
 
 For example:
@@ -77,7 +79,8 @@ uses the same ordering among accounts below `switch_at` in both windows. Unknown
 available. Angles in the same review prefer different available accounts.
 
 A rejected rate limit or 401/403 marks that account unavailable until its reported reset and retries
-the same review on another available account. The reset is shown as `unknown` when none was reported. `wait` prints one line per switch:
+the same review on another available account. A late allowance snapshot does not clear an active
+limit marker. The reset is shown as `unknown` when none was reported. `wait` prints one line per switch:
 `== claude account <a> limited until <time>; review by <b>`. Once no Claude account is available,
 the review falls back to Codex. See [review-cycle.md](review-cycle.md#review-provider) for other
 fallback causes and cancellation behavior.

@@ -42,7 +42,7 @@ def _locked_limits():
         temporary.replace(path)
 
 
-def save_limits(name, info):
+def save_limits(name, info, event_time=None):
     """Store only documented numeric fields, never arbitrary CLI output."""
     selected = {}
     if info.get("status") in ("allowed", "allowed_warning", "rejected"):
@@ -59,9 +59,13 @@ def save_limits(name, info):
             for window in [windows.get(window_name)] if isinstance(window, dict)}
     with _locked_limits() as limits:
         previous = limits.get(name, {})
+        active = limited(previous)
+        marked_at = previous.get("limited_at")
+        fresh = _finite(event_time) and _finite(marked_at) and event_time > marked_at
         previous.update(selected)
-        if selected.get("status") in ("allowed", "allowed_warning"):
+        if selected.get("status") in ("allowed", "allowed_warning") and (not active or fresh):
             previous.pop("limited_until", None)
+            previous.pop("limited_at", None)
         limits[name] = previous
 
 
@@ -104,6 +108,7 @@ def mark_limited(name):
         if not _finite(reset) or reset <= now:
             reset = max(depleted) if depleted else min(resets, default=None)
         info["limited_until"] = reset
+        info["limited_at"] = now
         return reset
 
 

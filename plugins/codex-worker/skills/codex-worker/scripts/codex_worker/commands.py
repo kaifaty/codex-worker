@@ -1,4 +1,5 @@
 """Task commands, descriptions and main repositories."""
+import fcntl
 import json
 import os
 import re
@@ -415,11 +416,7 @@ def cmd_claude_login(a):
     config.require_claude()
     cfg = config.accounts_config()
     path = config.CODEX_HOME / "codex-worker.json"
-    source = path if path.exists() else config.CODEX_HOME / "claude-accounts.json"
-    settings = json.loads(source.read_text(encoding="utf-8")) if source.exists() else {}
-    configured = settings.get("claude", {})
-    pool = cfg["claude"]["accounts"] if any(
-        key in configured for key in ("accounts", "config_dir", "token_keychain")) else []
+    pool = cfg["claude"]["accounts"]
     previous = next((account for account in pool if account["name"] == a.name), None)
     directory = a.config_dir or (previous["config_dir"] if previous else
                                  str(Path.home() / ".claude-accounts" / a.name))
@@ -442,14 +439,21 @@ def cmd_claude_login(a):
     except OSError:
         procs.die("Claude login requires a terminal and the Claude CLI and Keychain tools")
     account = {"name": a.name, "config_dir": directory, "token_keychain": service}
-    if previous is None:
-        pool.append(account)
-    else:
-        pool[pool.index(previous)] = account
-    settings.setdefault("claude", {})["accounts"] = pool
     config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    temporary = path.with_suffix(f".{os.getpid()}.tmp")
-    temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    temporary.replace(path)
+    with (config.CODEX_HOME / "codex-worker.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        source = path if path.exists() else config.CODEX_HOME / "claude-accounts.json"
+        settings = json.loads(source.read_text(encoding="utf-8")) if source.exists() else {}
+        normalized = config.accounts_config()["claude"]["accounts"]
+        pool = settings.get("claude", {}).get("accounts", normalized)
+        previous = next((item for item in pool if item["name"] == a.name), None)
+        if previous is None:
+            pool.append(account)
+        else:
+            pool[pool.index(previous)] = account
+        settings.setdefault("claude", {})["accounts"] = pool
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
     claude_accounts.clear_limits(a.name)
     print(f"Claude account {a.name} saved")

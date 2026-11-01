@@ -78,6 +78,23 @@ class CapacityReportTests(unittest.TestCase):
         self.assertEqual(report["tasks"], [])
         self.assertIn("Capacity retries: 0\n", self.reporter.render_report(report))
 
+    def test_account_usage_separates_providers_and_defaults_legacy_rows_to_codex(self):
+        report = self.report([
+            {"slug": "shared-name", "phase": "work", "turn": 1, "account": "main",
+             "tokens": {"input": 100}},
+            {"slug": "shared-name", "phase": "review", "turn": 1, "account": "main",
+             "reviewer": "claude", "tokens": {"input": 150},
+             "usage": [{"account": "main", "tokens": {"input": 150}}]},
+        ])
+        self.assertEqual(len(report["accounts"]), 2)
+        self.assertEqual({(row["provider"], row["account"]): (row["tokens"]["total"], row["turns"])
+                          for row in report["accounts"]},
+                         {("codex", "main"): (100, 1), ("claude", "main"): (150, 1)})
+        self.assertEqual(report["summary"]["tokens"]["total"], 250)
+        text = self.reporter.render_report(report)
+        self.assertIn("  main: 0.00% (100 tokens, 1 turns)", text)
+        self.assertIn("  claude/main: 0.00% (150 tokens, 1 turns)", text)
+
 
 if __name__ == "__main__":
     unittest.main()

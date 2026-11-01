@@ -55,7 +55,9 @@ files before and after review: any change fails with `reviewer modified the work
 the worktree for inspection.
 
 A rejected rate limit or 401/403 authentication failure marks the account unavailable until its
-reported reset and repeats the same review on the next available Claude account. An unreported
+reported reset and repeats the same review on the next available Claude account. All attempts for
+one angle share its `max_review_minutes` budget; switching accounts uses only the remaining time.
+An unreported
 reset is shown as `unknown`. `wait` prints
 `== claude account <a> limited until <time>; review by <b>` once for that switch. Only when no Claude
 account is available does this failure fall back to an ordinary Codex review. A missing executable

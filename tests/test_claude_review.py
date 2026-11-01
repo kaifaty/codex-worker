@@ -1,6 +1,7 @@
 """Claude review subprocesses use a separate credential and leave work to Codex."""
 import datetime
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -11,6 +12,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from rotation_support import PYTHON, SCRIPT, RotationTestCase
+from worker_loader import WORKER_BOOTSTRAP
 
 
 TEST_TOKEN = "fixture-claude-reviewer-oauth-secret"
@@ -35,6 +37,12 @@ import sys
 import time
 import uuid
 from pathlib import Path
+
+clock = time
+if os.environ.get("CODEX_TASK_CLOCK_FILE"):
+''' + "\n".join("    " + line for line in WORKER_BOOTSTRAP.splitlines()) + r'''
+    worker = load_worker(name="fake_claude_clock", script=os.environ["CODEX_FAKE_WORKER_SCRIPT"])
+    clock = worker.clock.CLOCK
 
 fixture_path = Path(os.environ["CODEX_FAKE_CLAUDE_FIXTURE"])
 fixture = json.loads(fixture_path.read_text())
@@ -69,6 +77,8 @@ def interrupted(signum, frame):
 signal.signal(signal.SIGINT, interrupted)
 signal.signal(signal.SIGTERM, interrupted)
 emit({"type": "system", "subtype": "init", "session_id": str(uuid.uuid4()), "model": "fake-claude"})
+if run.get("delay"):
+    clock.sleep(run["delay"])
 mode = run.get("mode", "complete")
 if mode == "auth_error":
     status = run.get("status", 401)
@@ -485,6 +495,31 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertNotIn("review by codex", output)
         self.assertIn("== turn stopped: time budget 2 min exhausted", output)
 
+    def test_claude_pool_retries_share_one_angle_time_budget(self):
+        self.claude_pool_fixture(runs=[
+            {"delay": .8, "limits": {"status": "rejected", "resetsAt": self.reset}},
+            {"delay": .8, "reply": self.review_result(False)}])
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+        self.start("claude-pool-timeout")
+        self.wait("claude-pool-timeout")
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        self.enable_fake_clock()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        cfg["max_review_minutes"] = 1
+        state = self.state("claude-pool-timeout")
+        state.update(kind="review", outcome="running", review_angle="correctness")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            outcome = worker.review_cycle.claude_review_turn(state, cfg, "Review.", lambda: False, set())
+        self.assertEqual(outcome, "budget_exhausted")
+        self.assertEqual(state["outcome"], "budget_exhausted")
+        self.assertEqual([entry["outcome"] for entry in state["reviews"]], ["unavailable", "budget_exhausted"])
+        self.assertEqual(state["turn_stop"], {"outcome": "budget_exhausted", "minutes": 1})
+        self.assertEqual(len(state["turn_stops"]), 1)
+        self.assertEqual(len(self.claude_invocations()), 2)
+        self.assertFalse(self.review_invocations())
+        self.assertTrue(all(not self.process_is_live(entry["pid"]) for entry in self.claude_invocations()))
+
     def test_say_inherits_claude_reviewer_and_explicit_codex_override(self):
         self.claude_fixture(reviewer="codex")
         self.account(self.home, "A", self.reset, runs=[
@@ -582,6 +617,22 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(defaults[0]["name"], "default")
         self.assertTrue(defaults[0]["config_dir"].endswith("/.claude-accounts/reviewer"))
         self.assertEqual(defaults[0]["token_keychain"], "codex-worker-claude-reviewer")
+
+    def test_claude_pool_stale_allowed_snapshot_keeps_active_limit(self):
+        self.claude_pool_fixture()
+        self.enable_fake_clock()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        worker.claude_accounts.save_limits("first", {"status": "rejected", "resetsAt": self.reset})
+        worker.claude_accounts.mark_limited("first")
+        marked = worker.claude_accounts.read_limits()["first"]
+        stale = dict(self.claude_limits, status="allowed_warning", resetsAt=self.reset)
+        worker.claude_accounts.save_limits("first", stale, marked["limited_at"] - 1)
+        worker.claude_accounts.save_limits("first", stale)
+        self.assertEqual(worker.claude_accounts.read_limits()["first"]["limited_until"], self.reset)
+        self.assertIsNone(worker.claude_accounts.select(cfg, "review", exclude=("second",)))
+        worker.claude_accounts.save_limits("first", stale, marked["limited_at"] + 1)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review", exclude=("second",))["name"], "first")
 
     def test_claude_pool_retries_limited_and_unauthorized_accounts_once(self):
         cases = (("limit", {"limits": {"status": "rejected", "resetsAt": self.reset}}),

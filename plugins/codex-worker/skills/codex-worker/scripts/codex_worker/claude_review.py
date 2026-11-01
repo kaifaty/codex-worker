@@ -78,7 +78,7 @@ def event_result(event, telemetry, token, account):
     if kind == "rate_limit_event":
         info = event.get("rate_limit_info")
         if isinstance(info, dict):
-            claude_accounts.save_limits(account, info)
+            claude_accounts.save_limits(account, info, event.get("timestamp"))
             if info.get("status") == "rejected":
                 return None, "usage limit"
     if kind != "result":
@@ -107,13 +107,24 @@ def event_result(event, telemetry, token, account):
     return result, None
 
 
-def run(st, cfg, prompt, stopped, account):
+def record_timeout(st, minutes):
+    st["turn_stop"] = {"outcome": "budget_exhausted", "minutes": minutes}
+    st.setdefault("turn_stops", []).append(dict(
+        st["turn_stop"], turn=st.get("turns", 0), at=clock.CLOCK.time()))
+
+
+def run(st, cfg, prompt, stopped, account, deadline=None):
     """Run one review angle; the caller owns review history and phase telemetry."""
-    response = {"outcome": "unavailable", "result": None, "reason": None,
+    response = {"outcome": "unavailable", "result": None, "reason": None, "deadline": deadline,
                 "telemetry": {"usage": {}, "cost_usd": None, "session_id": None,
                               "model": None, "reasoning_effort": None, "num_turns": None}}
     if stopped():
         response["outcome"] = task_state.stop_outcome(st, stopped)
+        return response
+    minutes = cfg["max_review_minutes"]
+    if deadline is not None and clock.CLOCK.monotonic() >= deadline:
+        response["outcome"] = "budget_exhausted"
+        record_timeout(st, minutes)
         return response
     executable = config.claude_binary()
     if executable is None:
@@ -159,23 +170,31 @@ def run(st, cfg, prompt, stopped, account):
         response["reason"] = "Claude CLI could not be started"
         return response
     response["telemetry"].update(model=settings.get("model"), reasoning_effort=settings.get("effort"))
-    started = clock.CLOCK.monotonic()
-    minutes = cfg["max_review_minutes"]
+    if deadline is None:
+        deadline = clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
+    response["deadline"] = deadline
     st["codex_pid"] = proc.pid
     buffer, eof, termination = b"", False, None
     try:
         task_state.save(st)
         with selectors.DefaultSelector() as selector:
             selector.register(proc.stdout, selectors.EVENT_READ)
-            while not eof or proc.poll() is None:
+            while True:
                 if stopped():
                     response["outcome"] = task_state.stop_outcome(st, stopped)
                     break
-                if clock.CLOCK.monotonic() - started >= minutes * config.MINUTE_SECONDS:
+                if clock.CLOCK.monotonic() >= deadline:
                     response["outcome"] = "budget_exhausted"
-                    st["turn_stop"] = {"outcome": "budget_exhausted", "minutes": minutes}
-                    st.setdefault("turn_stops", []).append(dict(
-                        st["turn_stop"], turn=st.get("turns", 0), at=clock.CLOCK.time()))
+                    record_timeout(st, minutes)
+                    break
+                if eof and proc.poll() is not None:
+                    if response["reason"] is None:
+                        if proc.wait() != 0:
+                            response["reason"] = "review failed"
+                        elif response["result"] is None:
+                            response["reason"] = "invalid structured output"
+                        else:
+                            response["outcome"] = "completed"
                     break
                 for key, _ in selector.select(0.2):
                     chunk = os.read(key.fileobj.fileno(), 65536)
@@ -206,14 +225,6 @@ def run(st, cfg, prompt, stopped, account):
                     # can flush its usage without filling the stdout pipe.
                     termination = threading.Thread(target=procs.terminate, args=(proc,))
                     termination.start()
-            else:
-                if response["reason"] is None:
-                    if proc.wait() != 0:
-                        response["reason"] = "review failed"
-                    elif response["result"] is None:
-                        response["reason"] = "invalid structured output"
-                    else:
-                        response["outcome"] = "completed"
     finally:
         if termination is None:
             procs.terminate(proc)
