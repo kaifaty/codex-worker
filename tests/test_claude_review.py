@@ -200,7 +200,8 @@ class ClaudeReviewTests(RotationTestCase):
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "reply": self.work_result()},
             {"mode": "complete", "reply": self.work_result(findings=decisions)}])
-        start_output = self.start("claude-fix", "--review", "--reviewer", "claude", "--fix-rounds", "1")
+        start_output = self.start("claude-fix", "--review", "--reviewer", "claude", "--fix-rounds", "1",
+                                  "--model", "work-model", "--review-model", "codex-review-model")
         output = self.wait("claude-fix")
         state = self.state("claude-fix")
         self.assertEqual(state["reviewer"], "claude")
@@ -208,6 +209,8 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(state["rounds"][0]["decisions"], decisions)
         codex = self.invocations()
         self.assertEqual([entry["review"] for entry in codex], [False, False])
+        for entry in codex:
+            self.assertEqual(entry["argv"][entry["argv"].index("--model") + 1], "work-model")
         self.assertTrue(codex[1]["resume"])
         self.assertIn(self.review_result()["findings"][0]["detail"], codex[1]["prompt"])
         invocations = self.claude_invocations()

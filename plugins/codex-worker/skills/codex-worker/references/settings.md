@@ -19,6 +19,42 @@ that file is absent.
 | `soft_switch_at` | value of `switch_at` | number in `(0, switch_at]`; prefer accounts below this usage percentage in both windows, then use the reserve up to `switch_at`; see [accounts.md](accounts.md#rotation) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
 
+## Task models
+
+`start --model M` saves a Codex model for the task's implementation, fixes, and wrap-up turns.
+`say` inherits it; `say --model M` replaces it, and `say --model default` clears it so Codex uses
+its configured model again. `status` and `wait` show a saved task model beside the latest observed
+reasoning effort, falling back to the task's effort override or `default` when not yet known.
+`--effort E` continues to control reasoning separately.
+
+`start`, `say`, and `review` accept `--review-model M` for Codex reviews, including each review angle.
+It is saved separately from the work model; follow-ups and later reviews inherit it. Passing
+`--review-model default` clears it. Without a review override, Codex uses its existing review defaults.
+Claude reviews continue to use `claude.model`.
+
+Model names must match `[A-Za-z0-9._-]{1,64}`. The worker checks the name's format, not whether the
+model exists or is available to an account. `default` is reserved for clearing an override.
+
+## Account JSON
+
+`accounts --json` emits one JSON object. Plain `accounts` retains its text table and Claude lines.
+All timestamps below are UTC ISO 8601 strings; unknown values are `null`.
+
+| Field | Contents |
+|---|---|
+| `codex` | List of account objects with `name`, `plan`, `primary`, `secondary`, `credits`, `reset_credits`, and `status` |
+| `codex[].primary`, `codex[].secondary` | Window object with `used_percent`, `window_minutes`, and `resets_at`, or `null` when unknown |
+| `codex[].credits` | Object with `balance`, `has_credits`, and `unlimited`; unknown fields are `null` |
+| `codex[].reset_credits` | Object with `available_count` and `expires_at` (list of expiry timestamps); unknown fields are `null` |
+| `codex[].status` | `available`, `exhausted`, `duplicate`, `not_logged_in`, or `null` when unknown |
+| `claude` | List of pool accounts with `name`, `five_hour`, `seven_day`, `limited_until`, and `token_unavailable` |
+| `claude[].five_hour`, `claude[].seven_day` | Window object with `used_percent` and `resets_at`, or `null` when unknown |
+| `claude[].limited_until` | Cached account cooldown timestamp, or `null` |
+| `claude[].token_unavailable` | Cached token availability flag, or `null` when unknown |
+| `thresholds` | Object with configured `soft_switch_at` and `switch_at` used-percentage thresholds |
+
+The JSON includes no tokens, credential paths, or raw account errors.
+
 ## Claude accounts
 
 `claude.accounts` configures a pool of isolated Claude Code CLI accounts without assigned roles.

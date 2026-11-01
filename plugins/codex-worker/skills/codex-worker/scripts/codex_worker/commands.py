@@ -71,6 +71,8 @@ def cmd_start(a):
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
           "effort": a.effort, "task_type": a.task_type,
+          "task_model": None if getattr(a, "model", None) == "default" else getattr(a, "model", None),
+          "review_model": None if getattr(a, "review_model", None) == "default" else getattr(a, "review_model", None),
           "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
@@ -139,20 +141,25 @@ def cmd_say(a):
     scouting = st.get("kind") == "scout"
     angles = getattr(a, "review_angles", None)
     reviewer = getattr(a, "reviewer", None)
+    review_model = getattr(a, "review_model", None)
     ci_command = getattr(a, "ci_command", None)
     no_ci_command = getattr(a, "no_ci_command", False)
     if st.get("no_push") and (a.ci or ci_command is not None):
         procs.die("--no-push task cannot enable --ci or --ci-command; CI requires a published branch")
     if scouting and (a.check is not None or a.review or a.check_timeout is not None or a.fix_rounds is not None
-                     or a.no_base_check or angles is not None or reviewer is not None
+                     or a.no_base_check or angles is not None or reviewer is not None or review_model is not None
                      or a.ci or a.no_ci or ci_command is not None or no_ci_command or a.ci_rounds is not None):
-        procs.die("scout is read-only; say --check, --check-timeout, --review, --reviewer, --review-angles, --fix-rounds, --ci, --no-ci, --ci-command, --no-ci-command, --ci-rounds and --no-base-check are not supported")
+        procs.die("scout is read-only; say --check, --check-timeout, --review, --reviewer, --review-model, --review-angles, --fix-rounds, --ci, --no-ci, --ci-command, --no-ci-command, --ci-rounds and --no-base-check are not supported")
     require_idle(st)
     msg = Path(a.file).read_text() if a.file else a.message
     if not msg or not msg.strip():
         procs.die("empty message")
     cfg = config.accounts_config()
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
+    if getattr(a, "model", None) is not None:
+        st["task_model"] = None if a.model == "default" else a.model
+    if review_model is not None:
+        st["review_model"] = None if review_model == "default" else review_model
     if getattr(a, "task_type", None) is not None:
         st["task_type"] = a.task_type
     minutes = getattr(a, "max_minutes", None)
@@ -198,6 +205,8 @@ def cmd_review(a):
     if reviewer == "claude":
         config.require_claude()
     st["reviewer"] = reviewer
+    if getattr(a, "review_model", None) is not None:
+        st["review_model"] = None if a.review_model == "default" else a.review_model
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     st["review_angles"] = a.review_angles
     supervisor.spawn(st, prompts.review_prompt(st, cfg), a.effort or st.get("effort"), kind="review")
@@ -226,6 +235,8 @@ def describe(st, detail):
             + "  sandbox " + ("read-only" if scouting else st.get("sandbox", "off")))
     if st.get("no_push"):
         line += "  push disabled (--no-push)"
+    if st.get("task_model"):
+        line += f"\nmodel {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
     switch = st.get("base_switch")
@@ -338,8 +349,67 @@ def cmd_clean(a):
 
 def cmd_accounts(a):
     cfg = config.accounts_config()
-    print_accounts(accounts.snapshots(cfg), cfg)
+    infos = accounts.snapshots(cfg)
+    if getattr(a, "json", False):
+        print(json.dumps(accounts_json(infos, cfg), ensure_ascii=False))
+        return
+    print_accounts(infos, cfg)
     print("\n".join(accounts.claude_account_lines(cfg)))
+
+
+def accounts_json(infos, cfg):
+    def iso_time(stamp):
+        return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(stamp)) if stamp is not None else None
+
+    def window(value, claude=False):
+        if not value:
+            return None
+        used = value.get("utilization" if claude else "used")
+        result = {"used_percent": used * 100 if claude and used is not None else used,
+                  "resets_at": iso_time(value.get("resetsAt" if claude else "reset"))}
+        if not claude:
+            result["window_minutes"] = value.get("minutes")
+        return result
+
+    codex = []
+    for info in infos:
+        limits = info.get("limits", {})
+        credits = limits.get("credits", {})
+        resets = info.get("reset_credits", {})
+        available = credit_resets.reset_credits(info)
+        if info.get("duplicate"):
+            status = "duplicate"
+        elif info["logged_in"] is None:
+            status = None
+        elif not info["logged_in"]:
+            status = "not_logged_in"
+        elif accounts.exhausted(info, cfg):
+            status = "exhausted"
+        else:
+            status = "available"
+        codex.append({
+            "name": info["name"], "plan": info.get("account", {}).get("planType"),
+            "primary": window(limits.get("primary")), "secondary": window(limits.get("secondary")),
+            "credits": {"balance": credits.get("balance"), "unlimited": credits.get("unlimited"),
+                        "has_credits": credits.get("hasCredits", credits.get("has_credits"))},
+            "reset_credits": {
+                "available_count": resets.get("availableCount", len(available) if "credits" in resets else None),
+                "expires_at": [iso_time(credit.get("expiresAt")) for credit in available] if "credits" in resets else None},
+            "status": status})
+    cached = claude_accounts.read_limits()
+    claude = []
+    for account in claude_accounts.accounts(cfg):
+        info = cached.get(account["name"], {})
+        windows = info.get("unifiedWindows") or {}
+        limited_until = info.get("limited_until", info.get("resetsAt") if claude_accounts.limited(info) else None)
+        claude.append({"name": account["name"],
+                       "five_hour": window(windows.get("five_hour"), claude=True),
+                       "seven_day": window(windows.get("seven_day"), claude=True),
+                       "limited_until": iso_time(limited_until),
+                       "token_unavailable": info.get("token_unavailable")})
+    return {"codex": codex, "claude": claude,
+            "thresholds": {"soft_switch_at": cfg.get("soft_switch_at", cfg["switch_at"]),
+                           "switch_at": cfg["switch_at"]}}
 
 
 def print_accounts(infos, cfg):
