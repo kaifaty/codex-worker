@@ -99,6 +99,7 @@ If a command prints a codex-worker version warning, set `T` again using the path
 Run every command below as `python3 -I "$T" …`. The CLI is resolved from `CODEX_TASK_CODEX`, then the
 ChatGPT.app bundle if present, then `codex` on `PATH`. Model and reasoning defaults come from the user's
 Codex configuration; `--effort` overrides reasoning effort for a task.
+Use `start --task-type LABEL` to label telemetry; `say` and `review` inherit it, and `say --task-type LABEL` replaces it ([labels and grouped reports](references/telemetry.md)).
 Use `--reviewer claude` on `start`, `say`, or `review` for reviews on an isolated Anthropic subscription; Codex still implements and fixes ([setup](references/accounts.md#claude-reviewer-account)).
 
 | Step | Command arguments |

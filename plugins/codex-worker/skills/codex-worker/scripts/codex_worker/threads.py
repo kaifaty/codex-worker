@@ -3,13 +3,107 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import shlex
 
 from . import accounts, clock, config, procs, result_schema, sandboxing
 
+try:
+    import tomllib
+    TOML_AVAILABLE = True
+except ImportError:
+    TOML_AVAILABLE = False
+
 
 def effort_args(effort):
     return ["-c", f'model_reasoning_effort="{effort}"'] if effort else []
+
+
+def config_string(value):
+    """Read a single TOML string setting without depending on Python 3.11."""
+    match = re.fullmatch(r'''("(?:[^"\\]|\\.)*"|'[^']*')\s*(?:#.*)?''', value.strip())
+    if match is None:
+        return None
+    quoted = match[1]
+    try:
+        return quoted[1:-1] if quoted.startswith("'") else json.loads(quoted)
+    except ValueError:
+        return None
+
+
+def configured_model_settings(home, args):
+    """Best-effort fallback for only the selected model, effort and profile."""
+    root, profiles, section = {}, {}, ""
+    try:
+        text = (Path(home) / "config.toml").read_text(encoding="utf-8")
+    except (OSError, UnicodeError):
+        text = ""
+    if TOML_AVAILABLE:
+        try:
+            root = tomllib.loads(text)
+            profiles = root.get("profiles", {})
+            profiles = profiles if isinstance(profiles, dict) else {}
+        except ValueError:
+            pass
+        lines = []
+    else:
+        # The Python 3.9 fallback accepts only simple string settings. Refuse
+        # multiline strings rather than mistake embedded prompt text for keys.
+        lines = [] if '"""' in text or "'''" in text else text.splitlines()
+    for line in lines:
+        line = line.strip()
+        if line.startswith("["):
+            table = re.fullmatch(r'''\[\s*profiles\s*\.\s*([A-Za-z0-9_-]+|"(?:[^"\\]|\\.)*"|'[^']*')\s*\]\s*(?:#.*)?''', line)
+            section = (config_string(table[1]) if table[1].startswith(("'", '"')) else table[1]) if table else None
+            continue
+        key, separator, raw = line.partition("=")
+        key = key.strip()
+        if section is None or not separator or key not in ("model", "review_model", "model_reasoning_effort", "profile"):
+            continue
+        target = root if section == "" else profiles.setdefault(section, {})
+        target[key] = config_string(raw)
+    overrides = {}
+    for index, arg in enumerate(args[:-1]):
+        if arg in ("-c", "--config") and index + 1 < len(args) - 1:
+            key, separator, raw = args[index + 1].partition("=")
+            if separator and key in ("model", "review_model", "model_reasoning_effort", "profile"):
+                overrides[key] = config_string(raw) if raw.strip().startswith(("'", '"')) else raw.strip()
+    selected = dict(root)
+    profile = overrides.get("profile", root.get("profile"))
+    profile = profiles.get(profile, {}) if isinstance(profile, str) else {}
+    if isinstance(profile, dict):
+        selected.update(profile)
+    selected.update(overrides)
+    model = (selected.get("review_model") or selected.get("model")
+             if args[1:3] == ["exec", "review"] else selected.get("model"))
+    effort = selected.get("model_reasoning_effort")
+    return {"model": model if isinstance(model, str) and model else None,
+            "reasoning_effort": effort if isinstance(effort, str) and effort else None}
+
+
+def rollout_model_settings(path, offset=0):
+    """Read authoritative settings only from contexts appended by this exec."""
+    settings = {}
+    if path is None:
+        return settings
+    try:
+        with path.open("rb") as stream:
+            for event in config.ROLLOUT["read_events"](stream, offset):
+                if not isinstance(event, dict) or event.get("type") != "turn_context":
+                    continue
+                payload = event.get("payload")
+                if not isinstance(payload, dict):
+                    continue
+                mode = payload.get("collaboration_mode")
+                nested = mode.get("settings") if isinstance(mode, dict) else None
+                nested = nested if isinstance(nested, dict) else {}
+                values = {"model": nested.get("model") or payload.get("model"),
+                          "reasoning_effort": nested.get("reasoning_effort") or payload.get("effort")}
+                settings.update({key: value for key, value in values.items()
+                                 if isinstance(value, str) and value})
+    except (OSError, UnicodeError):
+        pass
+    return settings
 
 
 def events(st):

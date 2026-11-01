@@ -16,8 +16,66 @@ from rotation_support import IMPOSSIBLE_PID, PYTHON, SCRIPT, RotationTestCase
 
 
 class TelemetryReportTests(RotationTestCase):
+    def test_telemetry_records_model_effort_from_config_override_and_current_session(self):
+        self.configure(language="en")
+        settings = self.home / "config.toml"
+        settings.write_text('model = "root-model"\nmodel_reasoning_effort = "low"\n'
+                            'profile = "focused"\n[profiles.other]\nmodel = "unused-model"\n'
+                            '[profiles."focused"]\nmodel = \'profile-model\' # selected model\n'
+                            'model_reasoning_effort = "medium"\n')
+        worker = self.worker()
+        args = [str(self.fake), "exec", "-c", 'model_reasoning_effort="high"', "Task prompt."]
+        with mock.patch.object(worker.threads, "TOML_AVAILABLE", False):
+            self.assertEqual(worker.threads.configured_model_settings(self.home, args),
+                             {"model": "profile-model", "reasoning_effort": "high"})
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.work_result(), "turn_context": {
+                "model": "session-model", "effort": "low", "collaboration_mode": {
+                    "settings": {"model": "reported-model", "reasoning_effort": "xhigh"}}}},
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "omit_rollout": True, "reply": self.work_result()}])
+        for slug, flags, expected in (
+                ("metadata-effort", ("--effort", "high"), ("profile-model", "high")),
+                ("metadata-profile", (), ("profile-model", "medium")),
+                ("metadata-session", ("--effort", "high"), ("reported-model", "xhigh"))):
+            with self.subTest(source=slug):
+                self.start(slug, *flags)
+                self.wait(slug)
+                self.until(lambda: any(row["slug"] == slug and row["phase"] == "turn"
+                                       for row in self.telemetry_journal()))
+                rows = [row for row in self.telemetry_journal() if row["slug"] == slug]
+                self.assertEqual([(row["model"], row["reasoning_effort"]) for row in rows],
+                                 [expected, expected])
+                self.assertEqual((rows[0]["usage"][0]["model"],
+                                  rows[0]["usage"][0]["reasoning_effort"]), expected)
+
+        # A resumed exec without a new context must not reuse the previous one.
+        self.cli("say", "metadata-session", "Continue with the configured settings.")
+        self.wait("metadata-session")
+        self.until(lambda: len([row for row in self.telemetry_journal()
+                                if row["slug"] == "metadata-session" and row["phase"] == "turn"]) == 2)
+        rows = [row for row in self.telemetry_journal() if row["slug"] == "metadata-session"]
+        self.assertEqual([(row["model"], row["reasoning_effort"]) for row in rows[-2:]],
+                         [("profile-model", "high")] * 2)
+        settings.unlink()
+        self.start("metadata-unknown")
+        self.wait("metadata-unknown")
+        self.until(lambda: any(row["slug"] == "metadata-unknown" and row["phase"] == "turn"
+                               for row in self.telemetry_journal()))
+        rows = [row for row in self.telemetry_journal() if row["slug"] == "metadata-unknown"]
+        self.assertEqual([(row["model"], row["reasoning_effort"]) for row in rows], [(None, None)] * 2)
+        # Python 3.9 must not parse prompt contents as configuration settings.
+        settings.write_text('model = "configured-model"\ndeveloper_instructions = \'\'\'\n'
+                            'model = "embedded-prompt-text"\nmodel_reasoning_effort = "secret"\n\'\'\'\n')
+        with mock.patch.object(worker.threads, "TOML_AVAILABLE", False):
+            self.assertEqual(worker.threads.configured_model_settings(self.home, args),
+                             {"model": None, "reasoning_effort": "high"})
+
     def test_telemetry_records_work_checks_reviews_and_fix_with_rollout_deltas(self):
         self.configure(language="en")
+        (self.home / "config.toml").write_text('model = "fake-model"\nreview_model = "review-model"\n')
         decisions = [{"id": "F1", "decision": "fixed", "note": "Handle empty input."},
                      {"id": "F2", "decision": "rejected", "note": "The final token is a sentinel."}]
         usages = [(self.telemetry_usage(100, 40, 10, 5), self.telemetry_usage(150, 60, 30, 10)),
@@ -30,7 +88,8 @@ class TelemetryReportTests(RotationTestCase):
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "complete", "reply": reply, "token_usage_before": usage[0],
              "token_usage_after": usage[1], "weekly_used_before": window[0],
-             "weekly_used_after": window[1]}
+             "weekly_used_after": window[1],
+             "turn_context": {"model": "outer-model", "effort": "low"} if "verdict" in reply else None}
             for reply, usage, window in zip(replies, usages, windows)])
         self.start("telemetry-fix", "--review", "--fix-rounds", "1", "--check", "true")
         self.wait("telemetry-fix")
@@ -53,6 +112,8 @@ class TelemetryReportTests(RotationTestCase):
             self.assertEqual(row["sleep_seconds"], 0)
             self.assertEqual(row["rotations"], 0)
         model_rows = [row for row in rows if row["phase"] not in ("check", "base_check")]
+        self.assertEqual([(row["model"], row["reasoning_effort"]) for row in model_rows],
+                         [("fake-model", None), ("review-model", None)] * 2)
         self.assertEqual([row["tokens"] for row in model_rows], [
             {"input": 50, "cached_input": 20, "output": 20, "reasoning": 5},
             {"input": 100, "cached_input": 50, "output": 20, "reasoning": 10},
@@ -71,6 +132,7 @@ class TelemetryReportTests(RotationTestCase):
         self.assertEqual([row["result_status"] for row in model_rows if row["kind"] == "work"],
                          ["done", "done"])
         for row in (rows[1], rows[4]):
+            self.assertEqual((row["model"], row["reasoning_effort"]), (None, None))
             self.assertEqual(row["check_outcome"], "passed")
             self.assertGreaterEqual(row["check_seconds"], 0)
         raw = (self.home / "codex-worker-log.jsonl").read_text()
@@ -273,6 +335,62 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.assertEqual(report["summary"]["turns"], 1)
         self.assertEqual(report["tasks"][0]["slug"], "telemetry-clean")
         self.assertIn("telemetry-clean", self.cli("report", "--repo", "repo"))
+
+    def test_report_groups_observed_efforts_and_task_types_and_reads_legacy_rows(self):
+        now = time.time()
+        rows = []
+
+        def add(slug, **values):
+            row = dict(v=1, at=now - 100 + len(rows), repo="repo", slug=slug,
+                       created=now - 1000, phase="work", turn=1, round=0, outcome="completed")
+            row.update(values)
+            rows.append(row)
+
+        add("alpha", task_type="feature", model="model-a", reasoning_effort="high",
+            result_status="done", round=1, active_seconds=120, weekly_spent=4)
+        add("alpha", phase="review", task_type="feature", model="model-a", reasoning_effort="high",
+            verdict="clean", round=1, active_seconds=60, weekly_spent=1)
+        add("beta", task_type="feature", model="model-a", reasoning_effort="high",
+            result_status="partial", round=3, active_seconds=300, weekly_spent=9)
+        add("gamma", task_type="fix", model="model-c", reasoning_effort="high",
+            result_status="done", round=1, active_seconds=120, weekly_spent=3,
+            usage=[{"model": "model-b", "reasoning_effort": "low"},
+                   {"model": "model-c", "reasoning_effort": "high"},
+                   {"model": "model-c", "reasoning_effort": "high"}])
+        add("legacy", result_status="blocked", active_seconds=240, weekly_spent=9)
+        add("old", task_type="feature", model="model-a", reasoning_effort="high", at=now - 8 * 86400)
+        add("other", task_type="feature", model="model-a", reasoning_effort="high", repo="other")
+        path = self.home / "codex-worker-log.jsonl"
+        path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+        report = json.loads(self.cli("report", "--since", "7d", "--repo", "repo",
+                                     "--by", "effort,task-type", "--json"))
+        self.assertEqual(report["by"], ["effort", "task-type"])
+        self.assertEqual(report["groups"], [
+            {"effort": "high", "task_type": "feature", "tasks": 2, "done_fraction": 0.5,
+             "median_rounds": 2, "median_active_minutes": 4, "median_weekly_used_percent": 7},
+            {"effort": "high", "task_type": "fix", "tasks": 1, "done_fraction": 1,
+             "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3},
+            {"effort": "low", "task_type": "fix", "tasks": 1, "done_fraction": 1,
+             "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3},
+            {"effort": "unknown", "task_type": "unknown", "tasks": 1, "done_fraction": 0,
+             "median_rounds": 0, "median_active_minutes": 4, "median_weekly_used_percent": 9}])
+        tasks = {task["slug"]: task for task in report["tasks"]}
+        self.assertEqual((tasks["gamma"]["models"], tasks["gamma"]["reasoning_efforts"]),
+                         (["model-b", "model-c"], ["low", "high"]))
+        self.assertEqual((tasks["legacy"]["task_type"], tasks["legacy"]["models"],
+                          tasks["legacy"]["reasoning_efforts"]), (None, [None], [None]))
+        text = self.cli("report", "--repo", "repo", "--by", "effort,task-type")
+        self.assertIn("effort  task-type  tasks  done  median rounds  median minutes  median weekly %", text)
+        self.assertIn("high  feature  2  50.0%  2  4.0  7.00", text)
+        self.assertIn("unknown  unknown  1  0.0%  0  4.0  9.00", text)
+        models = json.loads(self.cli("report", "--repo", "repo", "--by", "model,effort", "--json"))
+        self.assertEqual([(group["model"], group["effort"], group["tasks"]) for group in models["groups"]],
+                         [("model-a", "high", 2), ("model-b", "low", 1),
+                          ("model-c", "high", 1), ("unknown", "unknown", 1)])
+        plain = json.loads(self.cli("report", "--repo", "repo", "--json"))
+        self.assertEqual(plain["summary"], report["summary"])
+        self.assertNotIn("groups", plain)
 
     def test_report_uses_merged_turn_result_after_an_angle_wrapup_is_refused(self):
         # Allow process startup under parallel load before the second angle's cap.

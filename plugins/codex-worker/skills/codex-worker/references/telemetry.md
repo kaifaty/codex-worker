@@ -7,6 +7,41 @@ and `started` (task creation time in local time, `MM-DD HH:MM`, or `-` when unkn
 Task rows include the task weekly budget and the budget stop kind (`minutes` or `weekly`).
 JSON task records retain the `created` timestamp.
 
+## Compare models, reasoning effort, and task types
+
+Set an optional label with `start --task-type LABEL`. It accepts 1–32 characters from `[a-z0-9-]`,
+without a fixed list; examples are `feature`, `fix`, `refactor`, `mechanical`, `tests`, `bench`,
+`logic`, `ml`, and `docs`. The label persists in state and is inherited by `say` and `review`.
+`say --task-type LABEL` replaces it for subsequent journal rows; report task records use the latest label.
+
+Every model phase and final `turn` row includes `model`, `reasoning_effort`, and `task_type`.
+Execution metadata from Codex takes precedence over explicit CLI overrides and the invoked account's
+`config.toml`, including its selected profile. `--effort` is an explicit reasoning override.
+Native `codex exec review` uses the configured `review_model` (or `model`) and effort: its outer
+session context describes the parent, not the reviewer. Ordinary review fallback uses its own session context.
+Claude reviews record the reviewer's known model and effort. Unknown values are null, including when
+configuration or session metadata cannot be read; telemetry does not change model selection.
+On Python 3.9–3.10, the configuration fallback reads simple string settings; configurations with
+multiline strings remain unknown unless an explicit override or session context supplies the value.
+Usage entries retain metadata for individual invocations when a phase rotates accounts.
+No prompts or additional command output are stored in the journal.
+
+`report --json` adds `task_type` and the ordered unique lists `models` and `reasoning_efforts`
+to each task. Unknown model or effort values appear as null. Older rows without these fields remain readable.
+
+```sh
+python3 -I "$T" report --by effort,task-type
+python3 -I "$T" report --by model --since 30d --repo example --json
+```
+
+`--by` accepts `task-type`, `effort`, or `model`, combined with commas. The grouped table contains task
+counts, the fraction whose final result is `done`, median rounds, median active minutes, and median
+weekly percentage points. It uses the same `--since`, `--repo`, and `--slug` filters as ordinary reports;
+`--json` includes the groups. Missing values form the `unknown` group.
+A task is counted once per observed combination of dimensions, using its latest task label; model and
+effort pairs come from real invocations. A task that used several groups contributes its full cost to
+each, so group counts and costs are not additive. Without `--by`, the text report is unchanged.
+
 ## The journal
 
 The supervisor appends numeric counters and identifiers to `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
