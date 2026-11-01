@@ -98,8 +98,10 @@ class TelemetryReportTests(RotationTestCase):
             self.assertIn("model Task.1_a  effort high", text)
         self.assertEqual((self.state("model-choice")["task_model"],
                           self.state("model-choice")["review_model"]), ("Task.1_a", "Review.2_b"))
-        self.cli("say", "model-choice", "Keep the saved models.", "--review")
-        self.wait("model-choice")
+        self.cli("say", "model-choice", "Keep the saved models.", "--effort", "low", "--review")
+        output = self.wait("model-choice")
+        for text in (output, self.cli("status", "model-choice")):
+            self.assertIn("model Task.1_a  effort low", text)
         self.cli("say", "model-choice", "Replace both models.", "--model", "Fast-2",
                  "--review-model", "Strong-2", "--review")
         output = self.wait("model-choice")

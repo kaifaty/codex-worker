@@ -61,7 +61,7 @@ def wait_turn_lines(st, slug):
     yield (f"== {slug}: turn {st.get('turns')} {'paused' if sleeping else 'finished'} after "
           f"{(st.get('turn_finished', clock.CLOCK.time()) - st.get('turn_started', clock.CLOCK.time())) / 60:.1f} min")
     if st.get("task_model"):
-        yield f"== model {st['task_model']}  effort {st.get('effort') or 'default'}"
+        yield f"== model {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("capacity_retries", 0):
         yield "== retried: model at capacity"
     if st.get("turn_stop"):

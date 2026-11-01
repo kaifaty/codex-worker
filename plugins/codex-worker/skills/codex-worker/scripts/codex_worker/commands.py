@@ -236,7 +236,7 @@ def describe(st, detail):
     if st.get("no_push"):
         line += "  push disabled (--no-push)"
     if st.get("task_model"):
-        line += f"\nmodel {st['task_model']}  effort {st.get('effort') or 'default'}"
+        line += f"\nmodel {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
     switch = st.get("base_switch")

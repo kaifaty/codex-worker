@@ -23,8 +23,9 @@ that file is absent.
 
 `start --model M` saves a Codex model for the task's implementation, fixes, and wrap-up turns.
 `say` inherits it; `say --model M` replaces it, and `say --model default` clears it so Codex uses
-its configured model again. `status` and `wait` show a saved task model beside the reasoning effort
-(`default` when no effort override is saved). `--effort E` continues to control reasoning separately.
+its configured model again. `status` and `wait` show a saved task model beside the latest observed
+reasoning effort, falling back to the task's effort override or `default` when not yet known.
+`--effort E` continues to control reasoning separately.
 
 `start`, `say`, and `review` accept `--review-model M` for Codex reviews, including each review angle.
 It is saved separately from the work model; follow-ups and later reviews inherit it. Passing
