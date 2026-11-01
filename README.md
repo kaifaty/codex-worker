@@ -149,7 +149,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` | Run the first review in a fresh Codex thread while the task is idle. |
 | `status [<slug>]` | Show task state, account, thread, PR, commits, last message, and latest result. |
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
-| `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` | Summarize persistent costs and outcomes by task, account, and period (default: seven days). |
+| `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model] [--json]` | Summarize persistent costs and outcomes (default: seven days); combine grouping dimensions with commas. |
 | `accounts` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account. |
 | `login <name> [--browser]` | Have the human sign in to a Codex account; writes `codex-worker.json`. |
 | `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human add an isolated Claude CLI account and store its token at the Keychain prompt. |
@@ -173,6 +173,16 @@ Quota sleeps are excluded from active time; weekly usage counts advances of each
 mark during execs, excluding gaps between them, and can include concurrent activity on a shared
 account. `report` sums recorded phase spend, with endpoint deltas as a fallback for older journals.
 `--json` exposes the same metrics and the task's `created` timestamp; date filters use UTC.
+Label a task with `start --task-type LABEL`; `say` and `review` inherit it, and `say --task-type LABEL`
+replaces it. Labels use 1–32 lowercase letters, digits or hyphens, with no fixed vocabulary: for example
+`feature`, `fix`, `refactor`, `mechanical`, `tests`, `bench`, `logic`, `ml`, or `docs`.
+Each model phase records its model and reasoning effort, preferring execution metadata and falling back
+to the invoked account's configuration and explicit overrides; unknown values stay null.
+Task JSON includes `task_type` plus `models` and `reasoning_efforts` lists in first-use order.
+Use `report --by effort,task-type` to compare task counts, done fractions, and medians of rounds,
+active minutes, and weekly usage. A task appears once in every observed group; each group includes
+its whole task cost. Missing values, including old journal entries, group as `unknown`.
+See [telemetry](plugins/codex-worker/skills/codex-worker/references/telemetry.md) for metadata and grouping details.
 Empty searches with environment assignments bypass the repeat guard; state and `report --json` retain [turn stop history](plugins/codex-worker/skills/codex-worker/references/telemetry.md#the-journal) across follow-ups.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,

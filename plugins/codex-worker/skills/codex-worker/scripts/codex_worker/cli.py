@@ -1,13 +1,13 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--effort E] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--effort E] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--effort E] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex_task.py say <slug> "message" | --file FILE [--effort E] [--task-type LABEL] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
-  codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]
+  codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model] [--json]
   codex_task.py stop <slug>                           interrupt without rotating
   codex_task.py clean <slug> [--keep-branch]          remove worktree, archive all threads
   codex_task.py accounts                             read account limits and login status
@@ -31,12 +31,19 @@ The internal _run <slug> supervisor survives the caller and opens a new thread o
 """
 import argparse
 import math
+import re
 import sys
 
 from . import commands, config, prompts, supervisor, wait_view
 
 
 HELP_TEXT = __doc__
+
+
+def task_type(value):
+    if not re.fullmatch(r"[a-z0-9-]{1,32}", value):
+        raise argparse.ArgumentTypeError("task type must be 1-32 characters of a-z, 0-9 and '-'")
+    return value
 
 
 def check_timeout(value):
@@ -112,6 +119,10 @@ OPTION_REGISTRY = (
      "synopsis": "[--effort E]",
      "commands": {"start": {"help": "default: model_reasoning_effort from ~/.codex/config.toml"},
                   "say": {}, "review": {}}},
+    {"names": ("--task-type",), "argparse": {"type": task_type, "metavar": "LABEL"},
+     "synopsis": "[--task-type LABEL]",
+     "commands": {"start": {"help": "optional task label for telemetry"},
+                  "say": {"help": "replace the saved task label for telemetry"}}},
     {"names": ("--parallel",), "argparse": {"action": "store_true"},
      "synopsis": "[--parallel]", "commands": {"start": {}}},
     {"names": ("--sandbox",),
@@ -267,6 +278,7 @@ def main():
     s.add_argument("--since", default="7d", metavar="7d|30d|YYYY-MM-DD")
     s.add_argument("--repo", help="repository directory name")
     s.add_argument("--slug")
+    s.add_argument("--by", help="group by task-type, effort, model, or comma-separated dimensions")
     s.add_argument("--json", action="store_true")
     s = sub.add_parser("clean")
     s.add_argument("slug")

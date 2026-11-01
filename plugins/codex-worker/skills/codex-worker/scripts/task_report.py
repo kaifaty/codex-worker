@@ -7,6 +7,7 @@ import datetime
 import json
 import math
 import re
+import statistics
 import time
 from bisect import bisect_right
 from collections import Counter
@@ -122,13 +123,28 @@ def _read_rows(log_path, since, until, repo, slug):
 
 def _task(repo, slug, created):
     return {"repo": repo, "slug": slug, "created": created, "turns": 0, "rounds": 0,
+            "task_type": None, "models": [], "reasoning_efforts": [],
             "active_minutes": 0, "tokens": _empty_tokens(), "weekly_used_percent": 0,
             "capacity_retries": 0,
             "last_verdict": None, "outcome": None, "result_status": None,
             "auto_fix_stop": None, "ci": None,
             "max_task_weekly_percent": None, "budget_stop": None,
             "turn_stops": [], "reviews": [],
-            "_reviews": {}, "_turns": [], "_latest_turn": 0}
+            "_reviews": {}, "_turns": [], "_latest_turn": 0, "_model_settings": []}
+
+
+def _accumulate_model_settings(row, task):
+    usage = row.get("usage")
+    settings = [entry for entry in usage if isinstance(entry, dict)
+                and ("model" in entry or "reasoning_effort" in entry)] if isinstance(usage, list) else []
+    for entry in settings or [row]:
+        model = _identifier(entry.get("model"))
+        effort = _identifier(entry.get("reasoning_effort"))
+        if (model, effort) not in task["_model_settings"]:
+            task["_model_settings"].append((model, effort))
+        for key, value in (("models", model), ("reasoning_efforts", effort)):
+            if value not in task[key]:
+                task[key].append(value)
 
 
 def _account(name):
@@ -272,6 +288,8 @@ def _accumulate_rows(rows, identities):
     for row, identity in zip(rows, identities):
         phase = row["phase"]
         task = tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
+        if _identifier(row.get("task_type")) is not None:
+            task["task_type"] = row["task_type"]
         task["_latest_turn"] = max(task["_latest_turn"], _round(row.get("turn")))
         if phase == "turn":
             # Final supervisor results carry no additional stage cost or usage.
@@ -290,6 +308,7 @@ def _accumulate_rows(rows, identities):
         _add_tokens(totals["tokens"], row.get("tokens"))
         _add_tokens(task["tokens"], row.get("tokens"))
         if is_turn:
+            _accumulate_model_settings(row, task)
             totals["turns"] += 1
             task["turns"] += 1
             # Normal wrap-up success/failure retains the parent budget/stuck
@@ -324,6 +343,9 @@ def _reconcile_tasks(tasks):
         groups = list(task.pop("_reviews").items())
         verdicts = {group: _review_verdict(review_rows) for group, review_rows in groups}
         final_turns = task.pop("_turns")
+        if not task["_model_settings"]:
+            for row in final_turns or [{}]:
+                _accumulate_model_settings(row, task)
         for row in final_turns:
             turn_ci = row.get("ci")
             if isinstance(turn_ci, dict) and _identifier(turn_ci.get("outcome")) in CI_OUTCOMES:
@@ -367,21 +389,48 @@ def _reconcile_tasks(tasks):
                        "result_status": result_status, "auto_fix_stops": auto_fix_stops}
 
 
-def build_report(log_path, since="7d", repo=None, slug=None, now=None):
+def _group_tasks(tasks, by):
+    groups = {}
+    for task in tasks:
+        memberships = set()
+        for model, effort in task["_model_settings"]:
+            values = {"task-type": task["task_type"], "effort": effort, "model": model}
+            memberships.add(tuple(values[key] or "unknown" for key in by))
+        for membership in memberships:
+            groups.setdefault(membership, []).append(task)
+    rows = []
+    for values, members in sorted(groups.items()):
+        row = {key.replace("-", "_"): value for key, value in zip(by, values)}
+        row.update(tasks=len(members),
+                   done_fraction=_fraction(sum(task["result_status"] == "done" for task in members), len(members)),
+                   median_rounds=statistics.median(task["rounds"] for task in members),
+                   median_active_minutes=statistics.median(task["active_minutes"] for task in members),
+                   median_weekly_used_percent=statistics.median(task["weekly_used_percent"] for task in members))
+        rows.append(row)
+    return rows
+
+
+def build_report(log_path, since="7d", repo=None, slug=None, now=None, by=None):
     """Return JSON-safe summary, account totals, and tasks ordered by cost.
 
     Percentages describe percentage points of a weekly window. Ratios are in
     the range 0..1 and are null when there are no measured samples.
     """
     now = time.time() if now is None else now
+    dimensions = list(dict.fromkeys(key.strip() for key in by.split(","))) if by is not None else []
+    if any(key not in ("task-type", "effort", "model") for key in dimensions):
+        raise ValueError("--by must contain task-type, effort, or model separated by commas")
     since_at = _since_timestamp(since, now)
     rows = _read_rows(log_path, since_at, now, repo, slug)
     tasks, account_rows, totals = _accumulate_rows(rows, _task_identities(rows))
     task_rows, reconciled = _reconcile_tasks(tasks)
+    groups = _group_tasks(task_rows, dimensions) if dimensions else None
+    for task in task_rows:
+        task.pop("_model_settings")
     checks = totals["checks"]
     reviews = totals["reviews"]
     ci = reconciled["ci"]
-    return {
+    report = {
         "since": _utc(since_at), "until": _utc(now), "filters": {"repo": repo, "slug": slug},
         "summary": {
             "tasks": len(task_rows), "turns": totals["turns"], "active_hours": totals["active_seconds"] / 3600,
@@ -404,6 +453,9 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None):
         },
         "accounts": account_rows, "tasks": task_rows,
     }
+    if dimensions:
+        report.update(by=dimensions, groups=groups)
+    return report
 
 
 def _percent(value):
@@ -416,6 +468,18 @@ def _distribution(values):
 
 def render_report(report):
     """Render the same metrics as the JSON report in a compact CLI table."""
+    if report.get("by"):
+        dimensions = report["by"]
+        lines = [f"Task report: {report['since']} to {report['until']}",
+                 "  ".join(dimensions + ["tasks", "done", "median rounds", "median minutes", "median weekly %"])]
+        for row in report["groups"]:
+            labels = [row[key.replace("-", "_")] for key in dimensions]
+            lines.append("  ".join(labels + [str(row["tasks"]), _percent(row["done_fraction"]),
+                                            f"{row['median_rounds']:g}", f"{row['median_active_minutes']:.1f}",
+                                            f"{row['median_weekly_used_percent']:.2f}"]))
+        if not report["groups"]:
+            lines.append("(no tasks)")
+        return "\n".join(lines)
     summary = report["summary"]
     tokens = summary["tokens"]
     checks = summary["checks"]

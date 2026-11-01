@@ -143,6 +143,9 @@ class MonitorEvents:
     refusal: Optional[str] = None
     final_message: str = ""
     exit_code: Optional[int] = None
+    model: Optional[str] = None
+    reasoning_effort: Optional[str] = None
+    review_model: Optional[str] = None
 
 
 @dataclass
@@ -388,14 +391,26 @@ def finish_monitor(st, account, proc, stream, usage, last, reviewing, wrapup,
             stream.review_entry.update(outcome="refused", refusal=stream.refusal)
     elif not reviewing and st.get("kind") != "scout":
         st["result"] = None if stream.refusal else result_schema.parse_result(message)
+    settings = {"model": stream.model, "reasoning_effort": stream.reasoning_effort}
+    final_path = usage.path
     try:
         final_path = usage.path or threads.rollout_path(account["home"], stream.thread)
+        reported = threads.rollout_model_settings(final_path, usage.usage_offset)
+        # Native review inherits the parent model unless review_model replaces it.
+        if stream.review_model is None or stream.review_model == reported.get("model"):
+            settings.update(reported)
+    except Exception as exc:
+        telemetry_log.telemetry_error(st, exc)
+    st.update(model=settings["model"], reasoning_effort=settings["reasoning_effort"])
+    if telemetry is not None:
+        telemetry.model, telemetry.reasoning_effort = settings["model"], settings["reasoning_effort"]
+    try:
         if final_path is not None:
             threads.rollout_limits(final_path, record_limits, usage.usage_offset)
         if telemetry is not None:
             telemetry.add_usage(account["name"], stream.thread, usage_before,
                                 final_path, usage.usage_offset,
-                                st.get("weekly_used_percent", 0) - weekly_started)
+                                st.get("weekly_used_percent", 0) - weekly_started, **settings)
     except Exception as exc:
         telemetry_log.telemetry_error(st, exc)
     task_state.save(st)
@@ -415,6 +430,9 @@ def monitor(st, cfg, account, prompt, effort, stopped, on_limit, review_fallback
     stream = MonitorEvents(thread)
     last = d / ("review.md" if reviewing else "last.md")
     args, prompt = monitor_command(st, cfg, prompt, effort, reviewing, review_fallback, wrapup, thread, last)
+    settings = threads.configured_model_settings(account["home"], args)
+    stream.model, stream.reasoning_effort = settings["model"], settings["reasoning_effort"]
+    stream.review_model = settings["review_model"] if args[1:3] == ["exec", "review"] else None
     path = threads.rollout_path(account["home"], thread) if thread else None
     previous_size = path.stat().st_size if path else 0
     telemetry = telemetry_log.telemetry_phase(st)

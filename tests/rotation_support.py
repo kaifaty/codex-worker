@@ -329,6 +329,8 @@ def execute():
         if stopped[0]:
             return 130
     rollout_limits(initial=True)
+    if run.get("turn_context") and not run.get("omit_rollout"):
+        append(rollout, {"type": "turn_context", "payload": run["turn_context"]})
     for used in run.get("weekly_samples_after_initial", []):
         rollout_limits(weekly_used=used)
     # Publish the ready fixture before the supervisor starts looking for its rollout.

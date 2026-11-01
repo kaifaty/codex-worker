@@ -60,6 +60,8 @@ def record_turn_result(st, stopped):
         result = st.get("result") or {}
         row = {"v": 1, "at": clock.CLOCK.time(), "slug": st["slug"], "repo": Path(st["repo"]).name,
                "created": st.get("created"), "kind": st.get("kind", "work"), "phase": "turn",
+               "task_type": st.get("task_type"), "model": st.get("model"),
+               "reasoning_effort": st.get("reasoning_effort"),
                "turn": st.get("turns", 0), "round": len(st.get("rounds", [])),
                "account": notifications.current_turn_account(st), "started": st.get("turn_started"),
                "finished": st.get("turn_finished"), "outcome": st.get("outcome"),
@@ -94,8 +96,12 @@ class PhaseTelemetry:
         self.check = None
         self.reviewer = "codex"
         self.cost_usd = None
+        self.model = None
+        self.reasoning_effort = None
 
-    def add_usage(self, account, thread, before, path, offset, weekly_spent=0):
+    def add_usage(self, account, thread, before, path, offset, weekly_spent=0,
+                  model=None, reasoning_effort=None):
+        self.model, self.reasoning_effort = model, reasoning_effort
         if not thread:
             return
         first, last = threads.rollout_usage(path, offset)
@@ -112,6 +118,7 @@ class PhaseTelemetry:
             tokens[key] = (end - start if type(start) in (int, float) and type(end) in (int, float)
                            and end >= start else None)
         self.usage.append({"account": account, "thread": thread, "tokens": tokens,
+                           "model": model, "reasoning_effort": reasoning_effort,
                            "weekly_used_before": weekly_before,
                            "weekly_used_after": ((last or {}).get("weekly")
                                                  if (last or {}).get("weekly") is not None else weekly_before),
@@ -120,6 +127,9 @@ class PhaseTelemetry:
     def add_claude_usage(self, telemetry, account):
         self.reviewer = "claude"
         self.cost_usd = telemetry.get("cost_usd")
+        self.model = telemetry.get("model")
+        self.reasoning_effort = telemetry.get("reasoning_effort")
+        self.st.update(model=self.model, reasoning_effort=self.reasoning_effort)
         usage = telemetry.get("usage") or {}
         # Anthropic reports cached inputs separately; Codex input includes them.
         inputs = [usage.get(key) for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")]
@@ -128,6 +138,7 @@ class PhaseTelemetry:
                   "cached_input": usage.get("cache_read_input_tokens"),
                   "output": usage.get("output_tokens"), "reasoning": None}
         self.usage.append({"account": account, "thread": None, "tokens": tokens,
+                           "model": self.model, "reasoning_effort": self.reasoning_effort,
                            "weekly_used_before": None, "weekly_used_after": None, "weekly_spent": 0})
 
     def finish(self, outcome=None, result=None):
@@ -154,6 +165,8 @@ class PhaseTelemetry:
             check = self.check or {}
             row = {"v": 1, "at": finished, "slug": st["slug"], "repo": Path(st["repo"]).name,
                    "created": st.get("created"),
+                   "task_type": st.get("task_type"), "model": self.model,
+                   "reasoning_effort": self.reasoning_effort,
                    "kind": self.kind, "phase": self.phase, "turn": st.get("turns", 0),
                    "round": self.round, "angle": self.angle,
                    "account": last.get("account", st.get("review_account") if reviewing else st.get("account")),

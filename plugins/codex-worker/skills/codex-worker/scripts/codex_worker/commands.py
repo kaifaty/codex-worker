@@ -69,7 +69,8 @@ def cmd_start(a):
             'report that with the numbers instead of fixing it.')
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
-          "effort": a.effort, "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
+          "effort": a.effort, "task_type": a.task_type,
+          "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
           "rotations": [], "reviews": [], "checks": [], "check": a.check, "check_timeout": a.check_timeout,
           "guards": a.guard, "base_check": a.base_check,
           "sandbox": sandbox, "writable_dirs": cfg["writable_dirs"], "no_push": no_push,
@@ -151,6 +152,8 @@ def cmd_say(a):
         procs.die("empty message")
     cfg = config.accounts_config()
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
+    if getattr(a, "task_type", None) is not None:
+        st["task_type"] = a.task_type
     minutes = getattr(a, "max_minutes", None)
     st["max_turn_minutes"] = minutes if minutes is not None else cfg.get("max_turn_minutes")
     if no_ci_command:
@@ -266,7 +269,8 @@ def cmd_stats(a):
 def cmd_report(a):
     report = runpy.run_path(str(config.REPORT))
     try:
-        data = report["build_report"](config.CODEX_HOME / "codex-worker-log.jsonl", a.since, a.repo, a.slug)
+        data = report["build_report"](config.CODEX_HOME / "codex-worker-log.jsonl", a.since, a.repo, a.slug,
+                                      by=getattr(a, "by", None))
     except ValueError as exc:
         procs.die(str(exc))
     print(json.dumps(data, ensure_ascii=False) if a.json else report["render_report"](data))
