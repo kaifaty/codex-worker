@@ -816,6 +816,45 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertFalse(pool.limited(pool.read_limits()["first"]))
         self.assertEqual(pool.select(cfg, "review")["name"], "first")
 
+    def test_claude_token_mark_bounds_an_unknown_rate_limit_reset_to_one_hour(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        pool = self.worker().claude_accounts
+        cfg = self.worker().config.accounts_config()
+        # Token mark first, then a rejection without any known reset.
+        token_until = pool.mark_limited("first", token_unavailable=True)
+        pool.save_limits("first", {"status": "rejected"})
+        self.assertEqual(pool.mark_limited("first"), token_until)
+        # A rejection without a known reset first, then a token failure.
+        pool.save_limits("second", {"status": "rejected"})
+        self.assertIsNone(pool.mark_limited("second"))
+        self.assertEqual(pool.mark_limited("second", token_unavailable=True), token_until)
+        for name in ("first", "second"):
+            info = pool.read_limits()[name]
+            self.assertEqual(info["limited_until"], info["token_retry_at"])
+        self.assertIsNone(pool.select(cfg, "review"))
+        clock.sleep(token_until - clock.time() + 1)
+        self.assertEqual({pool.select(cfg, "review", exclude=(name,))["name"] for name in ("first", "second")},
+                         {"first", "second"})
+
+    def test_claude_expired_token_flag_lets_a_fresh_allowance_lift_a_later_rate_limit(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        pool = self.worker().claude_accounts
+        cfg = self.worker().config.accounts_config()
+        token_until = pool.mark_limited("first", token_unavailable=True)
+        clock.sleep(token_until - clock.time() + 1)
+        later = clock.time() + 5 * 3600
+        pool.save_limits("first", {"status": "rejected", "resetsAt": later})
+        self.assertEqual(pool.mark_limited("first"), later)
+        marked = pool.read_limits()["first"]
+        self.assertTrue(marked["token_unavailable"])
+        self.assertFalse(pool.token_marked(marked))
+        self.assertIsNone(pool.select(cfg, "review", exclude=("second",)))
+        pool.save_limits("first", {"status": "allowed", "resetsAt": later}, marked["limited_at"] + 1)
+        self.assertNotIn("limited_until", pool.read_limits()["first"])
+        self.assertEqual(pool.select(cfg, "review", exclude=("second",))["name"], "first")
+
     def test_claude_token_mark_from_an_earlier_version_expires_after_one_hour(self):
         self.claude_pool_fixture()
         clock = self.enable_fake_clock()

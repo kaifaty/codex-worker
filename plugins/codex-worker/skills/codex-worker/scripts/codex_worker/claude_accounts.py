@@ -74,7 +74,7 @@ def save_limits(name, info, event_time=None):
         fresh = _finite(event_time) and _finite(marked_at) and event_time > marked_at
         previous.update(selected)
         if (selected.get("status") in ("allowed", "allowed_warning") and (not active or fresh)
-                and not previous.get("token_unavailable")):
+                and not token_marked(previous)):
             previous.pop("limited_until", None)
             previous.pop("limited_at", None)
         limits[name] = previous
@@ -138,8 +138,9 @@ def mark_limited(name, token_unavailable=False):
         if token_unavailable:
             until = now + TOKEN_RETRY_SECONDS
             if limited(info, now):
+                # An unknown reset would exclude the account for good; keep the hour.
                 reset = info.get("limited_until", info.get("resetsAt"))
-                if not _finite(reset) or reset > until:
+                if _finite(reset) and reset > until:
                     until = reset
             info.update(token_unavailable=True, token_retry_at=now + TOKEN_RETRY_SECONDS,
                         limited_until=until, limited_at=now)
@@ -153,7 +154,7 @@ def mark_limited(name, token_unavailable=False):
         reset = info.get("resetsAt")
         if not _finite(reset) or reset <= now:
             reset = max(depleted) if depleted else min(resets, default=None)
-        if token_marked(info, now) and _finite(reset) and reset < info["token_retry_at"]:
+        if token_marked(info, now) and (not _finite(reset) or reset < info["token_retry_at"]):
             reset = info["token_retry_at"]
         info["limited_until"] = reset
         info["limited_at"] = now
