@@ -489,6 +489,17 @@ def cmd_login(a):
     os.execvpe(binary, [binary, "login"] + ([] if a.browser else ["--device-auth"]), accounts.account_env(account))
 
 
+def terminal_device():
+    """The person's terminal by its own device path. macOS kqueue rejects the
+    /dev/tty alias, and the Claude CLI watches its input with kqueue."""
+    for descriptor in (0, 1, 2):
+        try:
+            return os.ttyname(descriptor)
+        except OSError:
+            pass
+    return "/dev/tty"
+
+
 def cmd_claude_login(a):
     if not re.fullmatch(r"[a-z0-9-]+", a.name):
         procs.die("Claude account name must contain only a-z, 0-9 and '-'")
@@ -508,7 +519,7 @@ def cmd_claude_login(a):
     # setup-token displays the credential for the person to paste into the
     # Keychain prompt. Keep both interactive tools off captured command output.
     try:
-        with open("/dev/tty", "r+b", buffering=0) as terminal:
+        with open(terminal_device(), "r+b", buffering=0) as terminal:
             for argv in ([config.claude_binary(), "setup-token"],
                          ["security", "add-generic-password", "-U", "-s", service,
                           "-a", os.environ.get("USER", ""), "-w"]):
