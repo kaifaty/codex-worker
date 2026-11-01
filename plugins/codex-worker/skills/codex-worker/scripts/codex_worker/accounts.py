@@ -8,7 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import config, procs
+from . import claude_accounts, config, procs
 
 
 def account_named(cfg, name):
@@ -204,16 +204,18 @@ def available(infos, cfg, exclude=()):
     return min(choices, key=lambda i: longest_window(i).get("reset") or float("inf")) if choices else None
 
 
-def claude_reviewer_line():
-    try:
-        limits = json.loads((config.TASKS / "claude-limits.json").read_text(encoding="utf-8"))
-        windows = limits.get("unifiedWindows") or {}
-    except (OSError, ValueError, AttributeError):
-        return "claude reviewer: unknown"
-    parts = []
-    for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
-        window = windows.get(name) or {}
-        used = window.get("utilization")
-        percent = f"{used * 100:g}%" if type(used) in (int, float) else "unknown"
-        parts.append(f"{label} {percent} (reset {config.local_time(window.get('resetsAt'))})")
-    return "claude reviewer: " + "; ".join(parts)
+def claude_account_lines(cfg):
+    limits, lines = claude_accounts.read_limits(), []
+    for account in claude_accounts.accounts(cfg):
+        info = limits.get(account["name"], {})
+        windows = info.get("unifiedWindows") or {}
+        parts = []
+        for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
+            window = windows.get(name) or {}
+            used = window.get("utilization")
+            percent = f"{used * 100:g}%" if type(used) in (int, float) else "unknown"
+            parts.append(f"{label} {percent} (reset {config.local_time(window.get('resetsAt'))})")
+        if claude_accounts.limited(info):
+            parts.append("limited until " + config.local_time(info.get("limited_until", info.get("resetsAt"))))
+        lines.append("claude " + account["name"] + ": " + "; ".join(parts))
+    return lines

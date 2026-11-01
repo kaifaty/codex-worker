@@ -124,7 +124,7 @@ class PhaseTelemetry:
                                                  if (last or {}).get("weekly") is not None else weekly_before),
                            "weekly_spent": weekly_spent})
 
-    def add_claude_usage(self, telemetry):
+    def add_claude_usage(self, telemetry, account):
         self.reviewer = "claude"
         self.cost_usd = telemetry.get("cost_usd")
         self.model = telemetry.get("model")
@@ -137,7 +137,7 @@ class PhaseTelemetry:
                   if any(value is not None for value in inputs) else None,
                   "cached_input": usage.get("cache_read_input_tokens"),
                   "output": usage.get("output_tokens"), "reasoning": None}
-        self.usage.append({"account": None, "thread": None, "tokens": tokens,
+        self.usage.append({"account": account, "thread": None, "tokens": tokens,
                            "model": self.model, "reasoning_effort": self.reasoning_effort,
                            "weekly_used_before": None, "weekly_used_after": None, "weekly_spent": 0})
 
@@ -190,7 +190,7 @@ class PhaseTelemetry:
             if self.phase == "review":
                 row["reviewer"] = self.reviewer
                 if self.reviewer == "claude":
-                    row.update(account=None, thread=None, weekly_spent=0, cost_usd=self.cost_usd)
+                    row.update(thread=None, weekly_spent=0, cost_usd=self.cost_usd)
             write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)

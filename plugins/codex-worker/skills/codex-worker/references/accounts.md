@@ -31,26 +31,65 @@ subscriptions, the settings can contain:
 }
 ```
 
-## Claude reviewer account
+## Claude account pool
 
-`--reviewer claude` reviews through a separate Anthropic subscription. Install Claude Code CLI, then
-have the user create a token while signed in to the reviewer subscription in an isolated config:
+`claude.accounts` is a pool of isolated Claude Code CLI accounts without assigned roles. Reviews
+are its first consumer; `--reviewer claude` keeps implementation and fix rounds in Codex.
+Install Claude Code CLI, then have the human add each Anthropic subscription:
 
 ```sh
-env -i HOME="$HOME" USER="$USER" PATH="$PATH" LANG=en_US.UTF-8 \
-  CLAUDE_CONFIG_DIR="$HOME/.claude-accounts/reviewer" claude setup-token
-security add-generic-password -U -s codex-worker-claude-reviewer -a "$USER" -w
+python3 -I "$T" claude-login first
+python3 -I "$T" claude-login second
 ```
 
-Paste the issued token at the Keychain password prompt. The supervisor reads it with
-`security find-generic-password` immediately before each review and passes it only through the child
-environment. Do not put it in settings, command arguments, or task files. The `claude.config_dir` and
-`claude.token_keychain` settings replace these defaults; see [settings.md](settings.md#claude-reviewer).
+`claude-login <name> [--config-dir DIR] [--keychain SERVICE]` runs `claude setup-token` in a cleaned
+environment and an isolated `CLAUDE_CONFIG_DIR`, defaulting to `~/.claude-accounts/<name>`. The human
+completes sign-in, then pastes the issued token at the Keychain password prompt. The command invokes
+`security add-generic-password -U -s <service> -a "$USER" -w`; the service defaults to
+`codex-worker-claude-<name>`. On success it appends the account to `claude.accounts` in
+`~/.codex/codex-worker.json`. Names contain only lowercase letters, digits and hyphens and must be
+unique. Re-running the command for an existing name refreshes its login instead of duplicating it;
+explicit path or service overrides update that entry after successful setup. Adding to legacy settings
+preserves their account as `default`, including when its paths come entirely from defaults.
+Concurrent logins merge their account entries into the latest settings after sign-in finishes.
+Both sign-in and the Keychain prompt use the human's terminal;
+the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
 
-`accounts` adds a `claude reviewer` line with utilization percentages and local reset times for the
-five-hour and seven-day windows from the last Claude rate-limit event. Before the first event, it
-prints `unknown`. The cache is `~/.codex/claude-tasks/claude-limits.json`. Claude review costs and
-tokens appear separately in telemetry and `report`.
+For example:
+
+```json
+{
+  "claude": {
+    "accounts": [
+      {"name": "first", "config_dir": "~/.claude-accounts/first", "token_keychain": "codex-worker-claude-first"},
+      {"name": "second", "config_dir": "~/.claude-accounts/second", "token_keychain": "codex-worker-claude-second"}
+    ]
+  }
+}
+```
+
+The legacy `claude.config_dir` and `claude.token_keychain` settings still form a one-account pool
+named `default`. With neither configured, that account retains `~/.claude-accounts/reviewer` and
+`codex-worker-claude-reviewer`. Model, effort and maximum turns are shared settings under `claude`;
+see [settings.md](settings.md#claude-accounts).
+
+Before each review or angle, the supervisor prefers accounts below `soft_switch_at` in both the
+five-hour and seven-day windows, ordered by the earliest seven-day reset. If there are none, it
+uses the same ordering among accounts below `switch_at` in both windows. Unknown limits count as
+available. Angles in the same review prefer different available accounts.
+
+A rejected rate limit or 401/403 marks that account unavailable until its reported reset and retries
+the same review on another available account. A late allowance snapshot does not clear an active
+limit marker. The reset is shown as `unknown` when none was reported. `wait` prints one line per switch:
+`== claude account <a> limited until <time>; review by <b>`. Once no Claude account is available,
+the review falls back to Codex. See [review-cycle.md](review-cycle.md#review-provider) for other
+fallback causes and cancellation behavior.
+
+`accounts` prints one Claude line per account, with its name, five-hour and seven-day utilization
+percentages, local reset times and any limit marker. Before a rate-limit event, limits are
+`unknown`. The cache `~/.codex/claude-tasks/claude-limits.json` stores a dictionary by account name;
+an older unnamed cache is read as `default`. Every Claude review record and journal row carries its
+account name; `report --json` includes it in each task's `reviews` list. Claude review costs and tokens remain separate from Codex.
 
 ## Rotation
 

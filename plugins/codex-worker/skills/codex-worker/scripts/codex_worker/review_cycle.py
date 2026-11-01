@@ -5,7 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import budgets, checking, claude_review, clock, config, notifications, procs, prompts, task_state, telemetry_log, threads, turns
+from . import budgets, checking, claude_accounts, claude_review, clock, config, notifications, procs, prompts, task_state, telemetry_log, threads, turns
 
 
 def selected_review_angles(st, cfg):
@@ -75,37 +75,58 @@ def merge_reviews(angles):
     return {"verdict": verdict, "findings": findings, "summary": summary, "angles": angles}
 
 
-def claude_review_turn(st, cfg, prompt, stopped):
-    """Record one Claude attempt; only unavailability permits a Codex fallback."""
-    st["review_account"] = "claude"
-    with telemetry_log.record_phase(st, "review", stopped) as phase:
-        phase.reviewer = "claude"
-        entry = {"reviewer": "claude", "account": "claude", "thread": "",
-                 "started": clock.CLOCK.time(), "finished": None, "result": None,
-                 "round": len(st.get("rounds", [])),
-                 "angle": st.get("review_angle") or "correctness", "outcome": "running"}
-        st.setdefault("reviews", []).append(entry)
-        task_state.save(st)
-        last = config.TASKS / st["slug"] / "review.md"
-        last.unlink(missing_ok=True)
-        response = claude_review.run(st, cfg, prompt, stopped)
-        if response["outcome"] == "completed":
-            last.write_text(json.dumps(response["result"], ensure_ascii=False, indent=2), encoding="utf-8")
-        st["outcome"] = response["outcome"]
-        entry.update(result=response["result"], outcome=response["outcome"],
-                     finished=clock.CLOCK.time(), thread=response["telemetry"].get("session_id") or "")
-        phase.add_claude_usage(response["telemetry"])
-        if response["outcome"] == "unavailable":
-            entry["unavailable"] = response["reason"]
-        elif response.get("reason"):
-            st["error"] = response["reason"]
-        task_state.save(st)
-    return response["outcome"]
+def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
+    """Retry a limited Claude account before allowing a Codex fallback."""
+    attempted = set()
+    deadline = None
+    account = claude_accounts.select(cfg, "review", prefer_unused=used_accounts)
+    while account is not None:
+        name = account["name"]
+        retry = False
+        attempted.add(name)
+        used_accounts.add(name)
+        st["review_account"] = name
+        with telemetry_log.record_phase(st, "review", stopped) as phase:
+            phase.reviewer = "claude"
+            entry = {"reviewer": "claude", "account": name, "thread": "",
+                     "started": clock.CLOCK.time(), "finished": None, "result": None,
+                     "round": len(st.get("rounds", [])),
+                     "angle": st.get("review_angle") or "correctness", "outcome": "running"}
+            st.setdefault("reviews", []).append(entry)
+            task_state.save(st)
+            last = config.TASKS / st["slug"] / "review.md"
+            last.unlink(missing_ok=True)
+            response = claude_review.run(st, cfg, prompt, stopped, account, deadline)
+            deadline = response["deadline"]
+            if response["outcome"] == "completed":
+                last.write_text(json.dumps(response["result"], ensure_ascii=False, indent=2), encoding="utf-8")
+            st["outcome"] = response["outcome"]
+            entry.update(result=response["result"], outcome=response["outcome"],
+                         finished=clock.CLOCK.time(), thread=response["telemetry"].get("session_id") or "")
+            phase.add_claude_usage(response["telemetry"], account=name)
+            if response["outcome"] == "unavailable":
+                entry["unavailable"] = response["reason"]
+                if response["reason"] in ("usage limit", "authentication failed", "token unavailable") and not stopped():
+                    entry["limited_until"] = claude_accounts.mark_limited(
+                        name, token_unavailable=response["reason"] == "token unavailable")
+                    account = claude_accounts.select(cfg, "review", exclude=attempted,
+                                                     prefer_unused=used_accounts)
+                    retry = account is not None
+                    entry["retry_account"] = account["name"] if retry else "codex"
+            elif response.get("reason"):
+                st["error"] = response["reason"]
+            task_state.save(st)
+        if retry:
+            continue
+        return response["outcome"]
+    st["outcome"] = "unavailable"
+    return "unavailable"
 
 
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
     st["review_account"] = None
     records = []
+    used_accounts = set()
     result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
     st.pop("review_result", None)
@@ -125,7 +146,7 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
             focused = prompt + f"\n\nReview angle: {angle}. {prompts.REVIEW_ANGLES[angle]}" if angle else prompt
             reviewer = st.get("reviewer", "codex")
             if reviewer == "claude":
-                outcome = claude_review_turn(st, cfg, focused, stopped)
+                outcome = claude_review_turn(st, cfg, focused, stopped, used_accounts)
                 if outcome == "unavailable" and not stopped():
                     reviewer = "codex"
                     st["review_account"] = None

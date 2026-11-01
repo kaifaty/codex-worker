@@ -134,7 +134,11 @@ def wait_review_lines(st, slug):
                    f"targets code from fix round {finding['round']} ({finding['commit']})")
     reviews = st.get("reviews", [])[st.get("review_start", 0):]
     for entry in reviews:
-        if entry.get("unavailable"):
+        if "retry_account" in entry:
+            reason = " (token unavailable)" if entry.get("unavailable") == "token unavailable" else ""
+            yield (f"== claude account {entry['account']} limited until "
+                   f"{config.local_time(entry.get('limited_until'))}{reason}; review by {entry['retry_account']}")
+        elif entry.get("unavailable"):
             yield f"== reviewer claude unavailable: {entry['unavailable']}; review by codex"
     reviews = [entry for entry in reviews if not entry.get("unavailable")]
     if not (st.get("kind") == "review" or st.get("rounds") or reviews):
@@ -147,7 +151,10 @@ def wait_review_lines(st, slug):
     entries = angles or reviews[-1:]
     for entry in entries:
         minutes = ((entry["finished"] if angles else entry.get("finished") or clock.CLOCK.time()) - entry["started"]) / 60
-        heading = "== review " + (f"angle {entry['angle']} " if angles else "") + f"by {entry['account']} ({minutes:.1f} min):"
+        account = entry["account"]
+        if entry.get("reviewer") == "claude":
+            account = "claude/" + account
+        heading = "== review " + (f"angle {entry['angle']} " if angles else "") + f"by {account} ({minutes:.1f} min):"
         result = entry.get("result")
         if angles and entry["outcome"] == "refused":
             yield heading + " refused"

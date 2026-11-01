@@ -13,6 +13,7 @@
   codex_task.py accounts                             read account limits and login status
   codex_task.py reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
+  codex_task.py claude-login <name> [--config-dir DIR] [--keychain SERVICE]  add/sign in to a Claude account
 
 All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
@@ -240,6 +241,7 @@ COMMAND_HANDLERS = {
     "accounts": commands.cmd_accounts,
     "reset-credit": commands.cmd_reset_credit,
     "login": commands.cmd_login,
+    "claude-login": commands.cmd_claude_login,
     "_run": supervisor.cmd__run,
 }
 
@@ -289,6 +291,10 @@ def main():
     s = sub.add_parser("login", help="sign in interactively to an isolated account home")
     s.add_argument("name")
     s.add_argument("--browser", action="store_true", help="use browser login instead of device auth")
+    s = sub.add_parser("claude-login", help="sign in interactively to an isolated Claude account")
+    s.add_argument("name")
+    s.add_argument("--config-dir", metavar="DIR", help="isolated Claude config directory")
+    s.add_argument("--keychain", metavar="SERVICE", help="Keychain service for the account token")
     if sys.argv[1:2] == ["scout"]:
         # Intermixed parsing is supported on the scout parser, not on subparsers as a group.
         a = scout_parser.parse_intermixed_args(sys.argv[2:])

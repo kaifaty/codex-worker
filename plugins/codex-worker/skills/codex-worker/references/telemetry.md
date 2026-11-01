@@ -55,6 +55,9 @@ Creation time identifies each task, so reusing a slug after `clean` produces a s
 ## Reading the numbers
 
 - Reports cover the last seven days by default; date filters start at UTC midnight.
+- Account totals are grouped by provider and account name. JSON account rows include `provider`
+  (`codex` or `claude`); historical rows without provider or reviewer metadata count as Codex.
+  Text reports label Claude accounts as `claude/NAME`, keeping identically named subscriptions separate.
 - Turns include work, fixes, wrap-ups, individual review angles, and scouts. Active time also includes
   checks and excludes quota sleeps and CI waits.
 - Weekly usage and the task budget use the same accounting described below. Missing rollout

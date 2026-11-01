@@ -1,12 +1,169 @@
 """Account authentication, reset waits and monitor tests."""
+import json
+import os
+import sys
 import time
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from types import SimpleNamespace
 from unittest import mock
 
-from rotation_support import IMPOSSIBLE_PID, RotationTestCase
+from rotation_support import IMPOSSIBLE_PID, PYTHON, RotationTestCase
 
 
 class AccountAuthTests(RotationTestCase):
+    def test_claude_login_registers_accounts_without_capturing_credentials(self):
+        worker = self.worker()
+        trace = self.root / "login-trace.jsonl"
+        terminal = self.root / "login-terminal"
+        terminal.touch()
+        token = "fixture-interactive-claude-token"
+        for name in ("claude", "security"):
+            executable = self.root / name
+            executable.write_text("#!" + PYTHON + "\n" +
+                                  "import json, os, sys\n" +
+                                  "from pathlib import Path\n" +
+                                  "with Path(" + repr(str(trace)) + ").open('a') as stream:\n" +
+                                  "    stream.write(json.dumps({'command': " + repr(name) +
+                                  ", 'argv': sys.argv[1:], 'env': dict(os.environ)}) + '\\n')\n" +
+                                  ("print(" + repr(token) + ")\n" if name == "claude" else
+                                   "print('Keychain password:', file=sys.stderr)\n") +
+                                  "print('fixture-login-diagnostic', file=sys.stderr)\n")
+            executable.chmod(0o700)
+        legacy = {"config_dir": str(self.root / "legacy-claude"),
+                  "token_keychain": "fixture-legacy-service", "model": "fixture-model"}
+        path = self.home / "codex-worker.json"
+        path.write_text(json.dumps({"language": "en", "claude": legacy}))
+        environment = dict(self.env, HOME=str(self.root), USER="fixture-user",
+                           CODEX_TASK_CLAUDE=str(self.root / "claude"),
+                           CLAUDE_CODE_OAUTH_TOKEN=token, ANTHROPIC_API_KEY=token)
+        stdout, stderr = self.root / "login-stdout", self.root / "login-stderr"
+
+        @contextmanager
+        def capture_descriptors():
+            sys.stdout.flush()
+            sys.stderr.flush()
+            saved = [os.dup(descriptor) for descriptor in (1, 2)]
+            try:
+                with stdout.open("ab") as output, stderr.open("ab") as errors:
+                    os.dup2(output.fileno(), 1)
+                    os.dup2(errors.fileno(), 2)
+                    yield
+                    sys.stdout.flush()
+                    sys.stderr.flush()
+            finally:
+                for descriptor, original in zip((1, 2), saved):
+                    os.dup2(original, descriptor)
+                    os.close(original)
+
+        custom = self.root / "custom-claude"
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.commands, "open", create=True,
+                                  side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)) as opened_terminal, \
+                mock.patch.object(worker.commands.subprocess, "run", wraps=worker.commands.subprocess.run) as launched, \
+                capture_descriptors():
+            for arguments in (("claude-login", "second"),
+                              ("claude-login", "third", "--config-dir", str(custom),
+                               "--keychain", "fixture-custom-service")):
+                with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py"] + list(arguments)):
+                    worker.cli.main()
+            worker.claude_accounts.mark_limited("second")
+            self.assertTrue(worker.claude_accounts.limited(worker.claude_accounts.read_limits()["second"]))
+            with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "second"]):
+                worker.cli.main()
+        settings = json.loads(path.read_text())
+        self.assertEqual(settings["language"], "en")
+        self.assertNotIn("accounts", settings, "Claude login must not enable Codex rotation")
+        self.assertEqual(settings["claude"]["model"], "fixture-model")
+        self.assertEqual(settings["claude"]["accounts"], [
+            dict(name="default", config_dir=legacy["config_dir"], token_keychain=legacy["token_keychain"]),
+            {"name": "second", "config_dir": str(self.root / ".claude-accounts" / "second"),
+             "token_keychain": "codex-worker-claude-second"},
+            {"name": "third", "config_dir": str(custom), "token_keychain": "fixture-custom-service"}])
+        rows = [json.loads(line) for line in trace.read_text().splitlines()]
+        self.assertEqual([row["command"] for row in rows], ["claude", "security"] * 3)
+        for index, name in enumerate(("second", "third", "second")):
+            setup, keychain = rows[index * 2:index * 2 + 2]
+            account = next(account for account in settings["claude"]["accounts"] if account["name"] == name)
+            self.assertEqual(setup["argv"], ["setup-token"])
+            self.assertEqual(keychain["argv"], ["add-generic-password", "-U", "-s",
+                                                account["token_keychain"], "-a", "fixture-user", "-w"])
+            for row in (setup, keychain):
+                self.assertEqual(row["env"]["CLAUDE_CONFIG_DIR"], account["config_dir"])
+                self.assertNotIn("CLAUDE_CODE_OAUTH_TOKEN", row["env"])
+                self.assertNotIn("ANTHROPIC_API_KEY", row["env"])
+                self.assertNotIn(token, json.dumps(row))
+        self.assertNotIn("second", worker.claude_accounts.read_limits())
+        self.assertEqual([call.args[0] for call in opened_terminal.call_args_list], ["/dev/tty"] * 3)
+        for invocation in launched.call_args_list:
+            self.assertIs(invocation.kwargs["stdin"], invocation.kwargs["stdout"])
+            self.assertIs(invocation.kwargs["stdin"], invocation.kwargs["stderr"])
+            self.assertEqual(invocation.kwargs["stdin"].name, str(terminal))
+        self.assertEqual(launched.call_count, 6)
+        captured = stdout.read_text() + stderr.read_text()
+        self.assertNotIn(token, captured + path.read_text())
+        self.assertNotIn("fixture-login-diagnostic", captured)
+        self.assertNotIn("Keychain password:", captured)
+        self.assertIn(token, terminal.read_text(), "only the person's terminal receives the token")
+        path.write_text(json.dumps({"claude": {"model": "fixture-model"}}))
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.commands, "open", create=True,
+                                  side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
+                mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "second"]), \
+                capture_descriptors():
+            worker.cli.main()
+        self.assertEqual(json.loads(path.read_text())["claude"], {
+            "model": "fixture-model", "accounts": [
+                {"name": "default", "config_dir": str(self.root / ".claude-accounts" / "reviewer"),
+                 "token_keychain": "codex-worker-claude-reviewer"},
+                {"name": "second", "config_dir": str(self.root / ".claude-accounts" / "second"),
+                 "token_keychain": "codex-worker-claude-second"}]})
+
+    def test_concurrent_claude_logins_merge_the_latest_settings_after_interaction(self):
+        worker = self.worker()
+        ready, release = self.root / "login-ready", self.root / "login-release"
+        terminal = self.root / "login-terminal"
+        terminal.touch()
+        claude = self.root / "claude"
+        claude.write_text("#!" + PYTHON + "\n" +
+                          "import os, time\nfrom pathlib import Path\n" +
+                          "if Path(os.environ['CLAUDE_CONFIG_DIR']).name == 'first':\n" +
+                          "    Path(" + repr(str(ready)) + ").touch()\n" +
+                          "    while not Path(" + repr(str(release)) + ").exists():\n" +
+                          "        time.sleep(0.02)\n")
+        security = self.root / "security"
+        security.write_text("#!" + PYTHON + "\n")
+        for executable in (claude, security):
+            executable.chmod(0o700)
+        path = self.home / "codex-worker.json"
+        default = {"name": "default", "config_dir": "~/.claude-accounts/reviewer",
+                   "token_keychain": "codex-worker-claude-reviewer"}
+        settings = {"language": "en", "claude": {"model": "fixture-model", "accounts": [default]}}
+        path.write_text(json.dumps(settings))
+        environment = dict(self.env, HOME=str(self.root), USER="fixture-user", CODEX_TASK_CLAUDE=str(claude))
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.commands, "open", create=True,
+                                  side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
+                mock.patch("builtins.print"), ThreadPoolExecutor(max_workers=1) as executor:
+            first = executor.submit(worker.commands.cmd_claude_login,
+                                    SimpleNamespace(name="first", config_dir=None, keychain=None))
+            try:
+                self.until(ready.exists)
+                settings["switch_at"] = 87
+                settings["claude"]["model"] = "fixture-updated-model"
+                path.write_text(json.dumps(settings))
+                worker.commands.cmd_claude_login(SimpleNamespace(name="third", config_dir=None, keychain=None))
+                self.assertFalse(first.done(), "interactive login must not hold the settings lock")
+            finally:
+                release.touch()
+            first.result(timeout=10)
+        saved = json.loads(path.read_text())
+        pool = saved["claude"].pop("accounts")
+        self.assertEqual(saved, {"language": "en", "switch_at": 87,
+                                 "claude": {"model": "fixture-updated-model"}})
+        self.assertEqual([account["name"] for account in pool], ["default", "third", "first"])
+        self.assertEqual(pool[0], default, "unrelated account paths must remain unchanged")
+
     def test_auth_race_retries_once_on_the_same_thread_in_both_languages(self):
         worker = self.worker()
         for language in ("ru", "en"):
