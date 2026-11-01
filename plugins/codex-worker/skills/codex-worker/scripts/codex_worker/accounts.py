@@ -1,5 +1,6 @@
 """Account homes, app-server RPC and subscription limits."""
 import json
+import math
 import os
 import selectors
 import signal
@@ -8,7 +9,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import claude_accounts, config, procs
+from . import claude_accounts, clock, config, procs
 
 
 def account_named(cfg, name):
@@ -168,16 +169,72 @@ def longest_window(info):
     return max(windows, key=lambda w: w["minutes"]) if windows else {}
 
 
-def has_credits(info):
+def credits_floor(cfg):
+    """The configured credit reserve, or 0 after its local end date."""
+    floor = (cfg or {}).get("credits_floor", 0) or 0
+    until = (cfg or {}).get("credits_floor_until")
+    if floor and until and time.strftime("%Y-%m-%d", time.localtime(clock.CLOCK.time())) > until:
+        return 0
+    return floor
+
+
+def credit_balance(info):
+    """The account's credit balance as a finite number, or None when unknown."""
+    balance = info.get("limits", {}).get("credits", {}).get("balance")
+    if balance is None or isinstance(balance, bool):
+        return None
+    try:
+        value = float(balance)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) else None
+
+
+def spendable_credits(info, cfg):
+    balance = credit_balance(info)
+    return None if balance is None else max(0.0, round(balance - credits_floor(cfg), 6))
+
+
+def has_credits(info, cfg=None):
+    """Credits may be spent only above the active floor; without settings, above 0."""
     credits = info.get("limits", {}).get("credits", {})
     if credits.get("unlimited"):
         return True
     if not credits.get("hasCredits", credits.get("has_credits", False)):
         return False
-    try:
-        return float(credits.get("balance", 0) or 0) > 0
-    except (TypeError, ValueError):
-        return False
+    balance = credit_balance(info)
+    return balance is not None and balance > credits_floor(cfg)
+
+
+def at_credit_floor(info, cfg):
+    """A known, limited balance that the active floor reserves."""
+    floor = credits_floor(cfg)
+    balance = credit_balance(info)
+    return (floor > 0 and balance is not None
+            and not info.get("limits", {}).get("credits", {}).get("unlimited") and balance <= floor)
+
+
+def credit_floor_reason(info, cfg):
+    """Name the floor when it alone keeps an account with credits from spending them."""
+    floor = credits_floor(cfg)
+    if cfg.get("credits") and floor > 0 and has_credits(info) and not has_credits(info, cfg):
+        return f"credits of {info['name']} at the floor {floor:g}"
+    return None
+
+
+def credit_account(infos, cfg, exclude=()):
+    """Another logged-in account that may run on its own credits, the largest reserve first."""
+    if not cfg.get("credits"):
+        return None
+    choices = [i for i in infos if i.get("logged_in") and not i.get("duplicate")
+               and i["name"] not in exclude and has_credits(i, cfg)]
+
+    def reserve(info):
+        if info.get("limits", {}).get("credits", {}).get("unlimited"):
+            return float("inf")
+        return credit_balance(info)
+
+    return max(choices, key=reserve) if choices else None
 
 
 def snapshots(cfg, cancelled=lambda: False, prepare=False):

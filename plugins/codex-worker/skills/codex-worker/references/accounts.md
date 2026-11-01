@@ -113,6 +113,28 @@ follow-ups and current progress; commits and uncommitted changes are the startin
 threshold, if no other account is available, it continues on credits only when `credits` is true.
 Use `accounts` to inspect availability; two homes signed into the same ChatGPT account share limits.
 
+## Credits
+
+With `credits: true`, a task whose accounts have reached `switch_at` may keep running on an account's
+ChatGPT credits. `credits_floor` (default `0`) keeps a reserve: an account runs on credits only while
+its own known balance is strictly above the floor; `unlimited` credits always pass, and an unknown
+balance never does. `credits_floor_until` (optional `YYYY-MM-DD`) limits the reserve to that local
+date: the floor applies through the end of the day, and from the next day it is `0`, so the rest of
+the balance can be spent before it expires.
+
+```json
+{"credits": true, "credits_floor": 50, "credits_floor_until": "2030-06-15"}
+```
+
+The supervisor re-reads every account's balance at each limit sample while an exec runs on credits.
+When the balance reaches the floor, that account counts as exhausted without credits: the task
+rotates to an available account, or to another account with credits above the floor, and otherwise
+waits for a reset (or pauses with `wait_for_reset: false`). The same rule chooses the account at
+the start of a turn. `wait` and notifications give the reason, for example
+`credits of main at the floor 50`. `accounts` prints the active floor and its end date once and marks
+balances at or below it with `(at floor)`; `accounts --json` adds the active `credits_floor`,
+`credits_floor_until` and each account's `credits.spendable`.
+
 ## Waiting for a reset
 
 If all configured accounts are exhausted, the task waits and continues automatically after a reset (up

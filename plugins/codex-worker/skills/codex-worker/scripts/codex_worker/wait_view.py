@@ -30,6 +30,8 @@ def wait_rotation_lines(st):
     if st.get("exhausted"):
         e = st["exhausted"]
         reset = f"{config.local_time(e['reset'])} ({e['account']})" if e["reset"] is not None else "unknown"
+        if e.get("reason"):
+            yield f"== paused: {e['reason']}"
         yield f"== all accounts at limit; earliest reset {reset}; continue with say after that"
 
 

@@ -16,6 +16,8 @@ that file is absent.
 | `ci_timeout_minutes` | `30` | maximum wait for CI checks or a CI command per attempt |
 | `sandbox`, `writable_dirs` | `"off"`, `[]` | [sandbox.md](sandbox.md) |
 | `accounts`, `switch_at`, `credits`, `wait_for_reset`, `use_reset_credits`, `reset_credit_min_hours` | | [accounts.md](accounts.md) |
+| `credits_floor` | `0` | finite number ≥ 0; with `credits: true`, an account runs on credits only while its balance is above it; see [accounts.md](accounts.md#credits) |
+| `credits_floor_until` | none | `YYYY-MM-DD`; the floor applies through the end of this local date and is `0` from the next day |
 | `soft_switch_at` | value of `switch_at` | number in `(0, switch_at]`; prefer accounts below this usage percentage in both windows, then use the reserve up to `switch_at`; see [accounts.md](accounts.md#rotation) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
 
@@ -44,7 +46,7 @@ All timestamps below are UTC ISO 8601 strings; unknown values are `null`.
 |---|---|
 | `codex` | List of account objects with `name`, `plan`, `primary`, `secondary`, `credits`, `reset_credits`, and `status` |
 | `codex[].primary`, `codex[].secondary` | Window object with `used_percent`, `window_minutes`, and `resets_at`, or `null` when unknown |
-| `codex[].credits` | Object with `balance`, `has_credits`, and `unlimited`; unknown fields are `null` |
+| `codex[].credits` | Object with `balance`, `has_credits`, `unlimited`, and `spendable` (balance minus the active floor, at least 0); unknown fields are `null` |
 | `codex[].reset_credits` | Object with `available_count` and `expires_at` (list of expiry timestamps); unknown fields are `null` |
 | `codex[].status` | `available`, `exhausted`, `duplicate`, `not_logged_in`, or `null` when unknown |
 | `claude` | List of pool accounts with `name`, `five_hour`, `seven_day`, `limited_until`, and `token_unavailable` |
@@ -52,6 +54,8 @@ All timestamps below are UTC ISO 8601 strings; unknown values are `null`.
 | `claude[].limited_until` | Active account cooldown timestamp, or `null` |
 | `claude[].token_unavailable` | `true` while a missing Keychain token excludes the account (one hour from the failure), otherwise `null` |
 | `thresholds` | Object with configured `soft_switch_at` and `switch_at` used-percentage thresholds |
+| `credits_floor` | Active credit floor: the configured value, or `0` after `credits_floor_until` |
+| `credits_floor_until` | Configured end date of the floor (`YYYY-MM-DD`), or `null` |
 
 The JSON includes no tokens, credential paths, or raw account errors.
 

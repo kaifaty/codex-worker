@@ -20,7 +20,7 @@ Reference detail lives in `references/`. Read a file only when its topic comes u
 | [review-cycle.md](references/review-cycle.md) | angle choices, fix-round mechanics and automatic stops |
 | [settings.md](references/settings.md) | brief language, standing-rules override, default caps, `config.toml` trust |
 | [sandbox.md](references/sandbox.md) | the user wants `--sandbox workspace`, or `wait` prints `== sandbox: workspace` |
-| [accounts.md](references/accounts.md) | subscriptions and rotation, `auto-continue at`, `needs login`, reset credits |
+| [accounts.md](references/accounts.md) | subscriptions and rotation, credits and their floor, `auto-continue at`, `needs login`, reset credits |
 | [notifications.md](references/notifications.md) | the user asks about task notifications |
 | [telemetry.md](references/telemetry.md) | `report`, or deciding whether fix rounds or review angles pay off |
 | [reflection.md](references/reflection.md) | after `clean` of a task whose fix cycle did not converge or that ended `blocked`; the weekly batch; before changing `AGENTS.md` or standing rules |
@@ -113,7 +113,7 @@ Use `--reviewer claude` on `start`, `say`, or `review` for reviews from the isol
 | Look | `status [<slug>]` — account, state, PR, commits, last message, and the last turn's `result` |
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
 | Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` |
-| Accounts | `accounts [--json]` — logins, plans, limits, reset times and credits; JSON includes Codex and Claude pools and thresholds; `reset-credit <account> [--credit ID] [--yes]` |
+| Accounts | `accounts [--json]` — logins, plans, limits, reset times and credits; JSON includes Codex and Claude pools, thresholds and the credit floor (`credits_floor`, [accounts.md](references/accounts.md#credits)); `reset-credit <account> [--credit ID] [--yes]` |
 | Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` adds an isolated Claude CLI account with a token entered at the Keychain prompt |
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
 | Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock` |

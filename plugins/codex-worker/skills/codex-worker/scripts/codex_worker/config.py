@@ -1,4 +1,5 @@
 """Worker settings, script paths and polling intervals."""
+import datetime
 import json
 import math
 import os
@@ -121,6 +122,8 @@ def accounts_config():
     cfg.setdefault("switch_at", 99)
     cfg.setdefault("soft_switch_at", cfg["switch_at"])
     cfg.setdefault("credits", False)
+    cfg.setdefault("credits_floor", 0)
+    cfg.setdefault("credits_floor_until", None)
     cfg.setdefault("wait_for_reset", True)
     cfg.setdefault("use_reset_credits", False)
     cfg.setdefault("reset_credit_min_hours", 12)
@@ -205,6 +208,12 @@ def accounts_config():
         procs.die("soft_switch_at must be a number in (0, switch_at]")
     if not isinstance(cfg["credits"], bool):
         procs.die("credits must be true or false")
+    floor = cfg["credits_floor"]
+    if isinstance(floor, bool) or not isinstance(floor, (int, float)) or not math.isfinite(floor) or floor < 0:
+        procs.die("credits_floor must be a finite nonnegative number")
+    until = cfg["credits_floor_until"]
+    if until is not None and not valid_date(until):
+        procs.die("credits_floor_until must be a date YYYY-MM-DD or null")
     if not isinstance(cfg["ci"], bool):
         procs.die("ci must be true or false")
     if not isinstance(cfg["wait_for_reset"], bool):
@@ -233,6 +242,16 @@ def accounts_config():
         names.add(name)
         homes.add(str(home))
     return cfg
+
+
+def valid_date(value):
+    if not isinstance(value, str) or not re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value):
+        return False
+    try:
+        datetime.datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return False
+    return True
 
 
 def local_time(stamp):
