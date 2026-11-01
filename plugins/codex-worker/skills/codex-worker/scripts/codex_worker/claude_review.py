@@ -122,7 +122,10 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response["outcome"] = task_state.stop_outcome(st, stopped)
         return response
     minutes = cfg["max_review_minutes"]
-    if deadline is not None and clock.CLOCK.monotonic() >= deadline:
+    if deadline is None:
+        deadline = clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
+    response["deadline"] = deadline
+    if clock.CLOCK.monotonic() >= deadline:
         response["outcome"] = "budget_exhausted"
         record_timeout(st, minutes)
         return response
@@ -145,18 +148,30 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
     before = worktree_snapshot(st)
     # Read immediately before launch. Neither subprocess argv, stderr nor any
     # task artifact contains the token or the raw output of either process.
+    remaining = deadline - clock.CLOCK.monotonic()
+    if remaining <= 0:
+        response["outcome"] = "budget_exhausted"
+        record_timeout(st, minutes)
+        return response
+    credential = None
     try:
         credential = subprocess.run(
             ["security", "find-generic-password", "-s", account["token_keychain"],
              "-a", os.environ.get("USER", ""), "-w"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            timeout=config.ACCOUNT_TIMEOUT, env=environment)
+            timeout=min(config.ACCOUNT_TIMEOUT, remaining), env=environment)
     except (OSError, subprocess.TimeoutExpired):
-        response["reason"] = "reviewer token unavailable"
+        pass
+    if stopped():
+        response["outcome"] = task_state.stop_outcome(st, stopped)
         return response
-    token = credential.stdout.strip()
-    if credential.returncode or not token:
-        response["reason"] = "reviewer token unavailable"
+    if clock.CLOCK.monotonic() >= deadline:
+        response["outcome"] = "budget_exhausted"
+        record_timeout(st, minutes)
+        return response
+    token = credential.stdout.strip() if credential is not None else ""
+    if credential is None or credential.returncode or not token:
+        response["reason"] = "token unavailable"
         return response
     environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
     if stopped():
@@ -170,9 +185,6 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response["reason"] = "Claude CLI could not be started"
         return response
     response["telemetry"].update(model=settings.get("model"), reasoning_effort=settings.get("effort"))
-    if deadline is None:
-        deadline = clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
-    response["deadline"] = deadline
     st["codex_pid"] = proc.pid
     buffer, eof, termination = b"", False, None
     try:

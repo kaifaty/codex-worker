@@ -106,8 +106,9 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
             phase.add_claude_usage(response["telemetry"], account=name)
             if response["outcome"] == "unavailable":
                 entry["unavailable"] = response["reason"]
-                if response["reason"] in ("usage limit", "authentication failed") and not stopped():
-                    entry["limited_until"] = claude_accounts.mark_limited(name)
+                if response["reason"] in ("usage limit", "authentication failed", "token unavailable") and not stopped():
+                    entry["limited_until"] = claude_accounts.mark_limited(
+                        name, token_unavailable=response["reason"] == "token unavailable")
                     account = claude_accounts.select(cfg, "review", exclude=attempted,
                                                      prefer_unused=used_accounts)
                     retry = account is not None

@@ -135,8 +135,9 @@ def wait_review_lines(st, slug):
     reviews = st.get("reviews", [])[st.get("review_start", 0):]
     for entry in reviews:
         if "retry_account" in entry:
+            reason = " (token unavailable)" if entry.get("unavailable") == "token unavailable" else ""
             yield (f"== claude account {entry['account']} limited until "
-                   f"{config.local_time(entry.get('limited_until'))}; review by {entry['retry_account']}")
+                   f"{config.local_time(entry.get('limited_until'))}{reason}; review by {entry['retry_account']}")
         elif entry.get("unavailable"):
             yield f"== reviewer claude unavailable: {entry['unavailable']}; review by codex"
     reviews = [entry for entry in reviews if not entry.get("unavailable")]

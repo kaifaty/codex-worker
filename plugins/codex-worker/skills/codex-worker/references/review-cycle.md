@@ -60,7 +60,11 @@ one angle share its `max_review_minutes` budget; switching accounts uses only th
 An unreported
 reset is shown as `unknown`. `wait` prints
 `== claude account <a> limited until <time>; review by <b>` once for that switch. Only when no Claude
-account is available does this failure fall back to an ordinary Codex review. A missing executable
+account is available does this failure fall back to an ordinary Codex review.
+The Codex fallback starts a new review with its own full `max_review_minutes` budget.
+A missing Keychain token marks that account unavailable until its next `claude-login` and retries
+another account within the same angle budget; the switch line includes `token unavailable`.
+A missing executable
 during the cycle, error result, or invalid structured output retains the immediate Codex fallback;
 `wait` reports `== reviewer claude unavailable: <reason>; review by codex`. Review timeouts, `stop`, and external
 signals keep their usual outcomes and do not fall back. Cancellation sends SIGINT to Claude's

@@ -19,7 +19,14 @@ TEST_TOKEN = "fixture-claude-reviewer-oauth-secret"
 FAKE_SECURITY = r'''import json
 import os
 import sys
+import time
 from pathlib import Path
+
+clock = time
+if os.environ.get("CODEX_TASK_CLOCK_FILE"):
+''' + "\n".join("    " + line for line in WORKER_BOOTSTRAP.splitlines()) + r'''
+    worker = load_worker(name="fake_security_clock", script=os.environ["CODEX_FAKE_WORKER_SCRIPT"])
+    clock = worker.clock.CLOCK
 
 with Path(os.environ["CODEX_FAKE_SECURITY_TRACE"]).open("a") as stream:
     stream.write(json.dumps(sys.argv[1:]) + "\n")
@@ -27,6 +34,12 @@ if (sys.argv[1:3] != ["find-generic-password", "-s"]
         or not sys.argv[3].startswith("codex-worker-claude-")
         or sys.argv[4:] != ["-a", "fixture-user", "-w"]):
     sys.exit("unexpected fake keychain lookup")
+fixture = json.loads(Path(os.environ["CODEX_FAKE_CLAUDE_FIXTURE"]).read_text())
+lookup = fixture.get("security", {}).get(sys.argv[3], {})
+if lookup.get("delay"):
+    clock.sleep(lookup["delay"])
+if lookup.get("unavailable"):
+    sys.exit(44)
 print("fixture-claude-reviewer-oauth-secret")
 '''
 
@@ -496,29 +509,41 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertIn("== turn stopped: time budget 2 min exhausted", output)
 
     def test_claude_pool_retries_share_one_angle_time_budget(self):
-        self.claude_pool_fixture(runs=[
-            {"delay": .8, "limits": {"status": "rejected", "resetsAt": self.reset}},
-            {"delay": .8, "reply": self.review_result(False)}])
-        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
-        self.start("claude-pool-timeout")
-        self.wait("claude-pool-timeout")
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
-        self.enable_fake_clock()
-        worker = self.worker()
-        cfg = worker.config.accounts_config()
-        cfg["max_review_minutes"] = 1
-        state = self.state("claude-pool-timeout")
-        state.update(kind="review", outcome="running", review_angle="correctness")
-        with mock.patch.dict(os.environ, self.env, clear=True):
-            outcome = worker.review_cycle.claude_review_turn(state, cfg, "Review.", lambda: False, set())
-        self.assertEqual(outcome, "budget_exhausted")
-        self.assertEqual(state["outcome"], "budget_exhausted")
-        self.assertEqual([entry["outcome"] for entry in state["reviews"]], ["unavailable", "budget_exhausted"])
-        self.assertEqual(state["turn_stop"], {"outcome": "budget_exhausted", "minutes": 1})
-        self.assertEqual(len(state["turn_stops"]), 1)
-        self.assertEqual(len(self.claude_invocations()), 2)
-        self.assertFalse(self.review_invocations())
-        self.assertTrue(all(not self.process_is_live(entry["pid"]) for entry in self.claude_invocations()))
+        for failure in ("limit", "token"):
+            with self.subTest(failure=failure):
+                runs = [{"delay": .8, "reply": self.review_result(False)}]
+                if failure == "limit":
+                    runs.insert(0, {"delay": .8, "limits": {"status": "rejected", "resetsAt": self.reset}})
+                self.claude_pool_fixture(runs=runs)
+                self.claude_fixture_path.with_suffix(".count").unlink(missing_ok=True)
+                self.claude_trace_path.unlink(missing_ok=True)
+                (self.home / "exec-count").unlink(missing_ok=True)
+                if failure == "token":
+                    fixture = json.loads(self.claude_fixture_path.read_text())
+                    fixture["security"] = {"codex-worker-claude-first": {"delay": .8, "unavailable": True}}
+                    self.claude_fixture_path.write_text(json.dumps(fixture))
+                self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+                slug = "claude-pool-timeout-" + failure
+                self.start(slug)
+                self.wait(slug)
+                self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+                self.enable_fake_clock()
+                worker = self.worker()
+                cfg = worker.config.accounts_config()
+                cfg["max_review_minutes"] = 1
+                state = self.state(slug)
+                state.update(kind="review", outcome="running", review_angle="correctness")
+                with mock.patch.dict(os.environ, self.env, clear=True):
+                    outcome = worker.review_cycle.claude_review_turn(state, cfg, "Review.", lambda: False, set())
+                self.assertEqual(outcome, "budget_exhausted")
+                self.assertEqual(state["outcome"], "budget_exhausted")
+                self.assertEqual([entry["outcome"] for entry in state["reviews"]],
+                                 ["unavailable", "budget_exhausted"])
+                self.assertEqual(state["turn_stop"], {"outcome": "budget_exhausted", "minutes": 1})
+                self.assertEqual(len(state["turn_stops"]), 1)
+                self.assertEqual(len(self.claude_invocations()), 2 if failure == "limit" else 1)
+                self.assertFalse(self.review_invocations())
+                self.assertTrue(all(not self.process_is_live(entry["pid"]) for entry in self.claude_invocations()))
 
     def test_say_inherits_claude_reviewer_and_explicit_codex_override(self):
         self.claude_fixture(reviewer="codex")
@@ -659,6 +684,40 @@ class ClaudeReviewTests(RotationTestCase):
                 rows = [row for row in self.phase_telemetry_journal()
                         if row["slug"] == slug and row["phase"] == "review"]
                 self.assertEqual([row["account"] for row in rows], list(names))
+
+    def test_claude_pool_retries_missing_token_and_keeps_account_unavailable_until_login(self):
+        accounts = self.claude_pool_fixture(names=("default", "first"))
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["security"] = {"codex-worker-claude-default": {"unavailable": True}}
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        worker = self.worker()
+        worker.claude_accounts.save_limits("default", self.claude_limits)
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
+        self.start("claude-pool-token", "--review", "--reviewer", "claude")
+        output = self.wait("claude-pool-token")
+        self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()], [accounts[1]["config_dir"]])
+        state = self.state("claude-pool-token")
+        self.assertEqual([entry["account"] for entry in state["reviews"]], ["default", "first"])
+        self.assertEqual(state["review_result"]["verdict"], "clean")
+        switches = [line for line in output.splitlines() if line.startswith("== claude account ")]
+        self.assertEqual(switches, ["== claude account default limited until unknown (token unavailable); review by first"])
+        self.assertFalse(self.review_invocations())
+        marked = worker.claude_accounts.read_limits()["default"]
+        self.assertTrue(marked["token_unavailable"])
+        self.assertIsNone(marked["limited_until"])
+        worker.claude_accounts.save_limits("default", self.claude_limits, marked["limited_at"] + 1)
+        worker.claude_accounts.mark_limited("default")
+        with mock.patch.object(worker.clock.CLOCK, "time", return_value=self.reset + 1):
+            self.assertIsNone(worker.claude_accounts.select(worker.config.accounts_config(), "review", exclude=("first",)))
+        self.cli("review", "claude-pool-token", "--reviewer", "claude")
+        self.wait("claude-pool-token")
+        lookups = [json.loads(line)[2] for line in self.security_trace_path.read_text().splitlines()]
+        self.assertEqual(lookups, ["codex-worker-claude-default", "codex-worker-claude-first", "codex-worker-claude-first"])
+        self.assertEqual(len(self.claude_invocations()), 2)
+        self.assertFalse(self.review_invocations())
+        worker.claude_accounts.clear_limits("default")
+        selected = worker.claude_accounts.select(worker.config.accounts_config(), "review", exclude=("first",))
+        self.assertEqual(selected["name"], "default")
 
     def test_claude_pool_falls_back_only_after_every_account_is_limited(self):
         self.claude_pool_fixture(runs=[{"limits": {"status": "rejected", "resetsAt": self.reset}}])
