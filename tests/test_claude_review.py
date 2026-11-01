@@ -19,14 +19,7 @@ TEST_TOKEN = "fixture-claude-reviewer-oauth-secret"
 FAKE_SECURITY = r'''import json
 import os
 import sys
-import time
 from pathlib import Path
-
-clock = time
-if os.environ.get("CODEX_TASK_CLOCK_FILE"):
-''' + "\n".join("    " + line for line in WORKER_BOOTSTRAP.splitlines()) + r'''
-    worker = load_worker(name="fake_security_clock", script=os.environ["CODEX_FAKE_WORKER_SCRIPT"])
-    clock = worker.clock.CLOCK
 
 with Path(os.environ["CODEX_FAKE_SECURITY_TRACE"]).open("a") as stream:
     stream.write(json.dumps(sys.argv[1:]) + "\n")
@@ -36,8 +29,6 @@ if (sys.argv[1:3] != ["find-generic-password", "-s"]
     sys.exit("unexpected fake keychain lookup")
 fixture = json.loads(Path(os.environ["CODEX_FAKE_CLAUDE_FIXTURE"]).read_text())
 lookup = fixture.get("security", {}).get(sys.argv[3], {})
-if lookup.get("delay"):
-    clock.sleep(lookup["delay"])
 if lookup.get("unavailable"):
     sys.exit(44)
 print("fixture-claude-reviewer-oauth-secret")
@@ -518,10 +509,6 @@ class ClaudeReviewTests(RotationTestCase):
                 self.claude_fixture_path.with_suffix(".count").unlink(missing_ok=True)
                 self.claude_trace_path.unlink(missing_ok=True)
                 (self.home / "exec-count").unlink(missing_ok=True)
-                if failure == "token":
-                    fixture = json.loads(self.claude_fixture_path.read_text())
-                    fixture["security"] = {"codex-worker-claude-first": {"delay": .8, "unavailable": True}}
-                    self.claude_fixture_path.write_text(json.dumps(fixture))
                 self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
                 slug = "claude-pool-timeout-" + failure
                 self.start(slug)
@@ -533,7 +520,18 @@ class ClaudeReviewTests(RotationTestCase):
                 cfg["max_review_minutes"] = 1
                 state = self.state(slug)
                 state.update(kind="review", outcome="running", review_angle="correctness")
-                with mock.patch.dict(os.environ, self.env, clear=True):
+                original_run = worker.claude_review.subprocess.run
+
+                def run(argv, *args, **kwargs):
+                    if argv[0] == "security":
+                        if failure == "token" and argv[3] == "codex-worker-claude-first":
+                            worker.clock.CLOCK.sleep(.8)
+                            return subprocess.CompletedProcess(argv, 44, stdout="")
+                        return subprocess.CompletedProcess(argv, 0, stdout=TEST_TOKEN + "\n")
+                    return original_run(argv, *args, **kwargs)
+
+                with mock.patch.dict(os.environ, self.env, clear=True), \
+                        mock.patch.object(worker.claude_review.subprocess, "run", side_effect=run):
                     outcome = worker.review_cycle.claude_review_turn(state, cfg, "Review.", lambda: False, set())
                 self.assertEqual(outcome, "budget_exhausted")
                 self.assertEqual(state["outcome"], "budget_exhausted")
