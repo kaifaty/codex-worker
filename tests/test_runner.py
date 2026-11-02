@@ -29,7 +29,7 @@ class RunnerTests(unittest.TestCase):
             except ProcessLookupError:
                 pass
 
-    def _run(self, source, timeout=1, jobs=2):
+    def _run(self, source, timeout=1, jobs=2, guard_timeout=20):
         script = self.root / "synthetic_tests.py"
         script.write_text(textwrap.dedent("""\
             import json
@@ -60,7 +60,7 @@ class RunnerTests(unittest.TestCase):
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
             start_new_session=True)
         try:
-            stdout, stderr = process.communicate(timeout=20)
+            stdout, stderr = process.communicate(timeout=guard_timeout)
         except subprocess.TimeoutExpired:
             # A regression may leave an unmarked child holding both pipes.
             # Release it before collecting diagnostics from the controller.
@@ -75,7 +75,7 @@ class RunnerTests(unittest.TestCase):
                 process.stdout.close()
                 process.stderr.close()
                 self.fail("runner and its cleanup watchdog exceeded 30 seconds")
-            self.fail("runner exceeded 20 seconds:\n" + stdout + stderr)
+            self.fail("runner exceeded %s seconds:\n" % guard_timeout + stdout + stderr)
         return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
     def _assert_summary(self, result, tests, failures=0, errors=0, skipped=0):
@@ -177,6 +177,7 @@ class RunnerTests(unittest.TestCase):
                         "unmarked child is still holding worker stdout: " + status.stdout)
 
     def _assert_neighbor_deadline_during_cleanup(self, overdue):
+        guard_timeout = 10 if overdue else 180
         result = self._run("""
             if __name__ == "__main__":
                 # The controller clock advances only after a synchronized receipt,
@@ -208,12 +209,12 @@ class RunnerTests(unittest.TestCase):
                         if %s:
                             controller_time.now = 2.0
                         (FIXTURE / "cleanup-started").touch()
-                        if not neighbor_received.wait(10):
+                        if not neighbor_received.wait(%s):
                             raise RuntimeError("neighbor result not received during cleanup")
                         # Processing happens after the deadline in both cases;
                         # only the real reader's receipt time distinguishes them.
                         controller_time.now = 2.0
-                    original_cleanup(root, process_groups=process_groups)
+                    original_cleanup(root, process_groups=process_groups, kill_grace=%s)
 
                 rotation_runner._cleanup = synchronized_cleanup
 
@@ -225,7 +226,7 @@ class RunnerTests(unittest.TestCase):
                          "import os, signal, sys, time; "
                          "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
                          "os.write(int(sys.argv[1]), b'1'); "
-                         "os.close(int(sys.argv[1])); time.sleep(60)",
+                         "os.close(int(sys.argv[1])); signal.pause()",
                          str(write_fd)],
                         env={}, pass_fds=(write_fd,))
                     (FIXTURE / "detached.json").write_text(json.dumps({"pid": child.pid}))
@@ -234,7 +235,7 @@ class RunnerTests(unittest.TestCase):
                         self.assertEqual(os.read(read_fd, 1), b"1")
                     finally:
                         os.close(read_fd)
-                    deadline = time.monotonic() + 10
+                    deadline = time.monotonic() + %s
                     while not (FIXTURE / "neighbor-started").exists():
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(0.01)
@@ -242,7 +243,7 @@ class RunnerTests(unittest.TestCase):
 
                 def test_b_completes_during_cleanup(self):
                     (FIXTURE / "neighbor-started").touch()
-                    deadline = time.monotonic() + 10
+                    deadline = time.monotonic() + %s
                     while not (FIXTURE / "cleanup-started").exists():
                         self.assertLess(time.monotonic(), deadline)
                         time.sleep(0.01)
@@ -250,7 +251,8 @@ class RunnerTests(unittest.TestCase):
 
                 def test_c_passes(self):
                     self.assertTrue(True)
-        """ % overdue)
+        """ % (overdue, guard_timeout, 3 if overdue else 180, guard_timeout, guard_timeout),
+            guard_timeout=20 if overdue else 240)
         self._assert_summary(result, tests=3, errors=2 if overdue else 1)
         self.assertIn("(exit 17)", result.stderr)
         self.assertTrue((self.root / "neighbor-finished").exists(), result.stderr)

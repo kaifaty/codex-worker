@@ -987,13 +987,16 @@ worker.notifications.reap_notifications = reap
         self.assertFalse(self.invocations())
 
     def test_say_during_sleep_requires_stop_first(self):
+        self.fixture_timeout = 180
+        self.enable_fake_clock(auto_advance=False)
         self.configure()
         self.exhaust_accounts((self.home, "A", self.reset),
                               (self.other, "B", self.reset + 3600))
         self.start("say-sleep")
         state = self.assert_sleeping("say-sleep", self.wait("say-sleep"), self.reset)
         result = subprocess.run([PYTHON, "-I", str(SCRIPT), "say", "say-sleep", "Не отправлять"],
-                                cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=10)
+                                cwd=self.repo, env=self.env, text=True, capture_output=True,
+                                timeout=self.fixture_timeout)
         self.assertNotEqual(result.returncode, 0)
         expected = datetime.datetime.fromtimestamp(state["sleeping"]["until"]).strftime("%Y-%m-%d %H:%M")
         self.assertIn("waiting for limit reset until " + expected +
@@ -1001,7 +1004,7 @@ worker.notifications.reap_notifications = reap
         self.assertFalse((self.home / "claude-tasks" / "say-sleep" / "messages.jsonl").exists())
         self.assertEqual(self.state("say-sleep")["turns"], 1)
         self.assertFalse(self.invocations())
-        self.cli("stop", "say-sleep", timeout=20)
+        self.cli("stop", "say-sleep")
         self.wait("say-sleep")
 
     def test_delayed_reset_sleeps_again_before_continuing(self):

@@ -13,6 +13,7 @@ class Clock:
 
     OS/process deadlines keep using the time module. File-clock sleeps advance
     both values under one lock, then briefly yield so other processes can run.
+    A file with auto_advance=false leaves advancement to the test driver.
     The file is updated in place to preserve its flock identity.
     """
 
@@ -42,12 +43,13 @@ class Clock:
             with self.path.open("r+", encoding="utf-8") as stream:
                 fcntl.flock(stream, fcntl.LOCK_EX)
                 value = json.load(stream)
-                value["wall"] += seconds
-                value["monotonic"] += seconds
-                stream.seek(0)
-                json.dump(value, stream)
-                stream.truncate()
-                stream.flush()
+                if value.get("auto_advance", True):
+                    value["wall"] += seconds
+                    value["monotonic"] += seconds
+                    stream.seek(0)
+                    json.dump(value, stream)
+                    stream.truncate()
+                    stream.flush()
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, mask)
         time.sleep(0.001)

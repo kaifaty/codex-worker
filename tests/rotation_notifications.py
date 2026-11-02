@@ -187,12 +187,14 @@ class NotificationTests(RotationTestCase):
         self.assertEqual(self.review_invocations()[-1]["home"], str(self.other))
 
     def assert_review_pause_wake_account(self, slug, angles=None):
+        self.fixture_timeout = 180
+        clock = self.enable_fake_clock(auto_advance=False)
         self.configure()
         self.configure_notify()
         self.start(slug)
         self.wait(slug)
         working = self.state(slug)
-        reset = int(time.time()) + 3
+        reset = clock.time() + 3
         self.account(self.home, "A", reset + 3600, used=99)
         runs = [{"mode": "usage_error", "limit_after": 0.05},
                 {"mode": "complete", "reply": self.review_result(False)}]
@@ -200,12 +202,13 @@ class NotificationTests(RotationTestCase):
             runs.insert(0, {"mode": "complete", "reply": self.review_result(False)})
         self.account(self.other, "B", reset, runs=runs, auto_reset=True)
         args = ("--review-angles", angles) if angles else ()
-        self.reset_after_ready(lambda: self.cli("review", slug, *args), reset, 3)
+        self.cli("review", slug, *args)
         self.wait(slug)
         sleeping = self.state(slug)
         self.assertTrue(sleeping.get("sleeping"))
         self.assertEqual(sleeping["reviews"][-1]["angle"], "concurrency" if angles else "correctness")
-        self.wait(slug, timeout=10, through_sleep=True)
+        self.advance_fake_clock(reset + 1 - clock.time())
+        self.wait(slug, through_sleep=True)
         for name in ("paused", "woke", "review_done"):
             event = self.notification(slug, name)
             self.assertEqual(event["account"], "second")
@@ -223,7 +226,8 @@ class NotificationTests(RotationTestCase):
         self.assert_review_pause_wake_account("notify-review-sleep")
 
     def test_second_review_angle_pause_and_wake_use_its_executor_account(self):
-        clock = self.enable_fake_clock()
+        self.fixture_timeout = 180
+        clock = self.enable_fake_clock(auto_advance=False)
         slug = "notify-angle-sleep"
         self.configure()
         self.configure_notify()
@@ -236,11 +240,12 @@ class NotificationTests(RotationTestCase):
                 {"mode": "usage_error", "limit_after": 0.05},
                 {"mode": "complete", "reply": self.review_result(False)}]
         self.account(self.other, "B", reset, runs=runs, auto_reset=True)
-        self.reset_after_ready(
-            lambda: self.cli("review", slug, "--review-angles", "correctness,concurrency"), reset, 3)
-        self.wait(slug, timeout=10, through_sleep=True)
+        self.cli("review", slug, "--review-angles", "correctness,concurrency")
+        self.wait(slug)
+        self.assertTrue(self.state(slug).get("sleeping"))
+        self.advance_fake_clock(reset + 1 - clock.time())
+        self.wait(slug, through_sleep=True)
         state = self.state(slug)
-        # An immediate logical sleep can finish before another CLI observes it.
         sleeping = [entry for entry in state["rotations"] if entry.get("event") == "sleep"]
         self.assertTrue(sleeping)
         paused_review = next(entry for entry in reversed(state["reviews"])

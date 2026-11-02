@@ -289,6 +289,7 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.assertEqual(report["tasks"][0]["slug"], recovered["slug"])
 
     def test_telemetry_busy_journal_does_not_block_checks_or_stop(self):
+        self.fixture_timeout = 180
         self.enable_fake_clock()
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
@@ -298,19 +299,22 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
             fcntl.flock(held, fcntl.LOCK_EX)
             self.start(slug, "--check", "true")
             # Work, check, and final turn records each have a bounded retry.
-            self.wait(slug, timeout=10)
+            self.wait(slug)
             self.assertEqual(self.state(slug)["outcome"], "completed")
             self.assertEqual(self.state(slug)["checks"][-1]["outcome"], "passed")
             stderr = self.home / "claude-tasks" / slug / "stderr.log"
             self.assertIn("telemetry unavailable", stderr.read_text())
             self.assertEqual(journal.stat().st_size, 0)
 
-            command = shlex.quote(PYTHON) + " -I -c " + shlex.quote("import time; time.sleep(60)")
+            ready = self.root / "check-ready"
+            command = shlex.quote(PYTHON) + " -I -c " + shlex.quote(
+                "import signal; from pathlib import Path; "
+                f"Path({str(ready)!r}).touch(); signal.pause()")
             self.cli("say", slug, "Run the check again", "--check", command)
-            self.until(lambda: bool(self.state(slug).get("check_pid")))
+            self.until(lambda: ready.exists() and bool(self.state(slug).get("check_pid")))
             supervisor = self.state(slug)["pid"]
-            self.cli("stop", slug, timeout=5)
-            self.wait(slug, timeout=5)
+            self.cli("stop", slug)
+            self.wait(slug)
             self.assertEqual(self.state(slug)["outcome"], "stopped")
             self.assertEqual(self.state(slug)["checks"][-1]["outcome"], "stopped")
             self.until(lambda: not self.process_is_live(supervisor))

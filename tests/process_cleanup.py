@@ -94,7 +94,7 @@ def _owned_processes(root, owned, groups):
     return live
 
 
-def cleanup_processes(root, extra_pids=(), process_groups=()):
+def cleanup_processes(root, extra_pids=(), process_groups=(), *, kill_grace=3):
     """Escalate SIGTERM to SIGKILL and return any surviving live process ids.
 
     The caller decides whether survivors are a test assertion or runner error.
@@ -107,7 +107,7 @@ def cleanup_processes(root, extra_pids=(), process_groups=()):
     root = Path(root).absolute()
     owned, groups = set(extra_pids), set(process_groups)
     live = set()
-    for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, 3)):
+    for sig, grace in ((signal.SIGTERM, 2), (signal.SIGKILL, kill_grace)):
         signalled, signalled_groups = set(), set()
         deadline = time.monotonic() + grace
         while True:
