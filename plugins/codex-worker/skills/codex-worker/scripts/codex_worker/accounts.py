@@ -193,7 +193,7 @@ def spendable_credits(info, cfg):
     credits = info.get("limits", {}).get("credits", {})
     if credits.get("unlimited"):
         return None
-    if not credits.get("hasCredits", credits.get("has_credits", False)):
+    if credits.get("hasCredits", credits.get("has_credits")) is False:
         return 0
     balance = credit_balance(info)
     return None if balance is None else max(0.0, round(balance - credits_floor(cfg), 6))
