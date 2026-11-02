@@ -112,15 +112,21 @@ def probe(cfg, account):
             "--tools", "", "--permission-mode", "dontAsk"]
     if cfg["claude"].get("model"):
         args += ["--model", cfg["claude"]["model"]]
+    timed_out = False
     try:
         with tempfile.TemporaryDirectory(prefix="codex-worker-claude-probe-") as directory:
             response = subprocess.run(args, cwd=directory, env=environment,
                                       stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL, timeout=config.ACCOUNT_TIMEOUT)
-    except (OSError, subprocess.TimeoutExpired):
+                                      stderr=subprocess.DEVNULL, timeout=config.CLAUDE_PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or b""
+        timed_out = True
+    except OSError:
         return "request failed"
+    else:
+        output = response.stdout
     reason, answered = None, False
-    for line in response.stdout.splitlines():
+    for line in output.splitlines():
         if not line.strip():
             continue
         try:
@@ -140,6 +146,8 @@ def probe(cfg, account):
                 answered = isinstance(event.get("result"), str) and bool(event["result"].strip())
     if reason in ("usage limit", "authentication failed"):
         claude_accounts.mark_limited(account["name"])
+    if timed_out:
+        return "request failed"
     return reason or (None if response.returncode == 0 and answered else "request failed")
 
 

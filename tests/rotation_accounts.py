@@ -220,6 +220,10 @@ class AccountAuthTests(RotationTestCase):
                 "else:\n" +
                 "    for event in fixture.get('events', []): print(json.dumps(event), flush=True)\n" +
                 "    print(token, file=sys.stderr)\n" +
+                "    if fixture.get('hold'):\n" +
+                "        Path(" + repr(str(fixture.with_suffix('.ready'))) + ").touch()\n" +
+                "        import time\n" +
+                "        while True: time.sleep(1)\n" +
                 "    sys.exit(fixture.get('exit_code', 0))\n")
             executable.chmod(0o700)
         self.env.update(HOME=str(self.root), USER="fixture-user",
@@ -303,6 +307,39 @@ class AccountAuthTests(RotationTestCase):
                     self.assertFalse(Path(invocation["cwd"]).exists())
                 state = "".join(path.read_text() for path in self.home.rglob("*") if path.is_file())
                 self.assertNotIn(token, output + json.dumps(rows) + state)
+
+    def test_claude_probe_timeout_preserves_received_limit_windows(self):
+        _, fixture, _ = self.claude_probe_fixture()
+        account = {"name": "probe", "config_dir": str(self.root / "claude-probe-account"),
+                   "token_keychain": "fixture-probe-service"}
+        (self.home / "codex-worker.json").write_text(json.dumps({"claude": {"accounts": [account]}}))
+        windows = {"five_hour": {"utilization": 0.25, "resetsAt": self.reset - 3600},
+                   "seven_day": {"utilization": 0.5, "resetsAt": self.reset}}
+        fixture.write_text(json.dumps({"hold": True, "events": [{
+            "type": "rate_limit_event", "rate_limit_info": {"status": "allowed", "unifiedWindows": windows}}]}))
+        worker = self.worker()
+        original_communicate = worker.claude_review.subprocess.Popen.communicate
+
+        def communicate(process, *args, **kwargs):
+            if process.args[0] == str(self.root / "claude"):
+                self.until(fixture.with_suffix(".ready").exists, timeout=30)
+            return original_communicate(process, *args, **kwargs)
+
+        output, errors = io.StringIO(), io.StringIO()
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(worker.config, "CLAUDE_PROBE_TIMEOUT", 0.1), \
+                mock.patch.object(worker.claude_review.subprocess.Popen, "communicate", new=communicate), \
+                mock.patch.object(worker.claude_review.subprocess, "run",
+                                  wraps=worker.claude_review.subprocess.run) as launched, \
+                mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-probe", "probe"]), \
+                redirect_stdout(output), redirect_stderr(errors), self.assertRaises(SystemExit) as stopped:
+            worker.cli.main()
+        self.assertEqual(stopped.exception.code, 1)
+        self.assertEqual(output.getvalue(), "Claude account probe: request failed\n")
+        self.assertEqual(errors.getvalue(), "")
+        self.assertEqual(worker.claude_accounts.read_limits()["probe"]["unifiedWindows"], windows)
+        self.assertEqual([call.kwargs["timeout"] for call in launched.call_args_list],
+                         [worker.config.ACCOUNT_TIMEOUT, 0.1])
 
     def test_claude_login_probes_after_saving_and_preserves_account_on_probe_failure(self):
         token, fixture, trace = self.claude_probe_fixture()
