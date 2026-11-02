@@ -8,6 +8,7 @@ import sys
 import tempfile
 import time
 import unittest
+from unittest import mock
 
 
 # Isolated Python omits the script directory from its import path.
@@ -63,11 +64,20 @@ class ClockTests(unittest.TestCase):
         clock = self.worker.clock.Clock(self.clock_file)
         self.assertEqual(clock.time(), self.initial["wall"])
         self.assertEqual(clock.monotonic(), self.initial["monotonic"])
-        clock.sleep(7.25)
+        with mock.patch.object(self.worker.clock.time, "sleep") as sleep:
+            clock.sleep(7.25)
+        sleep.assert_called_once_with(0.001)
         expected = {name: value + 7.25 for name, value in self.initial.items()}
         self.assertEqual(clock.time(), expected["wall"])
         self.assertEqual(clock.monotonic(), expected["monotonic"])
         self.assertEqual(json.loads(self.clock_file.read_text(encoding="utf-8")), expected)
+        frozen = dict(expected, auto_advance=False)
+        self.clock_file.write_text(json.dumps(frozen), encoding="utf-8")
+        with mock.patch.object(self.worker.clock.time, "sleep") as sleep:
+            clock.sleep(0.02)
+            clock.sleep(1)
+        self.assertEqual(sleep.call_args_list, [mock.call(0.02), mock.call(0.05)])
+        self.assertEqual(json.loads(self.clock_file.read_text(encoding="utf-8")), frozen)
 
     def child_environment(self):
         return dict(os.environ, CODEX_TASK_HOME=str(self.home),

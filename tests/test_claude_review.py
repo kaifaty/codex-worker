@@ -483,12 +483,16 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertNotIn("review by codex", output)
 
     def test_claude_review_timeout_preserves_budget_outcome_and_terminates_process(self):
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.2"
+        self.fixture_timeout = 180
+        self.enable_fake_clock(auto_advance=False)
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "60"
         self.claude_fixture(runs=[{"mode": "hold"}], max_review_minutes=2)
         work = self.work_result()
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": work}])
         self.start("claude-timeout", "--review", "--reviewer", "claude")
-        output = self.wait("claude-timeout", timeout=10)
+        self.until(lambda: any(event["command"] == "holding" for event in self.claude_trace()))
+        self.advance_fake_clock(120.1)
+        output = self.wait("claude-timeout")
         state = self.state("claude-timeout")
         self.assertEqual(state["outcome"], "budget_exhausted")
         self.assertEqual(state["turn_stops"], [dict(

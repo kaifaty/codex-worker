@@ -68,13 +68,15 @@ class TimeBudgetTests(RotationTestCase):
                               if row["phase"] == "turn")["budget_stop"], "minutes")
 
     def test_time_budget_interrupts_quota_refresh_with_a_locked_reset_journal(self):
-        clock = self.enable_fake_clock()
-        self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"
+        self.fixture_timeout = 180
+        self.enable_fake_clock(auto_advance=False)
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "60"
         self.configure(language="en", use_reset_credits=True)
         gate = self.root / "publish-rollout"
         result = self.work_result("partial", summary="Wrapped up while the reset journal remained locked.")
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "hold", "spawn_child": True, "rollout_used": 99, "rollout_gate": str(gate)},
+            {"mode": "hold", "spawn_child": True, "hold_until_signal": True,
+             "rollout_used": 99, "rollout_gate": str(gate)},
             {"mode": "complete", "reply": result}])
         with (self.home / "codex-worker-resets.jsonl").open("a+") as journal:
             with ThreadPoolExecutor(max_workers=1) as executor:
@@ -96,7 +98,7 @@ class TimeBudgetTests(RotationTestCase):
                 self.extra_pids.add(starter.pid)
                 try:
                     before = ready.result()
-                    stdout, stderr = starter.communicate(timeout=5)
+                    stdout, stderr = starter.communicate(timeout=self.fixture_timeout)
                     self.assertEqual(starter.returncode, 0, stdout + stderr)
                     self.until(lambda: sum(event.get("command") == "quota-snapshot"
                                            for event in self.trace()[before:]) >= 2)
@@ -107,8 +109,8 @@ class TimeBudgetTests(RotationTestCase):
                     self.assertTrue(self.process_is_live(self.invocations()[0]["pid"]))
                     log = self.home / "claude-tasks" / "cap-locked-journal" / "stderr.log"
                     self.until(lambda: log.exists() and "reset journal: waiting for lock" in log.read_text())
-                    clock.sleep(4.1)
-                    output = self.wait("cap-locked-journal", timeout=10)
+                    self.advance_fake_clock(120.1)
+                    output = self.wait("cap-locked-journal")
                     state = self.state("cap-locked-journal")
                     self.assertEqual(state["outcome"], "budget_exhausted")
                     self.assertEqual(state["wrapup"]["outcome"], "completed")
@@ -128,7 +130,7 @@ class TimeBudgetTests(RotationTestCase):
                 finally:
                     if starter.poll() is None:
                         starter.terminate()
-                    starter.communicate(timeout=5)
+                    starter.communicate(timeout=self.fixture_timeout)
 
     def test_time_budget_interrupts_a_slow_account_rpc_after_a_usage_error(self):
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"

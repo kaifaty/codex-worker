@@ -188,22 +188,25 @@ class ResetCreditTests(RotationTestCase):
         self.assertFalse(self.consume_calls())
 
     def test_reset_credit_error_or_unchanged_quota_sleeps_after_one_attempt(self):
+        self.fixture_timeout = 180
+        clock = self.enable_fake_clock(auto_advance=False)
         for slug, changes in (("free-reset-rpc-error", {"consume_error": True}),
                               ("free-reset-no-quota", {"consume_no_reset": True})):
             with self.subTest(slug=slug):
                 before = len(self.consume_calls())
                 self.configure(use_reset_credits=True)
-                reset = int(time.time()) + 30 * 3600
+                reset = clock.time() + 30 * 3600
                 self.exhaust_accounts((self.home, "A", reset),
                                       (self.other, "B", reset + 3600))
                 self.reset_credits(self.home, self.reset_credit("RateLimitResetCredit_" + slug, reset + 86400),
                                    self.reset_credit("RateLimitResetCredit_spare_" + slug, reset + 2 * 86400),
                                    **changes)
                 self.start(slug)
-                self.assert_sleeping(slug, self.wait(slug), reset)
+                state = self.assert_sleeping(slug, self.wait(slug), reset)
                 self.assertEqual(len(self.consume_calls()) - before, 1, "one reset attempt per sleep episode")
-                self.cli("stop", slug, timeout=20)
-                self.wait(slug)
+                self.cli("stop", slug)
+                self.wait(slug, through_sleep=True)
+                self.until(lambda: not self.process_is_live(state["pid"]))
 
     def test_reset_credit_timeout_retries_with_the_original_idempotency_key(self):
         self.configure()

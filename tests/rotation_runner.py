@@ -25,8 +25,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from process_cleanup import cleanup_processes
 
 
-def _cleanup(root, process_groups=()):
-    live = cleanup_processes(root, process_groups=process_groups)
+def _cleanup(root, process_groups=(), *, kill_grace=3):
+    live = cleanup_processes(root, process_groups=process_groups, kill_grace=kill_grace)
     if live:
         raise RuntimeError("test processes survived cleanup: %s" % sorted(live))
 

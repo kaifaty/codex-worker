@@ -1,5 +1,6 @@
 """Shared fixtures and helpers for the rotation CLI tests."""
 import datetime
+import fcntl
 import json
 import os
 import shlex
@@ -364,7 +365,9 @@ def execute():
         if stopped[0]:
             return 130
     if run.get("spawn_child"):
-        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"],
+        child_code = ("import signal; signal.pause()" if run.get("hold_until_signal")
+                      else "import time; time.sleep(60)")
+        child = subprocess.Popen([sys.executable, "-c", child_code],
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         trace({"command": "exec-child", "child_pid": child.pid, "thread": thread})
     for command in run.get("commands", []):
@@ -437,11 +440,11 @@ def execute():
         clock.sleep(0.02)
     if run["mode"] in ("limit", "hold"):
         deadline = time.monotonic() + 100
-        while not stopped[0] and time.monotonic() < deadline:
+        while not stopped[0] and (run.get("hold_until_signal") or time.monotonic() < deadline):
             time.sleep(0.05)
         if stopped[0]:
             if child:
-                child.wait(timeout=2)
+                child.wait(timeout=180 if run.get("hold_until_signal") else 2)
             return 130
         emit({"type": "turn.failed", "error": {"message": "fake turn was never interrupted"}})
         return 2
@@ -644,13 +647,25 @@ class RotationTestCase(unittest.TestCase):
         self.account(self.home, "A", self.reset)
         self.account(self.other, "B", self.reset + 3600)
 
-    def enable_fake_clock(self):
+    def enable_fake_clock(self, auto_advance=True):
         """Share the production file-backed clock with every fixture process."""
         path = self.root / "clock.json"
-        path.write_text(json.dumps({"wall": time.time(), "monotonic": time.monotonic()}))
+        path.write_text(json.dumps({"wall": time.time(), "monotonic": time.monotonic(),
+                                    "auto_advance": auto_advance}))
         self.env["CODEX_TASK_CLOCK_FILE"] = str(path)
         self.env["CODEX_FAKE_WORKER_SCRIPT"] = str(SCRIPT)
         return self.worker().clock.CLOCK
+
+    def advance_fake_clock(self, seconds):
+        """Advance a manual clock only after the fixture's readiness event."""
+        with Path(self.env["CODEX_TASK_CLOCK_FILE"]).open("r+") as stream:
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            value = json.load(stream)
+            for name in ("wall", "monotonic"):
+                value[name] += seconds
+            stream.seek(0)
+            json.dump(value, stream)
+            stream.truncate()
 
     @property
     def repo(self):
@@ -698,10 +713,10 @@ class RotationTestCase(unittest.TestCase):
         if prepared is None:
             result = subprocess.run([PYTHON, "-I", str(SCRIPT)] + list(args), cwd=self.repo,
                                     env=self.env, text=True, capture_output=True,
-                                    timeout=kwargs.get("timeout", 15))
+                                    timeout=kwargs.get("timeout", getattr(self, "fixture_timeout", 15)))
         else:
             stdout, stderr = prepared.communicate(json.dumps(list(args)) + "\n",
-                                                   timeout=kwargs.get("timeout", 15))
+                                                   timeout=kwargs.get("timeout", getattr(self, "fixture_timeout", 15)))
             result = subprocess.CompletedProcess([PYTHON, "-I", str(SCRIPT)] + list(args),
                                                  prepared.returncode, stdout, stderr)
         self.assertEqual(result.returncode, 0,
@@ -922,7 +937,8 @@ class RotationTestCase(unittest.TestCase):
         self.extra_pids.add(pid)
         return pid
 
-    def until(self, predicate, timeout=5):
+    def until(self, predicate, timeout=None):
+        timeout = getattr(self, "fixture_timeout", 5) if timeout is None else timeout
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             if predicate():
@@ -930,7 +946,8 @@ class RotationTestCase(unittest.TestCase):
             time.sleep(0.05)
         self.fail("timed out waiting for fake Codex fixture")
 
-    def wait(self, slug, timeout=90, through_sleep=False, prepared=None):
+    def wait(self, slug, timeout=None, through_sleep=False, prepared=None):
+        timeout = getattr(self, "fixture_timeout", 90) if timeout is None else timeout
         args = ["wait", slug, "--timeout", str(timeout)]
         if through_sleep:
             args.append("--through-sleep")
