@@ -1,15 +1,17 @@
 """Account authentication, reset waits and monitor tests."""
+import io
 import json
 import os
+import subprocess
 import sys
 import time
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import contextmanager
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from types import SimpleNamespace
 from unittest import mock
 
-from rotation_support import IMPOSSIBLE_PID, PYTHON, RotationTestCase
+from rotation_support import IMPOSSIBLE_PID, PYTHON, SCRIPT, RotationTestCase
 
 
 class AccountAuthTests(RotationTestCase):
@@ -59,6 +61,7 @@ class AccountAuthTests(RotationTestCase):
 
         custom = self.root / "custom-claude"
         with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.claude_review, "probe", return_value=None), \
                 mock.patch.object(worker.commands.os, "ttyname", return_value="/dev/fixture-tty"), \
                 mock.patch.object(worker.commands, "open", create=True,
                                   side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)) as opened_terminal, \
@@ -110,6 +113,7 @@ class AccountAuthTests(RotationTestCase):
         self.assertIn(token, terminal.read_text(), "only the person's terminal receives the token")
         path.write_text(json.dumps({"claude": {"model": "fixture-model"}}))
         with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.claude_review, "probe", return_value=None), \
                 mock.patch.object(worker.commands, "open", create=True,
                                   side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
                 mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "second"]), \
@@ -158,6 +162,7 @@ class AccountAuthTests(RotationTestCase):
         path.write_text(json.dumps(settings))
         environment = dict(self.env, HOME=str(self.root), USER="fixture-user", CODEX_TASK_CLAUDE=str(claude))
         with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.claude_review, "probe", return_value=None), \
                 mock.patch.object(worker.commands, "open", create=True,
                                   side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
                 mock.patch("builtins.print"), ThreadPoolExecutor(max_workers=1) as executor:
@@ -179,6 +184,161 @@ class AccountAuthTests(RotationTestCase):
                                  "claude": {"model": "fixture-updated-model"}})
         self.assertEqual([account["name"] for account in pool], ["default", "third", "first"])
         self.assertEqual(pool[0], default, "unrelated account paths must remain unchanged")
+
+    def claude_probe_fixture(self):
+        token = "fixture-claude-probe-private-token"
+        fixture = self.root / "probe-fixture.json"
+        fixture.write_text("{}")
+        trace = self.root / "probe-trace.jsonl"
+        settings = self.home / "codex-worker.json"
+        for command in ("claude", "security"):
+            executable = self.root / command
+            executable.write_text("#!" + PYTHON + "\n" +
+                "import json, os, sys\nfrom pathlib import Path\n" +
+                "fixture = json.loads(Path(" + repr(str(fixture)) + ").read_text())\n" +
+                "token = " + repr(token) + "\n" +
+                "row = {'command': " + repr(command) + ", 'argv': sys.argv[1:]}\n" +
+                "row['cwd'] = os.getcwd()\n" +
+                "row['config_dir'] = os.environ.get('CLAUDE_CONFIG_DIR')\n" +
+                "row['token_matches'] = os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == token\n" +
+                "row['stdin_null'] = os.fstat(0).st_rdev == os.stat(os.devnull).st_rdev\n" +
+                "row['stderr_null'] = os.fstat(2).st_rdev == os.stat(os.devnull).st_rdev\n" +
+                "row['host_settings'] = [key for key in os.environ if key.startswith(('CLAUDE', 'ANTHROPIC')) " +
+                "and key not in ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN')]\n" +
+                "settings = Path(" + repr(str(settings)) + ")\n" +
+                "row['saved'] = settings.exists() and any(account['name'] == 'probe' for account in " +
+                "json.loads(settings.read_text()).get('claude', {}).get('accounts', []))\n" +
+                "with Path(" + repr(str(trace)) + ").open('a') as stream:\n" +
+                "    stream.write(json.dumps(row) + '\\n')\n" +
+                "if row['command'] == 'security':\n" +
+                "    if sys.argv[1] == 'find-generic-password':\n" +
+                "        print(token, file=sys.stderr)\n" +
+                "        if fixture.get('missing_token'): sys.exit(1)\n" +
+                "        print(token)\n" +
+                "elif sys.argv[1] == 'setup-token':\n" +
+                "    print(token)\n" +
+                "else:\n" +
+                "    for event in fixture.get('events', []): print(json.dumps(event), flush=True)\n" +
+                "    print(token, file=sys.stderr)\n" +
+                "    sys.exit(fixture.get('exit_code', 0))\n")
+            executable.chmod(0o700)
+        self.env.update(HOME=str(self.root), USER="fixture-user",
+                        CODEX_TASK_CLAUDE=str(self.root / "claude"),
+                        CLAUDE_CODE_OAUTH_TOKEN="host-secret", CLAUDECODE="1",
+                        ANTHROPIC_API_KEY="host-secret", ANTHROPIC_BASE_URL="https://host.invalid")
+        return token, fixture, trace
+
+    def test_claude_probe_reports_limits_and_failures_without_capturing_credentials(self):
+        token, fixture, trace = self.claude_probe_fixture()
+        account = {"name": "probe", "config_dir": str(self.root / "claude-probe-account"),
+                   "token_keychain": "fixture-probe-service"}
+        settings = self.home / "codex-worker.json"
+        settings.write_text(json.dumps({"claude": {"model": "fixture-probe-model", "accounts": [account]}}))
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        self.assertEqual(worker.accounts.claude_account_lines(cfg),
+                         ["claude probe: no requests yet; run claude-probe probe"])
+        self.assertEqual(worker.commands.accounts_json([], cfg)["claude"], [{
+            "name": "probe", "five_hour": None, "seven_day": None,
+            "limited_until": None, "token_unavailable": None}])
+        windows = {"five_hour": {"utilization": 0.25, "resetsAt": self.reset - 3600},
+                   "seven_day": {"utilization": 0.5, "resetsAt": self.reset}}
+        allowed = {"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "unifiedWindows": windows, "diagnostic": token}}
+        result = {"type": "result", "is_error": False, "result": "OK", "diagnostic": token}
+        cases = [
+            ("allowed", {"events": [allowed, result]}, None),
+            ("rejected", {"events": [{"type": "rate_limit_event", "rate_limit_info": {
+                "status": "rejected", "unifiedWindows": windows, "diagnostic": token}}]}, "usage limit"),
+            ("401", {"events": [{"type": "system", "subtype": "api_retry", "error_status": 401,
+                                  "error": token}]}, "authentication failed"),
+            ("403", {"events": [{"type": "result", "api_error_status": 403, "is_error": True,
+                                  "result": token}]}, "authentication failed"),
+            ("missing", {"missing_token": True}, "token unavailable"),
+            ("nonzero", {"events": [result], "exit_code": 7}, "request failed"),
+            ("error", {"events": [{"type": "result", "is_error": True, "result": token}]}, "request failed")]
+        for label, scenario, reason in cases:
+            with self.subTest(case=label):
+                worker.claude_accounts.clear_limits("probe")
+                trace.unlink(missing_ok=True)
+                fixture.write_text(json.dumps(scenario))
+                if label == "allowed":
+                    worker.claude_accounts.mark_limited("probe", token_unavailable=True)
+                completed = subprocess.run([PYTHON, "-I", str(SCRIPT), "claude-probe", "probe"],
+                                           cwd=self.root, env=self.env, text=True, capture_output=True, timeout=15)
+                output = completed.stdout + completed.stderr
+                self.assertEqual(completed.returncode == 0, reason is None, output)
+                self.assertEqual(len(output.strip().splitlines()), 1, output)
+                if reason is None:
+                    self.assertTrue(output.startswith("Claude account probe: token ok; 5h 25%"), output)
+                    self.assertIn("; 7d 50%", output)
+                    info = worker.claude_accounts.read_limits()["probe"]
+                    self.assertEqual(info["status"], "allowed")
+                    self.assertEqual(info["unifiedWindows"], windows)
+                    self.assertFalse(info.get("token_unavailable"))
+                    self.assertNotIn("limited_until", info)
+                else:
+                    self.assertIn("Claude account probe: " + reason, output)
+                rows = [json.loads(line) for line in trace.read_text().splitlines()]
+                self.assertEqual(rows[0]["argv"], ["find-generic-password", "-s", "fixture-probe-service",
+                                                    "-a", "fixture-user", "-w"])
+                self.assertEqual([row["command"] for row in rows],
+                                 ["security"] if label == "missing" else ["security", "claude"])
+                for row in rows:
+                    self.assertEqual(row["config_dir"], account["config_dir"])
+                    self.assertEqual(row["host_settings"], [])
+                if label != "missing":
+                    invocation = rows[1]
+                    self.assertTrue(invocation["token_matches"])
+                    self.assertTrue(invocation["stdin_null"])
+                    self.assertTrue(invocation["stderr_null"])
+                    for option, value in (("-p", "Reply with the single word OK."),
+                                          ("--output-format", "stream-json"), ("--max-turns", "1"),
+                                          ("--model", "fixture-probe-model"), ("--tools", ""),
+                                          ("--permission-mode", "dontAsk")):
+                        self.assertEqual(invocation["argv"][invocation["argv"].index(option) + 1], value)
+                    self.assertIn("--verbose", invocation["argv"])
+                    self.assertNotIn("Read,Grep,Glob,Bash", invocation["argv"])
+                    self.assertNotEqual(invocation["cwd"], str(self.root))
+                    self.assertFalse(Path(invocation["cwd"]).exists())
+                state = "".join(path.read_text() for path in self.home.rglob("*") if path.is_file())
+                self.assertNotIn(token, output + json.dumps(rows) + state)
+
+    def test_claude_login_probes_after_saving_and_preserves_account_on_probe_failure(self):
+        token, fixture, trace = self.claude_probe_fixture()
+        worker = self.worker()
+        terminal = self.root / "login-terminal"
+        terminal.touch()
+        for failure in (False, True):
+            with self.subTest(failure=failure):
+                trace.unlink(missing_ok=True)
+                settings = self.home / "codex-worker.json"
+                settings.unlink(missing_ok=True)
+                fixture.write_text(json.dumps({"events": [{"type": "result", "is_error": failure,
+                                                           "result": token if failure else "OK"}]}))
+                output, errors = io.StringIO(), io.StringIO()
+                with mock.patch.dict(os.environ, self.env, clear=True), \
+                        mock.patch.object(worker.commands, "open", create=True,
+                                          side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
+                        mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "probe"]), \
+                        redirect_stdout(output), redirect_stderr(errors):
+                    if failure:
+                        with self.assertRaises(SystemExit) as stopped:
+                            worker.cli.main()
+                        self.assertNotEqual(stopped.exception.code, 0)
+                    else:
+                        worker.cli.main()
+                pool = json.loads(settings.read_text())["claude"]["accounts"]
+                self.assertEqual([account["name"] for account in pool], ["default", "probe"])
+                rows = [json.loads(line) for line in trace.read_text().splitlines()]
+                self.assertEqual([row["command"] for row in rows], ["claude", "security", "security", "claude"])
+                self.assertEqual(rows[0]["argv"], ["setup-token"])
+                self.assertEqual(rows[2]["argv"][0], "find-generic-password")
+                self.assertTrue(rows[-1]["saved"])
+                captured = output.getvalue() + errors.getvalue()
+                self.assertIn("request failed" if failure else "token ok", captured)
+                state = "".join(path.read_text() for path in self.home.rglob("*") if path.is_file())
+                self.assertNotIn(token, captured + json.dumps(rows) + state)
 
     def test_auth_race_retries_once_on_the_same_thread_in_both_languages(self):
         worker = self.worker()
@@ -953,3 +1113,113 @@ class AccountAuthTests(RotationTestCase):
         sleeper.assert_called_once_with(1)
         save.assert_called_once()
         self.assertIsNone(save.call_args[0][0].get("pid"))
+
+    def test_claude_rename_moves_limits_without_changing_account_credentials(self):
+        worker = self.worker()
+        path = self.home / "codex-worker.json"
+        original = {"name": "first", "config_dir": "~/.claude-accounts/original",
+                    "token_keychain": "fixture-original-service"}
+        second = {"name": "second", "config_dir": str(self.root / "second-claude"),
+                  "token_keychain": "fixture-second-service"}
+        settings = {"language": "en", "claude": {"model": "fixture-model",
+                    "accounts": [original, second]}}
+        path.write_text(json.dumps(settings))
+        limits = {"status": "allowed", "unifiedWindows": {
+            "five_hour": {"utilization": 0.25, "resetsAt": self.reset},
+            "seven_day": {"utilization": 0.75, "resetsAt": self.reset + 86400}}}
+        worker.claude_accounts.save_limits("first", limits)
+        worker.claude_accounts.save_limits("second", {"status": "rejected", "resetsAt": self.reset})
+        before = worker.claude_accounts.read_limits()
+        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-rename", "first", "renamed"]), \
+                mock.patch("builtins.print"):
+            worker.cli.main()
+        settings["claude"]["accounts"][0] = dict(original, name="renamed")
+        self.assertEqual(json.loads(path.read_text()), settings)
+        self.assertEqual(worker.claude_accounts.read_limits(), {
+            "renamed": before["first"], "second": before["second"]})
+
+    def test_claude_rename_rejects_missing_duplicate_and_invalid_names(self):
+        worker = self.worker()
+        path = self.home / "codex-worker.json"
+        path.write_text(json.dumps({"claude": {"accounts": [
+            {"name": name, "config_dir": str(self.root / name), "token_keychain": "fixture-" + name}
+            for name in ("first", "second")]}}))
+        worker.claude_accounts.save_limits("first", {"status": "allowed"})
+        limits_path = worker.config.TASKS / "claude-limits.json"
+        before = path.read_text(), limits_path.read_text()
+        for old, new, message in (("missing", "new", "does not exist"),
+                                  ("first", "second", "already exists"),
+                                  ("first", "Invalid_Name", "only a-z")):
+            with self.subTest(old=old, new=new), \
+                    mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-rename", old, new]), \
+                    self.assertRaisesRegex(SystemExit, message):
+                worker.cli.main()
+            self.assertEqual((path.read_text(), limits_path.read_text()), before)
+
+    def test_claude_rename_materializes_implicit_default_and_legacy_limits(self):
+        worker = self.worker()
+        path = self.home / "codex-worker.json"
+        directory = str(self.root / "legacy-claude")
+        path.write_text(json.dumps({"reviewer": "claude", "claude": {
+            "config_dir": directory, "token_keychain": "fixture-legacy-service", "model": "fixture-model"}}))
+        limits = {"status": "allowed", "unifiedWindows": {
+            "five_hour": {"utilization": 0.5, "resetsAt": self.reset}}}
+        worker.config.TASKS.mkdir(parents=True, exist_ok=True)
+        (worker.config.TASKS / "claude-limits.json").write_text(json.dumps(limits))
+        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-rename", "default", "renamed"]), \
+                mock.patch("builtins.print"):
+            worker.cli.main()
+        saved = json.loads(path.read_text())
+        self.assertEqual(saved["claude"]["accounts"], [
+            {"name": "renamed", "config_dir": directory, "token_keychain": "fixture-legacy-service"}])
+        self.assertEqual(saved["claude"]["model"], "fixture-model")
+        self.assertEqual(saved["reviewer"], "claude")
+        self.assertEqual(worker.claude_accounts.read_limits(), {"renamed": limits})
+
+    def test_claude_remove_preserves_directory_and_keychain_and_refuses_last_account(self):
+        worker = self.worker()
+        path = self.home / "codex-worker.json"
+        directory = self.root / "removed-claude"
+        directory.mkdir()
+        credentials = directory / "credentials.json"
+        credentials.write_text("fixture-owned-by-claude")
+        removed = {"name": "first", "config_dir": str(directory), "token_keychain": "fixture-first-service"}
+        retained = {"name": "second", "config_dir": str(self.root / "second-claude"),
+                    "token_keychain": "fixture-second-service"}
+        settings = {"reviewer": "claude", "claude": {"model": "fixture-model", "accounts": [removed, retained]}}
+        path.write_text(json.dumps(settings))
+        worker.claude_accounts.save_limits("first", {"status": "allowed"})
+        worker.claude_accounts.save_limits("second", {"status": "rejected", "resetsAt": self.reset})
+        retained_limits = worker.claude_accounts.read_limits()["second"]
+        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "first"]), \
+                mock.patch.object(worker.commands.subprocess, "run") as launched, \
+                mock.patch.object(worker.commands.subprocess, "Popen") as spawned, \
+                mock.patch("builtins.print") as output:
+            worker.cli.main()
+        launched.assert_not_called()
+        spawned.assert_not_called()
+        self.assertEqual(credentials.read_text(), "fixture-owned-by-claude")
+        settings["claude"]["accounts"] = [retained]
+        self.assertEqual(json.loads(path.read_text()), settings)
+        self.assertEqual(worker.claude_accounts.read_limits(), {"second": retained_limits})
+        printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
+        self.assertIn(str(directory), printed)
+        self.assertIn(removed["token_keychain"], printed)
+        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "second"]), \
+                self.assertRaisesRegex(SystemExit, "switch reviewer to codex"):
+            worker.cli.main()
+        self.assertEqual(json.loads(path.read_text()), settings)
+        self.assertEqual(worker.claude_accounts.read_limits(), {"second": retained_limits})
+
+    def test_claude_remove_refuses_last_implicit_default(self):
+        worker = self.worker()
+        path = self.home / "codex-worker.json"
+        settings = {"reviewer": "claude", "claude": {"config_dir": str(self.root / "legacy-claude"),
+                    "token_keychain": "fixture-legacy-service"}}
+        path.write_text(json.dumps(settings))
+        worker.claude_accounts.save_limits("default", {"status": "allowed"})
+        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "default"]), \
+                self.assertRaisesRegex(SystemExit, "switch reviewer to codex"):
+            worker.cli.main()
+        self.assertEqual(json.loads(path.read_text()), settings)
+        self.assertEqual(worker.claude_accounts.read_limits(), {"default": {"status": "allowed"}})

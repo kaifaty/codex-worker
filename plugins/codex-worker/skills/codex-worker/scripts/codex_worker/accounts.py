@@ -265,13 +265,8 @@ def claude_account_lines(cfg):
     limits, lines = claude_accounts.read_limits(), []
     for account in claude_accounts.accounts(cfg):
         info = limits.get(account["name"], {})
-        windows = info.get("unifiedWindows") or {}
-        parts = []
-        for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
-            window = windows.get(name) or {}
-            used = window.get("utilization")
-            percent = f"{used * 100:g}%" if type(used) in (int, float) else "unknown"
-            parts.append(f"{label} {percent} (reset {config.local_time(window.get('resetsAt'))})")
+        parts = [claude_accounts.format_windows(info) if info.get("unifiedWindows") else
+                 "no requests yet; run claude-probe " + account["name"]]
         if claude_accounts.limited(info):
             reason = " (token unavailable)" if claude_accounts.token_marked(info) else ""
             parts.append("limited until " + config.local_time(info.get("limited_until", info.get("resetsAt"))) + reason)
