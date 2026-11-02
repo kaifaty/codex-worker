@@ -445,7 +445,9 @@ def print_accounts(infos, cfg):
         reset_label = str(count) + (f" (exp {config.local_time(nearest).split()[0]})" if nearest is not None else "")
         print("\t".join((info["name"], account.get("email") or "—", account.get("planType") or "—",
                          f"{w['used']:g}" if w else "—", config.local_time(w.get("reset")),
-                         ("unlimited" if credits.get("unlimited") else str(credits.get("balance") or "0")) +
+                         ("unlimited" if credits.get("unlimited") else
+                          str(credits.get("balance") or "0") if credits.get("hasCredits", credits.get("has_credits", False))
+                          else "0") +
                          (" (at floor)" if accounts.at_credit_floor(info, cfg) else ""),
                          reset_label, status)))
 

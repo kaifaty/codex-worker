@@ -597,6 +597,19 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertNotIn("--model", argv)
         self.assertNotIn("--effort", argv)
 
+    def test_claude_rate_limit_event_huge_number_is_ignored(self):
+        worker = self.worker()
+        huge = 10 ** 400
+        event = json.loads(json.dumps({"type": "rate_limit_event", "rate_limit_info": {
+            "status": "allowed", "utilization": huge, "resetsAt": huge,
+            "unifiedWindows": {
+                "five_hour": {"utilization": huge, "resetsAt": self.reset},
+                "seven_day": {"utilization": .5, "resetsAt": huge}}}}))
+        self.assertIsNone(worker.claude_review.event_unavailable(event, "default"))
+        self.assertEqual(worker.claude_accounts.read_limits()["default"], {
+            "status": "allowed", "unifiedWindows": {
+                "five_hour": {"resetsAt": self.reset}, "seven_day": {"utilization": .5}}})
+
     def test_claude_pool_selects_both_windows_then_earliest_long_reset(self):
         self.claude_pool_fixture()
         worker = self.worker()

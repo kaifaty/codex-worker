@@ -144,6 +144,10 @@ its own known balance is strictly above the floor; `unlimited` credits always pa
 balance never does. `credits_floor_until` (optional `YYYY-MM-DD`) limits the reserve to that local
 date: the floor applies through the end of the day, and from the next day it is `0`, so the rest of
 the balance can be spent before it expires.
+If credits are blocked only by this reserve, a waiting task wakes at the start of the next local
+day after `credits_floor_until`, or at the next window reset if it comes sooner. After waking it
+prefers an available subscription, then the current account's spendable credits, then another
+account's spendable credits.
 
 ```json
 {"credits": true, "credits_floor": 50, "credits_floor_until": "2030-06-15"}
@@ -156,7 +160,9 @@ waits for a reset (or pauses with `wait_for_reset: false`). The same rule choose
 the start of a turn. `wait` and notifications give the reason, for example
 `credits of main at the floor 50`. `accounts` prints the active floor and its end date once and marks
 balances at or below it with `(at floor)`; `accounts --json` adds the active `credits_floor`,
-`credits_floor_until` and each account's `credits.spendable`.
+`credits_floor_until` and each account's `credits.spendable`: the known balance above the active
+floor (at least `0`), `0` when `hasCredits` is false, or `null` for unlimited or unknown credits.
+The text output shows `unlimited` for unlimited credits and `0` when `hasCredits` is false.
 
 ## Waiting for a reset
 

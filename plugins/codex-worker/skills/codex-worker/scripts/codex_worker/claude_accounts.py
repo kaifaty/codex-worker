@@ -1,11 +1,10 @@
 """Role-neutral Claude Code accounts and credential-free cached limit snapshots."""
 import fcntl
 import json
-import math
 import os
 from contextlib import contextmanager
 
-from . import clock, config
+from . import clock, config, result_schema
 
 TOKEN_RETRY_SECONDS = 3600
 
@@ -24,10 +23,6 @@ def format_windows(info):
     return "; ".join(parts)
 
 
-def _finite(value):
-    return type(value) in (int, float) and math.isfinite(value)
-
-
 def read_limits():
     try:
         limits = json.loads((config.TASKS / "claude-limits.json").read_text(encoding="utf-8"))
@@ -35,16 +30,16 @@ def read_limits():
         return {}
     if not isinstance(limits, dict):
         return {}
-    if (isinstance(limits.get("status"), str) or _finite(limits.get("utilization"))
-            or _finite(limits.get("resetsAt")) or "unifiedWindows" in limits):
+    if (isinstance(limits.get("status"), str) or result_schema.is_finite_number(limits.get("utilization"))
+            or result_schema.is_finite_number(limits.get("resetsAt")) or "unifiedWindows" in limits):
         return {"default": limits}
     limits = {name: info for name, info in limits.items() if isinstance(info, dict)}
     for info in limits.values():
-        if info.get("token_unavailable") and not _finite(info.get("token_retry_at")):
+        if info.get("token_unavailable") and not result_schema.is_finite_number(info.get("token_retry_at")):
             # Earlier versions kept this mark until the next login; give it one hour.
             marked = info.get("limited_at")
-            info["token_retry_at"] = marked + TOKEN_RETRY_SECONDS if _finite(marked) else 0
-            if not _finite(info.get("limited_until")):
+            info["token_retry_at"] = marked + TOKEN_RETRY_SECONDS if result_schema.is_finite_number(marked) else 0
+            if not result_schema.is_finite_number(info.get("limited_until")):
                 info["limited_until"] = info["token_retry_at"]
     return limits
 
@@ -68,20 +63,21 @@ def save_limits(name, info, event_time=None):
     if info.get("status") in ("allowed", "allowed_warning", "rejected"):
         selected["status"] = info["status"]
     for key in ("utilization", "resetsAt"):
-        if _finite(info.get(key)):
+        if result_schema.is_finite_number(info.get(key)):
             selected[key] = info[key]
     windows = info.get("unifiedWindows")
     if isinstance(windows, dict):
         selected["unifiedWindows"] = {
             window_name: {key: window[key] for key in ("utilization", "resetsAt")
-                          if _finite(window.get(key))}
+                          if result_schema.is_finite_number(window.get(key))}
             for window_name in ("five_hour", "seven_day")
             for window in [windows.get(window_name)] if isinstance(window, dict)}
     with _locked_limits() as limits:
         previous = limits.get(name, {})
         active = limited(previous)
         marked_at = previous.get("limited_at")
-        fresh = _finite(event_time) and _finite(marked_at) and event_time > marked_at
+        fresh = (result_schema.is_finite_number(event_time)
+                 and result_schema.is_finite_number(marked_at) and event_time > marked_at)
         previous.update(selected)
         if (selected.get("status") in ("allowed", "allowed_warning") and (not active or fresh)
                 and not token_marked(previous)):
@@ -112,17 +108,17 @@ def token_available(name):
         until = info.pop("token_retry_at")
         info.pop("token_unavailable", None)
         reset = info.get("limited_until")
-        if _finite(reset) and reset <= until:
+        if result_schema.is_finite_number(reset) and reset <= until:
             info.pop("limited_until", None)
             info.pop("limited_at", None)
 
 
 def _window_used(window, now):
     reset = window.get("resetsAt")
-    if _finite(reset) and reset <= now:
+    if result_schema.is_finite_number(reset) and reset <= now:
         return 0
     used = window.get("utilization")
-    return used * 100 if _finite(used) else 0
+    return used * 100 if result_schema.is_finite_number(used) else 0
 
 
 def token_marked(info, now=None):
@@ -135,10 +131,10 @@ def limited(info, now=None):
     now = clock.CLOCK.time() if now is None else now
     if "limited_until" in info:
         reset = info["limited_until"]
-        return not _finite(reset) or reset > now
+        return not result_schema.is_finite_number(reset) or reset > now
     if info.get("status") == "rejected":
         reset = info.get("resetsAt")
-        return not _finite(reset) or reset > now
+        return not result_schema.is_finite_number(reset) or reset > now
     return False
 
 
@@ -156,7 +152,7 @@ def mark_limited(name, token_unavailable=False):
             if limited(info, now):
                 # An unknown reset would exclude the account for good; keep the hour.
                 reset = info.get("limited_until", info.get("resetsAt"))
-                if _finite(reset) and reset > until:
+                if result_schema.is_finite_number(reset) and reset > until:
                     until = reset
             info.update(token_unavailable=True, token_retry_at=now + TOKEN_RETRY_SECONDS,
                         limited_until=until, limited_at=now)
@@ -164,13 +160,14 @@ def mark_limited(name, token_unavailable=False):
         windows = info.get("unifiedWindows") or {}
         depleted = [window.get("resetsAt") for window in windows.values()
                     if isinstance(window, dict) and _window_used(window, now) >= 100]
-        depleted = [reset for reset in depleted if _finite(reset) and reset > now]
+        depleted = [reset for reset in depleted if result_schema.is_finite_number(reset) and reset > now]
         resets = [window.get("resetsAt") for window in windows.values() if isinstance(window, dict)]
-        resets = [reset for reset in resets if _finite(reset) and reset > now]
+        resets = [reset for reset in resets if result_schema.is_finite_number(reset) and reset > now]
         reset = info.get("resetsAt")
-        if not _finite(reset) or reset <= now:
+        if not result_schema.is_finite_number(reset) or reset <= now:
             reset = max(depleted) if depleted else min(resets, default=None)
-        if token_marked(info, now) and (not _finite(reset) or reset < info["token_retry_at"]):
+        if token_marked(info, now) and (not result_schema.is_finite_number(reset)
+                                        or reset < info["token_retry_at"]):
             reset = info["token_retry_at"]
         info["limited_until"] = reset
         info["limited_at"] = now
@@ -192,7 +189,7 @@ def select(cfg, role, exclude=(), prefer_unused=()):
             def long_reset(account):
                 windows = limits.get(account["name"], {}).get("unifiedWindows") or {}
                 reset = (windows.get("seven_day") or {}).get("resetsAt")
-                return reset if _finite(reset) else float("inf")
+                return reset if result_schema.is_finite_number(reset) else float("inf")
 
             return min(available, key=long_reset)
     return None

@@ -1,6 +1,5 @@
 """Thread events, rollout usage and continuation messages."""
 import json
-import math
 import os
 from pathlib import Path
 import re
@@ -210,7 +209,7 @@ def rollout_usage(path, offset=0):
                         # A short window cannot stand in for the weekly quota.
                         weekly = used if (window.get("window_minutes") or 0) >= 10080 else None
                         sample = {"tokens": decoded.tokens, "weekly": None}
-                        if type(weekly) in (int, float) and math.isfinite(weekly) and 0 <= weekly <= 100:
+                        if result_schema.is_finite_number(weekly) and 0 <= weekly <= 100:
                             sample["weekly"] = weekly
                         if first is None:
                             first = {"tokens": dict(sample["tokens"]), "weekly": sample["weekly"]}

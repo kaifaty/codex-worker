@@ -764,6 +764,105 @@ class AccountAuthTests(RotationTestCase):
                     worker.config.accounts_config()
                 self.assertIn("credits_floor_until must be a date YYYY-MM-DD or null", str(error.exception))
 
+    def test_credit_huge_number_is_invalid_or_unknown(self):
+        huge = 10 ** 400
+        (self.home / "codex-worker.json").write_text(json.dumps({"credits_floor": huge}))
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "accounts", "--json"],
+                                env=self.env, text=True, capture_output=True)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("credits_floor must be a finite nonnegative number", result.stderr)
+        self.assertNotIn("Traceback", result.stderr)
+        worker = self.worker()
+        info = self.credit_info("main", json.loads(json.dumps(huge)))
+        self.assertIsNone(worker.accounts.credit_balance(info))
+        self.assertFalse(worker.accounts.has_credits(info))
+        self.assertIsNone(worker.accounts.spendable_credits(info, {"credits_floor": 50}))
+
+    def test_accounts_spendable_matches_credit_availability(self):
+        self.configure(credits=True, credits_floor=50)
+        for unlimited, has_credits, expected, label in ((True, True, None, "unlimited"),
+                                                       (False, False, 0, "0"),
+                                                       (False, True, 73.45, "123.45")):
+            with self.subTest(unlimited=unlimited, has_credits=has_credits):
+                fixture = self.account(self.home, "A", self.reset)
+                fixture["credits"].update(unlimited=unlimited, hasCredits=has_credits)
+                (self.home / "fixture.json").write_text(json.dumps(fixture))
+                credits = json.loads(self.cli("accounts", "--json"))["codex"][0]["credits"]
+                self.assertEqual(credits["spendable"], expected)
+                row = next(line for line in self.cli("accounts").splitlines() if line.startswith("main\t"))
+                self.assertEqual(row.split("\t")[5], label)
+
+    def test_credit_floor_wake_resumes_on_credits_at_local_midnight(self):
+        self.enable_fake_clock()
+        worker = self.worker()
+        today = time.localtime(worker.clock.CLOCK.time())
+        midnight = time.mktime((today.tm_year, today.tm_mon, today.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+        self.reset = midnight + 3 * 86400
+        cfg = {"enabled": True, "switch_at": 99, "credits": True, "credits_floor": 100,
+               "credits_floor_until": time.strftime("%Y-%m-%d", today), "wait_for_reset": True,
+               "accounts": [{"name": "main", "home": str(self.home)},
+                            {"name": "second", "home": str(self.other)}]}
+        for main_balance, expected in (("0", "second"), ("50", "main")):
+            with self.subTest(main_balance=main_balance):
+                self.set_fake_wall(midnight - 120)
+                infos = [self.credit_info("main", main_balance), self.credit_info("second", "100")]
+                st = {"slug": "credit-floor-wake", "account": "main", "thread": "current-thread",
+                      "threads": [], "rotations": []}
+                with mock.patch.object(worker.config, "SLEEP_STEP", 60), \
+                        mock.patch.object(worker.accounts, "snapshots", return_value=infos), \
+                        mock.patch.object(worker.turn_monitor, "monitor", return_value=("completed", None)) as monitor, \
+                        mock.patch.object(worker.threads, "handoff", return_value="handoff"), \
+                        mock.patch.object(worker.task_state, "save"):
+                    worker.turns.run_turn(st, cfg, "original prompt", None, False,
+                                          lambda: False, worker.clock.CLOCK.sleep)
+                sleep = next(r for r in st["rotations"] if r.get("event") == "sleep")
+                self.assertEqual(sleep["until"], midnight)
+                self.assertEqual(st["reset_wait_seconds"], 120)
+                self.assertEqual(st["account"], expected)
+                self.assertEqual(st["outcome"], "completed")
+                self.assertEqual(monitor.call_args.args[2]["name"], expected)
+                self.assertTrue(all(worker.accounts.exhausted(i, cfg) for i in infos))
+
+    def test_credit_floor_wake_keeps_earlier_or_unrelated_resets(self):
+        self.enable_fake_clock()
+        worker = self.worker()
+        today = time.localtime(worker.clock.CLOCK.time())
+        midnight = time.mktime((today.tm_year, today.tm_mon, today.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+        for credits, until, reset in ((True, None, midnight + 3 * 86400),
+                                     (False, time.strftime("%Y-%m-%d", today), midnight + 3 * 86400),
+                                     (True, time.strftime("%Y-%m-%d", today), midnight - 60)):
+            with self.subTest(credits=credits, until=until, reset=reset):
+                self.set_fake_wall(midnight - 120)
+                self.reset = reset
+                cfg = {"switch_at": 99, "credits": credits, "credits_floor": 100,
+                       "credits_floor_until": until, "wait_for_reset": True}
+                infos = [self.credit_info("main", "0"), self.credit_info("second", "100")]
+                ready = self.credit_info("main", "0", used=0)
+                st = {"account": "main", "thread": "current-thread", "rotations": []}
+                with mock.patch.object(worker.config, "SLEEP_STEP", 86400), \
+                        mock.patch.object(worker.config, "RESET_MARGIN", 10), \
+                        mock.patch.object(worker.accounts, "snapshots", return_value=[ready, infos[1]]), \
+                        mock.patch.object(worker.task_state, "save"):
+                    chosen = worker.account_rotation.wait_for_account(st, infos, cfg, "quota", lambda: False)
+                self.assertIs(chosen, ready)
+                self.assertEqual(st["rotations"][0]["until"], reset + 10)
+                self.assertEqual(st["reset_wait_seconds"], reset + 10 - (midnight - 120))
+
+    def test_credit_wait_rechecks_spendable_after_reset_attempt(self):
+        worker = self.worker()
+        cfg = {"switch_at": 99, "credits": True, "credits_floor": 50, "wait_for_reset": True}
+        infos = [self.credit_info("main", "0"), self.credit_info("second", "0")]
+        for main_balance, expected in (("80", "main"), ("0", "second")):
+            with self.subTest(main_balance=main_balance):
+                refreshed = [self.credit_info("main", main_balance), self.credit_info("second", "100")]
+                st = {"account": "main", "thread": "current-thread", "rotations": []}
+                with mock.patch.object(worker.account_rotation, "try_reset_credit", return_value=refreshed), \
+                        mock.patch.object(worker.task_state, "save"):
+                    chosen = worker.account_rotation.wait_for_account(
+                        st, infos, cfg, "quota", lambda: False, sleep=lambda _: self.fail("unexpected sleep"))
+                self.assertEqual(chosen["name"], expected)
+                self.assertFalse(st["rotations"])
+
     def run_credit_floor_turn(self, balances, monitor_balances=None, **settings):
         """Run one turn with fake snapshots; the main exec re-reads limits twice while it runs."""
         worker = self.worker()
