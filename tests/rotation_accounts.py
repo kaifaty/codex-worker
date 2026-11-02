@@ -657,7 +657,8 @@ class AccountAuthTests(RotationTestCase):
             "mode": "usage_error", "omit_rollout": True,
             "messages": ["Work completed before the usage error"]}])
         self.account(self.other, "B", self.reset + 3600, used=99)
-        self.start("limit-error-credit-rotation")
+        self.cli("start", "limit-error-credit-rotation", "--brief", str(self.brief),
+                 "--repo", str(self.repo), timeout=90)
         output = self.wait("limit-error-credit-rotation")
         prompt = self.assert_rotation("limit-error-credit-rotation", output)
         self.assertIn("Work completed before the usage error", prompt)
@@ -684,7 +685,8 @@ class AccountAuthTests(RotationTestCase):
                 (self.other / "fixture.json").write_text(json.dumps(other))
                 slug = "limit-error-credit-floor-" + balance
                 before = len(self.invocations())
-                self.start(slug)
+                self.cli("start", slug, "--brief", str(self.brief),
+                         "--repo", str(self.repo), timeout=90)
                 output = self.wait(slug)
                 state = self.state(slug)
                 self.assertEqual(state["outcome"], "exhausted")
@@ -699,7 +701,8 @@ class AccountAuthTests(RotationTestCase):
         self.account(self.home, "A", self.reset,
                      runs=[{"mode": "usage_error", "omit_rollout": True}])
         self.account(self.other, "B", self.reset + 3600, used=99)
-        self.start("limit-error-credit-disabled")
+        self.cli("start", "limit-error-credit-disabled", "--brief", str(self.brief),
+                 "--repo", str(self.repo), timeout=90)
         self.wait("limit-error-credit-disabled")
         state = self.state("limit-error-credit-disabled")
         self.assertEqual(state["outcome"], "exhausted")
@@ -713,7 +716,8 @@ class AccountAuthTests(RotationTestCase):
                                         (self.other, "B", self.reset + 3600)):
             self.account(home, account_id, reset, used=99,
                          runs=[{"mode": "usage_error", "omit_rollout": True}])
-        self.start("limit-error-credit-no-loop")
+        self.cli("start", "limit-error-credit-no-loop", "--brief", str(self.brief),
+                 "--repo", str(self.repo), timeout=90)
         self.wait("limit-error-credit-no-loop")
         state = self.state("limit-error-credit-no-loop")
         self.assertEqual(state["outcome"], "exhausted")
