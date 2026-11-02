@@ -14,6 +14,9 @@
   codex_task.py reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
   codex_task.py claude-login <name> [--config-dir DIR] [--keychain SERVICE]  add/sign in to a Claude account
+  codex_task.py claude-probe <name>                  check a Claude token and cache usage limits
+  codex_task.py claude-rename <old> <new>            rename a Claude account without moving credentials
+  codex_task.py claude-remove <name>                 remove a Claude account from the pool
 
 All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
@@ -255,6 +258,9 @@ COMMAND_HANDLERS = {
     "reset-credit": commands.cmd_reset_credit,
     "login": commands.cmd_login,
     "claude-login": commands.cmd_claude_login,
+    "claude-probe": commands.cmd_claude_probe,
+    "claude-rename": commands.cmd_claude_rename,
+    "claude-remove": commands.cmd_claude_remove,
     "_run": supervisor.cmd__run,
 }
 
@@ -309,6 +315,13 @@ def main():
     s.add_argument("name")
     s.add_argument("--config-dir", metavar="DIR", help="isolated Claude config directory")
     s.add_argument("--keychain", metavar="SERVICE", help="Keychain service for the account token")
+    s = sub.add_parser("claude-probe", help="check a Claude token and refresh cached account limits")
+    s.add_argument("name")
+    s = sub.add_parser("claude-rename", help="rename a Claude account without moving credentials")
+    s.add_argument("old")
+    s.add_argument("new")
+    s = sub.add_parser("claude-remove", help="remove a Claude account without deleting credentials")
+    s.add_argument("name")
     if sys.argv[1:2] == ["scout"]:
         # Intermixed parsing is supported on the scout parser, not on subparsers as a group.
         a = scout_parser.parse_intermixed_args(sys.argv[2:])

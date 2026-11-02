@@ -57,6 +57,26 @@ stdin, stdout or stderr (`/dev/tty` only as a fallback: macOS kqueue rejects it,
 watches its input with kqueue);
 the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
 
+After saving, `claude-login` runs the same check as `claude-probe <name>`. A failed probe prints its
+reason and exits nonzero; the account remains saved.
+
+`claude-probe <name>` sends one request, `Reply with the single word OK.`, with `claude.model`,
+one maximum turn, no tools and `--permission-mode dontAsk`. It uses the same cleaned environment
+and Keychain token lookup as reviews, with stdin and stderr sent to `/dev/null` and a fresh temporary
+working directory removed afterward. Rate-limit events update the account's cached windows. It prints
+one line, `Claude account <name>: token ok; 5h …; 7d …`, using the same window format as `accounts`,
+or one of `token unavailable`, `authentication failed`, `usage limit`, or `request failed`. Only a
+successful response exits zero. Tokens never enter arguments, plugin output, settings, state or logs.
+
+`claude-rename <old> <new>` changes the name in `claude.accounts` and the cached limits key, keeping
+`config_dir` and `token_keychain` unchanged. The old name must exist; the new name must be unused
+and contain only lowercase letters, digits and hyphens. Legacy settings are first materialized as the
+`default` pool entry, as with `claude-login`.
+
+`claude-remove <name>` removes the pool entry and cached limits. It leaves the config directory and
+Keychain entry intact and prints their locations for manual deletion. The last pool account cannot
+be removed; switch `reviewer` to `codex` instead.
+
 For example:
 
 ```json
@@ -89,8 +109,9 @@ fallback causes and cancellation behavior.
 
 `accounts` prints one Claude line per account, with its name, five-hour and seven-day utilization
 percentages, local reset times and any limit marker; a missing Keychain token adds
-`(token unavailable)` for the hour it excludes the account. Before a rate-limit event, limits are
-`unknown`. The cache `~/.codex/claude-tasks/claude-limits.json` stores a dictionary by account name;
+`(token unavailable)` for the hour it excludes the account. Without recorded windows it prints
+`no requests yet; run claude-probe <name>`; the fields in `accounts --json` are unchanged. The cache
+`~/.codex/claude-tasks/claude-limits.json` stores a dictionary by account name;
 an older unnamed cache is read as `default`. Every Claude review record and journal row carries its
 account name; `report --json` includes it in each task's `reviews` list. Claude review costs and tokens remain separate from Codex.
 

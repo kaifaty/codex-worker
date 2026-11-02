@@ -9,9 +9,10 @@ import signal
 import subprocess
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
-from . import accounts, budgets, claude_accounts, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, threads
+from . import accounts, budgets, claude_accounts, claude_review, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, threads
 
 
 def main_repo(path):
@@ -500,12 +501,68 @@ def terminal_device():
     return "/dev/tty"
 
 
+@contextmanager
+def _locked_claude_settings():
+    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = config.CODEX_HOME / "codex-worker.json"
+    with (config.CODEX_HOME / "codex-worker.lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        source = path if path.exists() else config.CODEX_HOME / "claude-accounts.json"
+        settings = json.loads(source.read_text(encoding="utf-8")) if source.exists() else {}
+        normalized = config.accounts_config()["claude"]["accounts"]
+        pool = settings.setdefault("claude", {}).setdefault("accounts", normalized)
+        yield pool
+        temporary = path.with_suffix(f".{os.getpid()}.tmp")
+        temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        temporary.replace(path)
+
+
+def cmd_claude_rename(a):
+    if not re.fullmatch(r"[a-z0-9-]+", a.new):
+        procs.die("Claude account name must contain only a-z, 0-9 and '-'")
+    with _locked_claude_settings() as pool:
+        account = next((item for item in pool if item["name"] == a.old), None)
+        if account is None:
+            procs.die(f"Claude account {a.old!r} does not exist")
+        if any(item["name"] == a.new for item in pool):
+            procs.die(f"Claude account {a.new!r} already exists")
+        account["name"] = a.new
+        claude_accounts.rename_limits(a.old, a.new)
+    print(f"Claude account {a.old} renamed to {a.new}")
+
+
+def cmd_claude_remove(a):
+    with _locked_claude_settings() as pool:
+        account = next((item for item in pool if item["name"] == a.name), None)
+        if account is None:
+            procs.die(f"Claude account {a.name!r} does not exist")
+        if len(pool) == 1:
+            procs.die("Cannot remove the last Claude account; switch reviewer to codex")
+        pool.remove(account)
+        claude_accounts.clear_limits(a.name)
+    print(f"Claude account {a.name} removed")
+    print(f"Remove the config directory manually: {account['config_dir']}")
+    print(f"Remove the Keychain service manually: {account['token_keychain']}")
+
+
+def cmd_claude_probe(a):
+    cfg = config.accounts_config()
+    account = next((item for item in claude_accounts.accounts(cfg) if item["name"] == a.name), None)
+    if account is None:
+        procs.die(f"Claude account {a.name!r} does not exist")
+    reason = claude_review.probe(cfg, account)
+    if reason:
+        print(f"Claude account {a.name}: {reason}")
+        raise SystemExit(1)
+    windows = claude_accounts.format_windows(claude_accounts.read_limits().get(a.name, {}))
+    print(f"Claude account {a.name}: token ok; {windows}")
+
+
 def cmd_claude_login(a):
     if not re.fullmatch(r"[a-z0-9-]+", a.name):
         procs.die("Claude account name must contain only a-z, 0-9 and '-'")
     config.require_claude()
     cfg = config.accounts_config()
-    path = config.CODEX_HOME / "codex-worker.json"
     pool = cfg["claude"]["accounts"]
     previous = next((account for account in pool if account["name"] == a.name), None)
     directory = a.config_dir or (previous["config_dir"] if previous else
@@ -529,21 +586,12 @@ def cmd_claude_login(a):
     except OSError:
         procs.die("Claude login requires a terminal and the Claude CLI and Keychain tools")
     account = {"name": a.name, "config_dir": directory, "token_keychain": service}
-    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (config.CODEX_HOME / "codex-worker.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        source = path if path.exists() else config.CODEX_HOME / "claude-accounts.json"
-        settings = json.loads(source.read_text(encoding="utf-8")) if source.exists() else {}
-        normalized = config.accounts_config()["claude"]["accounts"]
-        pool = settings.get("claude", {}).get("accounts", normalized)
+    with _locked_claude_settings() as pool:
         previous = next((item for item in pool if item["name"] == a.name), None)
         if previous is None:
             pool.append(account)
         else:
             pool[pool.index(previous)] = account
-        settings.setdefault("claude", {})["accounts"] = pool
-        temporary = path.with_suffix(f".{os.getpid()}.tmp")
-        temporary.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-        temporary.replace(path)
     claude_accounts.clear_limits(a.name)
     print(f"Claude account {a.name} saved")
+    cmd_claude_probe(a)

@@ -158,7 +158,10 @@ Run all commands as `python3 -I "$T" <command>`.
 | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model] [--json]` | Summarize persistent costs and outcomes (default: seven days); combine grouping dimensions with commas. |
 | `accounts [--json]` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account; `--json` emits one object with `codex`, `claude`, `thresholds`, and the active `credits_floor`. |
 | `login <name> [--browser]` | Have the human sign in to a Codex account; writes `codex-worker.json`. |
-| `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human add an isolated Claude CLI account and store its token at the Keychain prompt. |
+| `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human save an isolated Claude CLI account and store its token at the Keychain prompt, then probe it; a failed probe leaves the account saved and exits nonzero. |
+| `claude-probe <name>` | Send one short request to check the token and cache five-hour and seven-day limits. |
+| `claude-rename <old> <new>` | Rename the Claude pool entry and cached limits, keeping its config directory and Keychain service. |
+| `claude-remove <name>` | Remove the Claude pool entry and cached limits; leave and print its directory and Keychain entry for manual deletion. The last account cannot be removed. |
 | `stop <slug>` | Interrupt the task; send the next instructions with `say`. |
 | `clean <slug> [--keep-branch]` | Remove the worktree and task logs and archive threads; optionally retain the local branch. |
 
@@ -420,6 +423,8 @@ Code CLI accounts; implementation and fixes remain in Codex. The human adds each
 through macOS Keychain, and appends to `claude.accounts` in `~/.codex/codex-worker.json`. Defaults are
 `~/.claude-accounts/first` and the `codex-worker-claude-first` Keychain service. Override them with
 `--config-dir DIR` and `--keychain SERVICE`. Tokens stay out of arguments, settings, state and logs.
+After saving, login runs `claude-probe first` to check the token and cache usage windows; a failed
+probe leaves the account saved and exits nonzero. Run `claude-probe <name>` again to refresh them.
 
 ```json
 {
