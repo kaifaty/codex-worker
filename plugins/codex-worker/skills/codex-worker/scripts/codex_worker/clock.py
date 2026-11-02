@@ -43,7 +43,8 @@ class Clock:
             with self.path.open("r+", encoding="utf-8") as stream:
                 fcntl.flock(stream, fcntl.LOCK_EX)
                 value = json.load(stream)
-                if value.get("auto_advance", True):
+                auto_advance = value.get("auto_advance", True)
+                if auto_advance:
                     value["wall"] += seconds
                     value["monotonic"] += seconds
                     stream.seek(0)
@@ -52,7 +53,7 @@ class Clock:
                     stream.flush()
         finally:
             signal.pthread_sigmask(signal.SIG_SETMASK, mask)
-        time.sleep(0.001)
+        time.sleep(0.001 if auto_advance else min(seconds, 0.05))
 
 
 CLOCK = Clock(os.environ.get("CODEX_TASK_CLOCK_FILE"))
