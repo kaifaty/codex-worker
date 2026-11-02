@@ -169,6 +169,18 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
             floor_reason = accounts.credit_floor_reason(current, cfg)
             if floor_reason:
                 return {"reason": floor_reason, "infos": infos, "chosen": chosen, "floor": True}
+        if not allow_credits and not chosen and cfg["credits"]:
+            # Codex refused this exec; only another unvisited account may spend credits.
+            if rotations < len(cfg["accounts"]):
+                chosen = accounts.credit_account(infos, cfg, excluded)
+            if not chosen:
+                for info in infos:
+                    if info["name"] in excluded or not info.get("logged_in") or info.get("duplicate"):
+                        continue
+                    floor_reason = accounts.credit_floor_reason(info, cfg)
+                    if floor_reason:
+                        reason += f"; {floor_reason}"
+                        break
         return {"reason": reason, "infos": infos, "chosen": chosen}
 
     while not stopped():
