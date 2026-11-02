@@ -202,7 +202,7 @@ class NotificationTests(RotationTestCase):
             runs.insert(0, {"mode": "complete", "reply": self.review_result(False)})
         self.account(self.other, "B", reset, runs=runs, auto_reset=True)
         args = ("--review-angles", angles) if angles else ()
-        self.cli("review", slug, *args)
+        self.reset_after_ready(lambda: self.cli("review", slug, *args), reset, 3)
         self.wait(slug)
         sleeping = self.state(slug)
         self.assertTrue(sleeping.get("sleeping"))
@@ -240,7 +240,8 @@ class NotificationTests(RotationTestCase):
                 {"mode": "usage_error", "limit_after": 0.05},
                 {"mode": "complete", "reply": self.review_result(False)}]
         self.account(self.other, "B", reset, runs=runs, auto_reset=True)
-        self.cli("review", slug, "--review-angles", "correctness,concurrency")
+        self.reset_after_ready(
+            lambda: self.cli("review", slug, "--review-angles", "correctness,concurrency"), reset, 3)
         self.wait(slug)
         self.assertTrue(self.state(slug).get("sleeping"))
         self.advance_fake_clock(reset + 1 - clock.time())
