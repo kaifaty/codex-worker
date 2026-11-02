@@ -847,6 +847,81 @@ class AccountAuthTests(RotationTestCase):
         self.assertEqual(execs, [])
         self.assertEqual(st["exhausted"]["reason"], "all accounts unavailable")
 
+    def test_limit_error_credit_rotates_with_handoff_despite_stale_current_balance(self):
+        self.configure(credits=True, credits_floor=50, wait_for_reset=False)
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, used=99, runs=[{
+            "mode": "usage_error", "omit_rollout": True,
+            "messages": ["Work completed before the usage error"]}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.cli("start", "limit-error-credit-rotation", "--brief", str(self.brief),
+                 "--repo", str(self.repo), timeout=90)
+        output = self.wait("limit-error-credit-rotation")
+        prompt = self.assert_rotation("limit-error-credit-rotation", output)
+        self.assertIn("Work completed before the usage error", prompt)
+        self.assertIn(self.brief.read_text().strip(), prompt)
+        state = self.state("limit-error-credit-rotation")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["rotations"][0]["reason"], "usage limit")
+        self.assertFalse(any(entry.get("event") == "sleep" for entry in state["rotations"]))
+        self.assertFalse(state.get("exhausted"))
+        self.assertEqual([entry["home"] for entry in self.invocations()], [str(self.home), str(self.other)])
+        self.assertEqual(json.loads((self.home / "fixture.json").read_text())["credits"]["balance"], "123.45")
+        rotated = self.notification("limit-error-credit-rotation", "rotated")
+        self.assertEqual((rotated["from"], rotated["to"]), ("main", "second"))
+
+    def test_limit_error_credit_at_or_below_floor_pauses_with_reason(self):
+        self.configure(credits=True, credits_floor=50, wait_for_reset=False)
+        self.configure_notify()
+        for balance in ("50", "20"):
+            with self.subTest(balance=balance):
+                self.account(self.home, "A", self.reset, used=99,
+                             runs=[{"mode": "usage_error", "omit_rollout": True}])
+                other = self.account(self.other, "B", self.reset + 3600, used=99)
+                other["credits"]["balance"] = balance
+                (self.other / "fixture.json").write_text(json.dumps(other))
+                slug = "limit-error-credit-floor-" + balance
+                before = len(self.invocations())
+                self.cli("start", slug, "--brief", str(self.brief),
+                         "--repo", str(self.repo), timeout=90)
+                output = self.wait(slug)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "exhausted")
+                self.assertIn("credits of second at the floor 50", state["exhausted"]["reason"])
+                self.assertIn("credits of second at the floor 50", output)
+                self.assertIn("credits of second at the floor 50", self.notification(slug, "paused")["message"])
+                self.assertEqual([entry["home"] for entry in self.invocations()[before:]], [str(self.home)])
+                self.assertFalse(state["rotations"])
+
+    def test_limit_error_credit_disabled_keeps_the_exhausted_path(self):
+        self.configure(credits=False, credits_floor=50, wait_for_reset=False)
+        self.account(self.home, "A", self.reset,
+                     runs=[{"mode": "usage_error", "omit_rollout": True}])
+        self.account(self.other, "B", self.reset + 3600, used=99)
+        self.cli("start", "limit-error-credit-disabled", "--brief", str(self.brief),
+                 "--repo", str(self.repo), timeout=90)
+        self.wait("limit-error-credit-disabled")
+        state = self.state("limit-error-credit-disabled")
+        self.assertEqual(state["outcome"], "exhausted")
+        self.assertEqual(state["exhausted"]["reason"], "usage limit")
+        self.assertEqual([entry["home"] for entry in self.invocations()], [str(self.home)])
+        self.assertFalse(state["rotations"])
+
+    def test_limit_error_credit_does_not_revisit_accounts_before_reset(self):
+        self.configure(credits=True, credits_floor=50, wait_for_reset=False)
+        for home, account_id, reset in ((self.home, "A", self.reset),
+                                        (self.other, "B", self.reset + 3600)):
+            self.account(home, account_id, reset, used=99,
+                         runs=[{"mode": "usage_error", "omit_rollout": True}])
+        self.cli("start", "limit-error-credit-no-loop", "--brief", str(self.brief),
+                 "--repo", str(self.repo), timeout=90)
+        self.wait("limit-error-credit-no-loop")
+        state = self.state("limit-error-credit-no-loop")
+        self.assertEqual(state["outcome"], "exhausted")
+        self.assertEqual([entry["home"] for entry in self.invocations()], [str(self.home), str(self.other)])
+        self.assertEqual([(entry["from"], entry["to"], entry["reason"]) for entry in state["rotations"]],
+                         [("main", "second", "usage limit")])
+
     def test_unknown_stale_and_nearby_resets_wait_before_rechecking(self):
         worker = self.worker()
         cfg = {"wait_for_reset": True, "switch_at": 99}
