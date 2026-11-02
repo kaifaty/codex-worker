@@ -572,6 +572,8 @@ class ClaudeReviewTests(RotationTestCase):
 
     def test_claude_limits_accounts_and_default_cli_settings(self):
         self.claude_fixture(reviewer="claude")
+        self.worker().claude_accounts.save_limits("default", {"unifiedWindows": {
+            "five_hour": {"resetsAt": self.reset}, "seven_day": {"resetsAt": self.reset}}})
         self.assertIn("claude default: 5h unknown", self.cli("accounts"))
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
         self.start("claude-limits", "--review")

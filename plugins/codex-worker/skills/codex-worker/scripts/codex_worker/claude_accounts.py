@@ -14,6 +14,16 @@ def accounts(cfg):
     return cfg["claude"]["accounts"]
 
 
+def format_windows(info):
+    windows, parts = info.get("unifiedWindows") or {}, []
+    for name, label in (("five_hour", "5h"), ("seven_day", "7d")):
+        window = windows.get(name) or {}
+        used = window.get("utilization")
+        percent = f"{used * 100:g}%" if type(used) in (int, float) else "unknown"
+        parts.append(f"{label} {percent} (reset {config.local_time(window.get('resetsAt'))})")
+    return "; ".join(parts)
+
+
 def _finite(value):
     return type(value) in (int, float) and math.isfinite(value)
 
@@ -83,6 +93,12 @@ def save_limits(name, info, event_time=None):
 def clear_limits(name):
     with _locked_limits() as limits:
         limits.pop(name, None)
+
+
+def rename_limits(old, new):
+    with _locked_limits() as limits:
+        if old in limits:
+            limits[new] = limits.pop(old)
 
 
 def token_available(name):

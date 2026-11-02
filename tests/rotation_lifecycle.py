@@ -1510,7 +1510,7 @@ worker.notifications.reap_notifications = reap
             "claude reviewer: 5h 25% (reset " + local_time(self.reset - 1800) +
             "); 7d 80% (reset " + local_time(self.reset) + "); limited until " + local_time(self.reset) +
             " (token unavailable)",
-            "claude unknown: 5h unknown (reset unknown); 7d unknown (reset unknown)", ""]))
+            "claude unknown: no requests yet; run claude-probe unknown", ""]))
         encoded = self.cli("accounts", "--json")
         report = json.loads(encoded)
         iso_time = lambda stamp: datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")

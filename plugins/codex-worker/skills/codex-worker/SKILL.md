@@ -114,7 +114,10 @@ Use `--reviewer claude` on `start`, `say`, or `review` for reviews from the isol
 | Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
 | Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` |
 | Accounts | `accounts [--json]` — logins, plans, limits, reset times and credits; JSON includes Codex and Claude pools, thresholds and the credit floor (`credits_floor`, [accounts.md](references/accounts.md#credits)); `reset-credit <account> [--credit ID] [--yes]` |
-| Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` adds an isolated Claude CLI account with a token entered at the Keychain prompt |
+| Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` saves an isolated Claude CLI account with a token entered at the Keychain prompt, then probes it; a failed probe leaves the account saved and exits nonzero |
+| Probe a Claude account | `claude-probe <name>` — send one short request to check its token and cache five-hour and seven-day limits |
+| Rename a Claude account | `claude-rename <old> <new>` — rename its pool entry and cached limits, keeping its config directory and Keychain service |
+| Remove a Claude account | `claude-remove <name>` — remove its pool entry and cached limits, leaving its directory and Keychain entry for manual deletion; the last account cannot be removed |
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
 | Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock` |
 

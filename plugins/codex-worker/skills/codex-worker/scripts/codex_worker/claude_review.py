@@ -6,6 +6,7 @@ import os
 import selectors
 import stat
 import subprocess
+import tempfile
 import threading
 from pathlib import Path
 
@@ -62,6 +63,94 @@ def numeric(value):
     return type(value) in (int, float) and math.isfinite(value)
 
 
+def account_environment(account, timeout):
+    """Read an isolated account's token without exposing credential output."""
+    environment = {key: value for key, value in os.environ.items()
+                   if not key.startswith(("CLAUDE", "ANTHROPIC"))}
+    environment["CLAUDE_CONFIG_DIR"] = str(Path(account["config_dir"]).expanduser())
+    try:
+        credential = subprocess.run(
+            ["security", "find-generic-password", "-s", account["token_keychain"],
+             "-a", os.environ.get("USER", ""), "-w"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
+            timeout=timeout, env=environment)
+    except (OSError, subprocess.TimeoutExpired):
+        return environment, ""
+    token = credential.stdout.strip() if credential.returncode == 0 else ""
+    if token:
+        environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
+    return environment, token
+
+
+def event_unavailable(event, account):
+    """Persist safe limit fields and recognize account availability errors."""
+    kind = event.get("type")
+    if (kind == "result" or kind == "system" and event.get("subtype") == "api_retry"):
+        if event.get("error_status", event.get("api_error_status")) in (401, 403):
+            return "authentication failed"
+    if kind == "rate_limit_event":
+        info = event.get("rate_limit_info")
+        if isinstance(info, dict):
+            claude_accounts.save_limits(account, info, event.get("timestamp"))
+            if info.get("status") == "rejected":
+                return "usage limit"
+    return None
+
+
+def probe(cfg, account):
+    """Send one short request without tools or persisted CLI output."""
+    environment, token = account_environment(account, config.ACCOUNT_TIMEOUT)
+    if not token:
+        claude_accounts.mark_limited(account["name"], token_unavailable=True)
+        return "token unavailable"
+    claude_accounts.token_available(account["name"])
+    executable = config.claude_binary()
+    if executable is None:
+        return "request failed"
+    args = [executable, "-p", "Reply with the single word OK.",
+            "--output-format", "stream-json", "--verbose", "--max-turns", "1",
+            "--tools", "", "--permission-mode", "dontAsk"]
+    if cfg["claude"].get("model"):
+        args += ["--model", cfg["claude"]["model"]]
+    timed_out = False
+    try:
+        with tempfile.TemporaryDirectory(prefix="codex-worker-claude-probe-") as directory:
+            response = subprocess.run(args, cwd=directory, env=environment,
+                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                      stderr=subprocess.DEVNULL, timeout=config.CLAUDE_PROBE_TIMEOUT)
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout or b""
+        timed_out = True
+    except OSError:
+        return "request failed"
+    else:
+        output = response.stdout
+    reason, answered = None, False
+    for line in output.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, UnicodeError):
+            reason = reason or "request failed"
+            continue
+        if not isinstance(event, dict):
+            reason = reason or "request failed"
+            continue
+        unavailable = event_unavailable(event, account["name"])
+        reason = reason or unavailable
+        if event.get("type") == "result":
+            if event.get("is_error"):
+                reason = reason or "request failed"
+            else:
+                answered = isinstance(event.get("result"), str) and bool(event["result"].strip())
+    if reason in ("usage limit", "authentication failed"):
+        claude_accounts.mark_limited(account["name"])
+    if timed_out:
+        return "request failed"
+    return reason or (None if response.returncode == 0 and answered else "request failed")
+
+
 def event_result(event, telemetry, token, account):
     """Decode selected stream fields; return (result, unavailability reason)."""
     if not isinstance(event, dict):
@@ -72,17 +161,8 @@ def event_result(event, telemetry, token, account):
             value = event.get(key)
             if isinstance(value, str) and token not in value:
                 telemetry[key] = value
-    if kind == "system" and event.get("subtype") == "api_retry":
-        if event.get("error_status", event.get("api_error_status")) in (401, 403):
-            return None, "authentication failed"
-    if kind == "rate_limit_event":
-        info = event.get("rate_limit_info")
-        if isinstance(info, dict):
-            claude_accounts.save_limits(account, info, event.get("timestamp"))
-            if info.get("status") == "rejected":
-                return None, "usage limit"
     if kind != "result":
-        return None, None
+        return None, event_unavailable(event, account)
     usage = event.get("usage")
     if isinstance(usage, dict):
         telemetry["usage"] = {key: usage[key] for key in
@@ -92,8 +172,9 @@ def event_result(event, telemetry, token, account):
         telemetry["cost_usd"] = event["total_cost_usd"]
     if type(event.get("num_turns")) is int:
         telemetry["num_turns"] = event["num_turns"]
-    if event.get("error_status", event.get("api_error_status")) in (401, 403):
-        return None, "authentication failed"
+    reason = event_unavailable(event, account)
+    if reason:
+        return None, reason
     if event.get("is_error"):
         return None, "review failed"
     result = event.get("structured_output")
@@ -134,9 +215,6 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response["reason"] = "Claude CLI was not found"
         return response
     settings = cfg["claude"]
-    environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("CLAUDE", "ANTHROPIC"))}
-    environment["CLAUDE_CONFIG_DIR"] = str(Path(account["config_dir"]).expanduser())
     args = [executable, "-p", prompt, "--output-format", "stream-json", "--verbose",
             "--json-schema", json.dumps(result_schema.REVIEW_SCHEMA),
             "--permission-mode", "dontAsk", "--allowedTools", "Read,Grep,Glob,Bash",
@@ -153,15 +231,7 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response["outcome"] = "budget_exhausted"
         record_timeout(st, minutes)
         return response
-    credential = None
-    try:
-        credential = subprocess.run(
-            ["security", "find-generic-password", "-s", account["token_keychain"],
-             "-a", os.environ.get("USER", ""), "-w"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            timeout=min(config.ACCOUNT_TIMEOUT, remaining), env=environment)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
+    environment, token = account_environment(account, min(config.ACCOUNT_TIMEOUT, remaining))
     if stopped():
         response["outcome"] = task_state.stop_outcome(st, stopped)
         return response
@@ -169,12 +239,10 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response["outcome"] = "budget_exhausted"
         record_timeout(st, minutes)
         return response
-    token = credential.stdout.strip() if credential is not None else ""
-    if credential is None or credential.returncode or not token:
+    if not token:
         response["reason"] = "token unavailable"
         return response
     claude_accounts.token_available(account["name"])
-    environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
     if stopped():
         response["outcome"] = task_state.stop_outcome(st, stopped)
         return response
