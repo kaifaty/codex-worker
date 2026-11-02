@@ -1,7 +1,6 @@
 """One isolated Claude Code review, with no persisted CLI output or credentials."""
 import hashlib
 import json
-import math
 import os
 import selectors
 import stat
@@ -57,10 +56,6 @@ def worktree_snapshot(st):
             continue  # Directories, including submodules, are covered by status.
         files.append((name, mode, contents))
     return head, status, files
-
-
-def numeric(value):
-    return type(value) in (int, float) and math.isfinite(value)
 
 
 def account_environment(account, timeout):
@@ -167,8 +162,8 @@ def event_result(event, telemetry, token, account):
     if isinstance(usage, dict):
         telemetry["usage"] = {key: usage[key] for key in
                               ("input_tokens", "output_tokens", "cache_creation_input_tokens",
-                               "cache_read_input_tokens") if numeric(usage.get(key))}
-    if numeric(event.get("total_cost_usd")):
+                               "cache_read_input_tokens") if result_schema.is_finite_number(usage.get(key))}
+    if result_schema.is_finite_number(event.get("total_cost_usd")):
         telemetry["cost_usd"] = event["total_cost_usd"]
     if type(event.get("num_turns")) is int:
         telemetry["num_turns"] = event["num_turns"]

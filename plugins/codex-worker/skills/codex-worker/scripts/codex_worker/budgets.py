@@ -1,8 +1,7 @@
 """Weekly quota accounting and active time budgets."""
-import math
 from typing import NamedTuple, Optional
 
-from . import accounts, clock, procs
+from . import accounts, clock, procs, result_schema
 
 
 def budget_stop(st):
@@ -15,8 +14,8 @@ def budget_stop(st):
 def weekly_used(limits):
     window = accounts.longest_window({"limits": limits})
     value = window.get("used")
-    if ((window.get("minutes") or 0) >= 10080 and type(value) in (int, float)
-            and math.isfinite(value) and 0 <= value <= 100):
+    if ((window.get("minutes") or 0) >= 10080 and result_schema.is_finite_number(value)
+            and 0 <= value <= 100):
         return value
     return None
 
@@ -27,7 +26,7 @@ def record_weekly_usage(st, account, limits, seed=False):
     if used is None:
         return 0
     reset = accounts.longest_window({"limits": limits}).get("reset")
-    if type(reset) not in (int, float) or not math.isfinite(reset):
+    if not result_schema.is_finite_number(reset):
         reset = None
     marks = st.setdefault("weekly_marks", {})
     mark = marks.get(account)

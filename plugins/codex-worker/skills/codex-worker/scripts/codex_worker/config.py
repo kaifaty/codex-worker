@@ -1,7 +1,6 @@
 """Worker settings, script paths and polling intervals."""
 import datetime
 import json
-import math
 import os
 import re
 import runpy
@@ -10,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import procs
+from . import procs, result_schema
 
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
@@ -181,14 +180,12 @@ def accounts_config():
         value = cfg[key]
         if key == "max_turn_minutes" and value is None:
             continue
-        if (isinstance(value, bool) or not isinstance(value, (int, float))
-                or not math.isfinite(value) or value <= 0):
+        if not result_schema.is_finite_number(value) or value <= 0:
             procs.die(key + " must be a positive finite number")
     if type(cfg["repeat_limit"]) is not int or cfg["repeat_limit"] < 1:
         procs.die("repeat_limit must be a positive integer")
     weekly = cfg["max_task_weekly_percent"]
-    if weekly is not None and (type(weekly) not in (int, float) or not 0 < weekly <= 100
-                               or not math.isfinite(weekly)):
+    if weekly is not None and (not result_schema.is_finite_number(weekly) or not 0 < weekly <= 100):
         procs.die("max_task_weekly_percent must be a finite number in (0, 100]")
     if type(cfg["review_angles_min_lines"]) is not int or cfg["review_angles_min_lines"] < 1:
         procs.die("review_angles_min_lines must be a positive integer")
@@ -210,7 +207,7 @@ def accounts_config():
     if not isinstance(cfg["credits"], bool):
         procs.die("credits must be true or false")
     floor = cfg["credits_floor"]
-    if isinstance(floor, bool) or not isinstance(floor, (int, float)) or not math.isfinite(floor) or floor < 0:
+    if not result_schema.is_finite_number(floor) or floor < 0:
         procs.die("credits_floor must be a finite nonnegative number")
     until = cfg["credits_floor_until"]
     if until is not None and not valid_date(until):
@@ -222,7 +219,7 @@ def accounts_config():
     if not isinstance(cfg["use_reset_credits"], bool):
         procs.die("use_reset_credits must be true or false")
     hours = cfg["reset_credit_min_hours"]
-    if isinstance(hours, bool) or not isinstance(hours, (int, float)) or not math.isfinite(hours) or hours < 0:
+    if not result_schema.is_finite_number(hours) or hours < 0:
         procs.die("reset_credit_min_hours must be a finite nonnegative number")
     names = set()
     homes = set()

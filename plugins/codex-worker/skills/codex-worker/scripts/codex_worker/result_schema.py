@@ -1,6 +1,16 @@
 """Structured worker and review result contracts."""
 import json
+import math
 import re
+
+
+def is_finite_number(value):
+    if type(value) not in (int, float):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
 
 
 def object_schema(properties):

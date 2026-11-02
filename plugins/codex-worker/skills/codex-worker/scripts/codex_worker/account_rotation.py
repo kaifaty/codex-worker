@@ -1,6 +1,7 @@
 """Account errors, reset waits and login refresh."""
 import json
 import re
+import time
 
 from . import accounts, clock, config, credit_resets, notifications, task_state, telemetry_log
 
@@ -229,6 +230,9 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             if st.get("kind") != "review" and st.get("thread") and current.get("logged_in") and not accounts.exhausted(current, cfg):
                 return current
             chosen = accounts.available(infos, cfg)
+            if not chosen and cfg.get("credits"):
+                chosen = (current if current.get("logged_in") and accounts.has_credits(current, cfg)
+                          else accounts.credit_account(infos, cfg))
             if chosen:
                 return chosen
             unknown = [i for i in infos if i.get("logged_in") is None]
@@ -241,6 +245,14 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         until = stamp + config.RESET_MARGIN if stamp is not None else started + config.RESET_RETRY_SECONDS
         if until <= started:
             until = started + config.SLEEP_STEP
+        if cfg.get("credits") and cfg.get("credits_floor_until"):
+            floor_account = next((i for i in infos if i.get("logged_in") and not i.get("duplicate")
+                                  and accounts.has_credits(i) and not accounts.has_credits(i, cfg)), None)
+            if floor_account:
+                end = time.strptime(cfg["credits_floor_until"], "%Y-%m-%d")
+                floor_end = time.mktime((end.tm_year, end.tm_mon, end.tm_mday + 1, 0, 0, 0, 0, 0, -1))
+                if floor_end < until:
+                    until, name = floor_end, floor_account["name"]
         if probing:
             until = min(until, started + config.ACCOUNT_RETRY_SECONDS) if stamp is not None else started + config.ACCOUNT_RETRY_SECONDS
         until = min(until, deadline)
@@ -290,6 +302,9 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         if st.get("kind") != "review" and st.get("thread") and current.get("logged_in") and not accounts.exhausted(current, cfg):
             return current
         chosen = accounts.available(infos, cfg)
+        if not chosen and cfg.get("credits"):
+            chosen = (current if current.get("logged_in") and accounts.has_credits(current, cfg)
+                      else accounts.credit_account(infos, cfg))
         if chosen:
             return chosen
     return None

@@ -1,6 +1,5 @@
 """Account homes, app-server RPC and subscription limits."""
 import json
-import math
 import os
 import selectors
 import signal
@@ -9,7 +8,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import claude_accounts, clock, config, procs
+from . import claude_accounts, clock, config, procs, result_schema
 
 
 def account_named(cfg, name):
@@ -185,12 +184,17 @@ def credit_balance(info):
         return None
     try:
         value = float(balance)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return None
-    return value if math.isfinite(value) else None
+    return value if result_schema.is_finite_number(value) else None
 
 
 def spendable_credits(info, cfg):
+    credits = info.get("limits", {}).get("credits", {})
+    if credits.get("unlimited"):
+        return None
+    if not credits.get("hasCredits", credits.get("has_credits", False)):
+        return 0
     balance = credit_balance(info)
     return None if balance is None else max(0.0, round(balance - credits_floor(cfg), 6))
 
