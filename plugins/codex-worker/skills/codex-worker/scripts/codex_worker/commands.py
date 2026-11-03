@@ -336,7 +336,7 @@ def cmd_stats(a):
 def cmd_report(a):
     report = runpy.run_path(str(config.REPORT))
     try:
-        data = report["build_report"](config.CODEX_HOME / "codex-worker-log.jsonl", a.since, a.repo, a.slug,
+        data = report["build_report"](telemetry_log.journal_path(), a.since, a.repo, a.slug,
                                       by=getattr(a, "by", None))
     except ValueError as exc:
         procs.die(str(exc))
@@ -400,6 +400,28 @@ def cmd_clean(a):
     except OSError as exc:
         procs.die(f"could not archive task record to {archive}: {exc}; record kept at {record}")
     print(f"cleaned {a.slug}; record in {archive}")
+    if st.get("kind") == "scout":
+        return
+    try:
+        # Use the report's own matching so the reminder agrees with `report`.
+        verdict = runpy.run_path(str(config.REPORT))["lead_verdict"](
+            telemetry_log.journal_path(), Path(st["repo"]).name, a.slug, st.get("created"))
+    except OSError as exc:
+        print(f"could not check the lead verdict for {a.slug}: telemetry journal unreadable ({exc})")
+        return
+    if verdict is None:
+        print(f"no lead verdict for {a.slug}; record it: verdict {a.slug} "
+              + "|".join(telemetry_log.LEAD_VERDICTS) + " [--note TEXT]")
+
+
+def cmd_verdict(a):
+    try:
+        row = telemetry_log.record_lead_verdict(a.slug, a.verdict, a.note)
+    except OSError as exc:
+        procs.die(f"could not write the telemetry journal: {exc}")
+    if row is None:
+        procs.die(f"no task {a.slug!r} in task state or the telemetry journal")
+    print(f"verdict {a.verdict} recorded for {a.slug} ({row['repo']})")
 
 
 def cmd_accounts(a):

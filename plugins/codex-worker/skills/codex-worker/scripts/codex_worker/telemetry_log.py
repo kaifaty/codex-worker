@@ -37,32 +37,89 @@ def telemetry_phase(st):
     return next((phase for phase in reversed(TELEMETRY_PHASES) if phase.st is st and not phase.finished), None)
 
 
+def journal_path():
+    return config.CODEX_HOME / "codex-worker-log.jsonl"
+
+
+def append_row(row, stopped=lambda: False):
+    """Append one journal row under the journal lock; raise when it cannot be written."""
+    payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
+    with journal_path().open("a+b", buffering=0) as stream:
+        deadline = time.monotonic() + 2
+        while True:
+            try:
+                fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                remaining = deadline - time.monotonic()
+                if stopped() or remaining <= 0:
+                    raise
+                time.sleep(min(0.05, remaining))
+        if stream.seek(0, os.SEEK_END):
+            stream.seek(-1, os.SEEK_END)
+            if stream.read(1) != b"\n":
+                payload = b"\n" + payload
+        remaining = memoryview(payload)
+        while remaining:
+            written = stream.write(remaining)
+            if not written:
+                raise OSError("short telemetry write")
+            remaining = remaining[written:]
+
+
 def write_telemetry(st, row, stopped):
     try:
-        payload = (json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n").encode("utf-8")
-        with (config.CODEX_HOME / "codex-worker-log.jsonl").open("a+b", buffering=0) as stream:
-            deadline = time.monotonic() + 2
-            while True:
-                try:
-                    fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    break
-                except BlockingIOError:
-                    remaining = deadline - time.monotonic()
-                    if stopped() or remaining <= 0:
-                        raise
-                    time.sleep(min(0.05, remaining))
-            if stream.seek(0, os.SEEK_END):
-                stream.seek(-1, os.SEEK_END)
-                if stream.read(1) != b"\n":
-                    payload = b"\n" + payload
-            remaining = memoryview(payload)
-            while remaining:
-                written = stream.write(remaining)
-                if not written:
-                    raise OSError("short telemetry write")
-                remaining = remaining[written:]
+        append_row(row, stopped)
     except Exception as exc:
         telemetry_error(st, exc)
+
+
+LEAD_VERDICTS = ("accepted", "revised", "redone", "dropped")
+
+
+def journal_rows():
+    """Yield readable journal rows; a missing journal yields nothing."""
+    try:
+        handle = journal_path().open("r", encoding="utf-8", errors="replace")
+    except FileNotFoundError:
+        return
+    with handle:
+        for line in handle:
+            try:
+                row = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if isinstance(row, dict) and isinstance(row.get("slug"), str) and isinstance(row.get("repo"), str):
+                yield row
+
+
+def lead_verdict_target(slug):
+    """Return (repo, created) of the active task or of the slug's latest journal row."""
+    if task_state.state_path(slug).exists():
+        st = task_state.load(slug)
+        return Path(st["repo"]).name, st.get("created")
+    latest = None
+    for row in journal_rows():
+        if row["slug"] == slug and (latest is None or _at(row) >= _at(latest)):
+            latest = row
+    return None if latest is None else (latest["repo"], latest.get("created"))
+
+
+def _at(row):
+    at = row.get("at")
+    return at if type(at) in (int, float) else 0
+
+
+def record_lead_verdict(slug, verdict, note=None):
+    """Append the lead's verdict for a task; return the row, or None for an unknown slug."""
+    target = lead_verdict_target(slug)
+    if target is None:
+        return None
+    repo, created = target
+    row = {"v": 1, "kind": "verdict", "at": clock.CLOCK.time(), "slug": slug, "repo": repo,
+           "created": created, "verdict": verdict, "note": note}
+    append_row(row)
+    return row
 
 
 def record_turn_result(st, stopped):
@@ -89,6 +146,29 @@ def record_turn_result(st, stopped):
         write_telemetry(st, row, stopped)
     except Exception as exc:
         telemetry_error(st, exc)
+
+
+def new_severe_findings(merged, result):
+    """Count P1/P2 findings this angle adds to the angles merged so far.
+
+    Mirrors review_cycle.merge_reviews: one defect found by several angles counts
+    once, at its strongest severity, so the angle rows of a round sum to the merged count.
+    """
+    severities = {}
+
+    def add(findings):
+        for item in findings or []:
+            if isinstance(item, dict) and isinstance(item.get("title"), str) and item.get("severity") in ("P1", "P2", "P3"):
+                key = (item.get("file"), item.get("line"), item["title"].casefold())
+                severities[key] = min(severities.get(key, "P3"), item["severity"])
+
+    def severe():
+        return sum(severity in ("P1", "P2") for severity in severities.values())
+
+    add((merged or {}).get("findings"))
+    before = severe()
+    add(result.get("findings"))
+    return severe() - before
 
 
 class PhaseTelemetry:
@@ -211,6 +291,8 @@ class PhaseTelemetry:
                    "weekly_spent": st.get("weekly_used_percent", 0) - self.weekly_started}
             if self.phase == "review":
                 row["reviewer"] = self.reviewer
+                if "findings" in result:
+                    row["severe_findings"] = new_severe_findings(st.get("review_result"), result)
                 if self.reviewer == "claude":
                     row.update(thread=None, weekly_spent=0, cost_usd=self.cost_usd)
             if self.provider == "claude":

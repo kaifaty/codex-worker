@@ -88,7 +88,9 @@ class LifecycleTests(RotationTestCase):
         stamp = datetime.datetime.fromtimestamp(clock.time(), datetime.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         archive = record.parent / ".archive" / (slug + "-" + stamp)
 
-        self.assertEqual(self.cli("clean", slug), "cleaned %s; record in %s\n" % (slug, archive))
+        self.assertEqual(self.cli("clean", slug),
+                         "cleaned %s; record in %s\nno lead verdict for %s; record it: verdict %s "
+                         "accepted|revised|redone|dropped [--note TEXT]\n" % (slug, archive, slug, slug))
         self.assertFalse(record.exists())
         self.assertEqual({path.relative_to(archive): path.read_bytes() for path in archive.rglob("*")
                           if path.is_file()}, contents)
