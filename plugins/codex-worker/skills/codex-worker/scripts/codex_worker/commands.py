@@ -598,7 +598,7 @@ def cmd_claude_login(a):
         if previous is None:
             pool.append(account)
         else:
-            pool[pool.index(previous)] = account
+            previous.update(account)
     claude_accounts.clear_limits(a.name)
     print(f"Claude account {a.name} saved")
     cmd_claude_probe(a)

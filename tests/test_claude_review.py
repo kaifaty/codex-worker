@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import time
 from pathlib import Path
 from unittest import mock
 
@@ -700,6 +701,9 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "second")
         save("first", .1, 168)
         self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "first")
+        save("first", 1, -1)
+        save("second", .5, 24)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "second")
 
     def test_claude_fresh_selection_refreshes_stale_limits_and_keeps_failed_snapshot(self):
         self.claude_pool_fixture(runs=[{"limits": {"status": "allowed", "unifiedWindows": {
@@ -729,7 +733,51 @@ class ClaudeReviewTests(RotationTestCase):
         with mock.patch.dict(os.environ, self.env, clear=True):
             self.assertEqual(worker.claude_review.select_account(cfg, "review")["name"], "first")
         self.assertEqual(len(self.claude_invocations()), 2)
-        self.assertEqual(worker.claude_accounts.read_limits()["first"], entries["first"])
+        self.assertEqual(worker.claude_accounts.read_limits()["first"],
+                         dict(entries["first"], probe_attempted_at=clock.time()))
+
+    def test_claude_fresh_failed_probe_is_not_repeated_before_next_refresh(self):
+        self.claude_pool_fixture(runs=[{"mode": "invalid_json", "limits": {}}], names=("first",))
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        stale = {"updated_at": clock.time() - 1801, "unifiedWindows": {
+            "seven_day": {"utilization": .1, "resetsAt": self.reset}}}
+        (worker.config.TASKS / "claude-limits.json").write_text(json.dumps({"first": stale}))
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for _ in range(2):
+                self.assertEqual(worker.claude_review.select_account(cfg, "review")["name"], "first")
+        self.assertEqual(len(self.claude_invocations()), 1)
+        self.assertEqual(worker.claude_accounts.read_limits()["first"],
+                         dict(stale, probe_attempted_at=clock.time()))
+
+    def test_claude_fresh_stop_terminates_probe_and_selects_from_cached_limits(self):
+        self.claude_pool_fixture(runs=[{"mode": "hold", "limits": {}}])
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        entries = {name: {"updated_at": clock.time() - 1801, "unifiedWindows": {
+            "seven_day": {"utilization": used, "resetsAt": self.reset}}}
+                   for name, used in (("first", .1), ("second", .5))}
+        (worker.config.TASKS / "claude-limits.json").write_text(json.dumps(entries))
+
+        def stopped():
+            return any(event["command"] == "holding" for event in self.claude_trace())
+
+        with mock.patch.dict(os.environ, self.env, clear=True), \
+                mock.patch.object(worker.config, "CLAUDE_PROBE_TIMEOUT", 10):
+            started = time.monotonic()
+            account = worker.claude_review.select_account(cfg, "review", stopped=stopped)
+            self.assertLess(time.monotonic() - started, worker.config.CLAUDE_PROBE_TIMEOUT)
+        self.assertEqual(account["name"], "first")
+        self.assertEqual(len(self.claude_invocations()), 1)
+        child = self.claude_invocations()[0]
+        self.assertEqual(child["pid"], child["pgid"])
+        self.assertFalse(self.process_is_live(child["pid"]))
+        self.assertTrue(any(event["command"] == "signal" and event["signal"] == 2
+                            for event in self.claude_trace()))
+        self.assertEqual(worker.claude_accounts.read_limits(), {
+            "first": dict(entries["first"], probe_attempted_at=clock.time()), "second": entries["second"]})
 
     def test_claude_fresh_concurrent_selections_probe_once_without_holding_limits_lock(self):
         gate = self.root / "release-probe"

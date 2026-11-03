@@ -126,6 +126,26 @@ class AccountAuthTests(RotationTestCase):
                 {"name": "second", "config_dir": str(self.root / ".claude-accounts" / "second"),
                  "token_keychain": "codex-worker-claude-second"}]})
 
+    def test_claude_login_preserves_existing_subscription_weight(self):
+        worker = self.worker()
+        account = {"name": "large", "config_dir": str(self.root / "old-claude"),
+                   "token_keychain": "fixture-old-service", "weight": 20}
+        path = self.home / "codex-worker.json"
+        path.write_text(json.dumps({"claude": {"accounts": [account]}}))
+        terminal = self.root / "login-terminal"
+        terminal.touch()
+        directory = str(self.root / "new-claude")
+        with mock.patch.object(worker.config, "claude_binary", return_value="fixture-claude"), \
+                mock.patch.object(worker.commands.subprocess, "run", return_value=SimpleNamespace(returncode=0)), \
+                mock.patch.object(worker.claude_review, "probe", return_value=None), \
+                mock.patch.object(worker.commands, "open", create=True,
+                                  side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
+                redirect_stdout(io.StringIO()):
+            worker.commands.cmd_claude_login(SimpleNamespace(
+                name="large", config_dir=directory, keychain="fixture-new-service"))
+        self.assertEqual(json.loads(path.read_text())["claude"]["accounts"], [
+            dict(account, config_dir=directory, token_keychain="fixture-new-service")])
+
     def test_claude_login_opens_the_terminal_by_its_device_path(self):
         worker = self.worker()
 

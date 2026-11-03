@@ -131,6 +131,20 @@ def stale(cfg, info, now=None):
             or now - updated > max_age * 60)
 
 
+def probe_due(cfg, info, now=None):
+    now = clock.CLOCK.time() if now is None else now
+    attempted = info.get("probe_attempted_at")
+    max_age = cfg["claude"].get("limits_max_age_minutes", 30)
+    return stale(cfg, info, now) and (
+        max_age == 0 or not result_schema.is_finite_number(attempted)
+        or now - attempted >= max_age * 60)
+
+
+def mark_probe_attempt(name):
+    with _locked_limits() as limits:
+        limits.setdefault(name, {})["probe_attempted_at"] = clock.CLOCK.time()
+
+
 def token_marked(info, now=None):
     """Whether a missing-token mark from read_limits() is still active."""
     now = clock.CLOCK.time() if now is None else now
@@ -200,7 +214,7 @@ def select(cfg, role, exclude=(), prefer_unused=()):
                 windows = limits.get(account["name"], {}).get("unifiedWindows") or {}
                 weekly = windows.get("seven_day") or {}
                 reset = weekly.get("resetsAt")
-                hours = (reset - now) / 3600 if result_schema.is_finite_number(reset) else 168
+                hours = (reset - now) / 3600 if result_schema.is_finite_number(reset) and reset > now else 168
                 score = (100 - _window_used(weekly, now)) * account.get("weight", 1) / max(hours, 1)
                 return -score, _window_used(windows.get("five_hour") or {}, now)
 

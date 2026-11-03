@@ -58,7 +58,8 @@ watches its input with kqueue);
 the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
 
 After saving, `claude-login` runs the same check as `claude-probe <name>`. A failed probe prints its
-reason and exits nonzero; the account remains saved.
+reason and exits nonzero; the account remains saved. Signing in to an existing account updates its
+login fields and preserves the other account settings, including `weight`.
 
 `claude-probe <name>` sends one request, `Reply with the single word OK.`, with `claude.model`,
 one maximum turn, no tools and `--permission-mode dontAsk`. It uses the same cleaned environment
@@ -100,21 +101,25 @@ Each account's optional `weight` is its relative subscription size, a positive f
 defaulting to `1`. For example, weights `5` and `20` represent subscriptions with five and twenty
 times the base quota. Utilization percentages are always measured against each account's own limit.
 
-Each saved limit snapshot has an `updated_at` timestamp. Before choosing an account for a review or
-angle, the supervisor probes every unblocked account whose snapshot has no timestamp or is older
-than `claude.limits_max_age_minutes` (a finite nonnegative number, default `30`). Set it to `0` to
-refresh before every selection. Refreshes use the same request as `claude-probe`; an account lock
-prevents simultaneous probes, and the timestamp is checked again after acquiring the lock so another
-process's fresh snapshot is reused. The shared limits-file lock is released during the request.
-A failed probe leaves the previous snapshot available for selection; usage-limit and missing-token
-markers retain their usual behavior.
+Each saved limit snapshot has an `updated_at` timestamp. Every probe attempt, successful or not, also
+records `probe_attempted_at`. Before choosing an account for a review or angle, the supervisor probes
+every unblocked account whose snapshot has no timestamp or is older than
+`claude.limits_max_age_minutes` (a finite nonnegative number, default `30`), unless its last probe
+attempt is younger than that interval. This prevents repeated failed probes while the old snapshot
+is still stale. Set the interval to `0` to probe before every selection. Refreshes use the same
+request as `claude-probe`; an account lock prevents simultaneous probes, and both timestamps are
+checked again after acquiring the lock. The shared limits-file lock is released during the request.
+The supervisor checks for stop before each probe and terminates a running refresh's process group
+when stopped. A failed or stopped probe leaves the previous snapshot available for selection;
+usage-limit and missing-token markers retain their usual behavior. Manual `claude-probe` always
+attempts a request regardless of snapshot or attempt age.
 
 The supervisor first considers accounts below `soft_switch_at` in both the five-hour and seven-day
 windows, then accounts below `switch_at` if none qualify. Angles in the same review prefer unused
 available accounts. Within that group it chooses the largest
 `(100 - seven_day_used_percent) * weight / max(hours_until_seven_day_reset, 1)`:
 the account whose remaining quota needs to be spent fastest before its reset. Unknown utilization
-counts as zero, an unknown weekly reset as 168 hours away, and utilization is zero after a reset.
+counts as zero, an unknown or passed weekly reset as 168 hours away, and utilization is zero after a reset.
 Ties prefer lower five-hour utilization, then configuration order. With equal weights and usage,
 an earlier weekly reset still wins.
 
