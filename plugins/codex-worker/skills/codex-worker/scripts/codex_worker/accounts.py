@@ -269,8 +269,11 @@ def claude_account_lines(cfg):
     limits, lines = claude_accounts.read_limits(), []
     for account in claude_accounts.accounts(cfg):
         info = limits.get(account["name"], {})
-        parts = [claude_accounts.format_windows(info) if info.get("unifiedWindows") else
+        parts = [f"weight {account.get('weight', 1):g}",
+                 claude_accounts.format_windows(info) if info.get("unifiedWindows") else
                  "no requests yet; run claude-probe " + account["name"]]
+        parts.append("as of " + config.local_time(info.get("updated_at")) +
+                     (" (stale)" if claude_accounts.stale(cfg, info) else ""))
         if claude_accounts.limited(info):
             reason = " (token unavailable)" if claude_accounts.token_marked(info) else ""
             parts.append("limited until " + config.local_time(info.get("limited_until", info.get("resetsAt"))) + reason)

@@ -73,6 +73,8 @@ def save_limits(name, info, event_time=None):
             for window_name in ("five_hour", "seven_day")
             for window in [windows.get(window_name)] if isinstance(window, dict)}
     with _locked_limits() as limits:
+        if selected:
+            selected["updated_at"] = clock.CLOCK.time()
         previous = limits.get(name, {})
         active = limited(previous)
         marked_at = previous.get("limited_at")
@@ -119,6 +121,28 @@ def _window_used(window, now):
         return 0
     used = window.get("utilization")
     return used * 100 if result_schema.is_finite_number(used) else 0
+
+
+def stale(cfg, info, now=None):
+    now = clock.CLOCK.time() if now is None else now
+    updated = info.get("updated_at")
+    max_age = cfg["claude"].get("limits_max_age_minutes", 30)
+    return (max_age == 0 or not result_schema.is_finite_number(updated)
+            or now - updated > max_age * 60)
+
+
+def probe_due(cfg, info, now=None):
+    now = clock.CLOCK.time() if now is None else now
+    attempted = info.get("probe_attempted_at")
+    max_age = cfg["claude"].get("limits_max_age_minutes", 30)
+    return stale(cfg, info, now) and (
+        max_age == 0 or not result_schema.is_finite_number(attempted)
+        or now - attempted >= max_age * 60)
+
+
+def mark_probe_attempt(name):
+    with _locked_limits() as limits:
+        limits.setdefault(name, {})["probe_attempted_at"] = clock.CLOCK.time()
 
 
 def token_marked(info, now=None):
@@ -175,7 +199,7 @@ def mark_limited(name, token_unavailable=False):
 
 
 def select(cfg, role, exclude=(), prefer_unused=()):
-    """Choose by headroom and long reset; role labels the caller's journal only."""
+    """Choose the weighted weekly headroom that must be spent fastest."""
     limits, now = read_limits(), clock.CLOCK.time()
     choices = [account for account in accounts(cfg) if account["name"] not in exclude
                and not limited(limits.get(account["name"], {}), now)]
@@ -186,10 +210,13 @@ def select(cfg, role, exclude=(), prefer_unused=()):
         if available:
             available = [account for account in available if account["name"] not in prefer_unused] or available
 
-            def long_reset(account):
+            def priority(account):
                 windows = limits.get(account["name"], {}).get("unifiedWindows") or {}
-                reset = (windows.get("seven_day") or {}).get("resetsAt")
-                return reset if result_schema.is_finite_number(reset) else float("inf")
+                weekly = windows.get("seven_day") or {}
+                reset = weekly.get("resetsAt")
+                hours = (reset - now) / 3600 if result_schema.is_finite_number(reset) and reset > now else 168
+                score = (100 - _window_used(weekly, now)) * account.get("weight", 1) / max(hours, 1)
+                return -score, _window_used(windows.get("five_hour") or {}, now)
 
-            return min(available, key=long_reset)
+            return min(available, key=priority)
     return None

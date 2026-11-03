@@ -1507,10 +1507,10 @@ worker.notifications.reap_notifications = reap
             "logged-out\t—\t—\t—\tunknown\t0\t0\tnot logged in",
             "rpc-error\t—\t—\t—\tunknown\t0\t0\tunknown (rpc error: " +
             "{'code': -32000, 'message': 'fixture account unavailable'})",
-            "claude reviewer: 5h 25% (reset " + local_time(self.reset - 1800) +
-            "); 7d 80% (reset " + local_time(self.reset) + "); limited until " + local_time(self.reset) +
+            "claude reviewer: weight 1; 5h 25% (reset " + local_time(self.reset - 1800) +
+            "); 7d 80% (reset " + local_time(self.reset) + "); as of unknown (stale); limited until " + local_time(self.reset) +
             " (token unavailable)",
-            "claude unknown: no requests yet; run claude-probe unknown", ""]))
+            "claude unknown: weight 1; no requests yet; run claude-probe unknown; as of unknown (stale)", ""]))
         encoded = self.cli("accounts", "--json")
         report = json.loads(encoded)
         iso_time = lambda stamp: datetime.datetime.fromtimestamp(stamp, datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1528,10 +1528,12 @@ worker.notifications.reap_notifications = reap
                                  reset_credits={"available_count": 0, "expires_at": []}),
                       dict(missing, name="logged-out", status="not_logged_in"),
                       dict(missing, name="rpc-error", status=None)],
-            "claude": [{"name": "reviewer", "five_hour": {"used_percent": 25, "resets_at": iso_time(self.reset - 1800)},
+            "claude": [{"name": "reviewer", "weight": 1, "updated_at": None, "stale": True,
+                        "five_hour": {"used_percent": 25, "resets_at": iso_time(self.reset - 1800)},
                         "seven_day": {"used_percent": 80, "resets_at": iso_time(self.reset)},
                         "limited_until": iso_time(self.reset), "token_unavailable": True},
-                       {"name": "unknown", "five_hour": None, "seven_day": None,
+                       {"name": "unknown", "weight": 1, "updated_at": None, "stale": True,
+                        "five_hour": None, "seven_day": None,
                         "limited_until": None, "token_unavailable": None}],
             "thresholds": {"soft_switch_at": 80, "switch_at": 99},
             "credits_floor": 0, "credits_floor_until": None})

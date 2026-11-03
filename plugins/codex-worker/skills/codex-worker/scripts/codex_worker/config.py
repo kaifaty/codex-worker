@@ -161,10 +161,17 @@ def accounts_config():
         for key in ("config_dir", "token_keychain"):
             if not isinstance(account.get(key), str) or not account[key]:
                 procs.die("claude.accounts." + key + " must be a nonempty string")
+        weight = account.get("weight", 1)
+        if not result_schema.is_finite_number(weight) or weight <= 0:
+            procs.die("claude.accounts.weight must be a positive finite number")
         account["config_dir"] = str(Path(account["config_dir"]).expanduser().resolve())
     claude.setdefault("model", None)
     claude.setdefault("effort", None)
     claude.setdefault("max_turns", 40)
+    claude.setdefault("limits_max_age_minutes", 30)
+    age = claude["limits_max_age_minutes"]
+    if not result_schema.is_finite_number(age) or age < 0:
+        procs.die("claude.limits_max_age_minutes must be a finite nonnegative number")
     for key in ("model", "effort"):
         if claude[key] is not None and (not isinstance(claude[key], str) or not claude[key]):
             procs.die("claude." + key + " must be a nonempty string or null")

@@ -1,4 +1,5 @@
 """One isolated Claude Code review, with no persisted CLI output or credentials."""
+import fcntl
 import hashlib
 import json
 import os
@@ -7,6 +8,7 @@ import stat
 import subprocess
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from . import claude_accounts, clock, config, procs, result_schema, task_state
@@ -92,9 +94,54 @@ def event_unavailable(event, account):
     return None
 
 
-def probe(cfg, account):
+def refresh_limits(cfg, stopped=None):
+    """Refresh stale, unblocked accounts before any role chooses from the pool."""
+    limits = claude_accounts.read_limits()
+    for account in claude_accounts.accounts(cfg):
+        if stopped is not None and stopped():
+            return
+        info = limits.get(account["name"], {})
+        now = clock.CLOCK.time()
+        if not claude_accounts.limited(info, now) and claude_accounts.probe_due(cfg, info, now):
+            probe(cfg, account, stale_only=True, stopped=stopped)
+
+
+def select_account(cfg, role, exclude=(), prefer_unused=(), stopped=None):
+    refresh_limits(cfg, stopped)
+    return claude_accounts.select(cfg, role, exclude, prefer_unused)
+
+
+def probe(cfg, account, stale_only=False, stopped=None):
+    """Serialize account probes, rechecking stale snapshots after taking the lock."""
+    config.TASKS.mkdir(parents=True, exist_ok=True)
+    with (config.TASKS / ("claude-probe-" + account["name"] + ".lock")).open("a") as lock:
+        if stopped is None:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+        else:
+            while not stopped():
+                try:
+                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    time.sleep(0.2)
+            else:
+                return "request failed"
+        if stale_only:
+            info = claude_accounts.read_limits().get(account["name"], {})
+            now = clock.CLOCK.time()
+            if claude_accounts.limited(info, now) or not claude_accounts.probe_due(cfg, info, now):
+                return None
+        if stopped is not None and stopped():
+            return "request failed"
+        claude_accounts.mark_probe_attempt(account["name"])
+        return _probe(cfg, account, stopped)
+
+
+def _probe(cfg, account, stopped=None):
     """Send one short request without tools or persisted CLI output."""
     environment, token = account_environment(account, config.ACCOUNT_TIMEOUT)
+    if stopped is not None and stopped():
+        return "request failed"
     if not token:
         claude_accounts.mark_limited(account["name"], token_unavailable=True)
         return "token unavailable"
@@ -110,16 +157,41 @@ def probe(cfg, account):
     timed_out = False
     try:
         with tempfile.TemporaryDirectory(prefix="codex-worker-claude-probe-") as directory:
-            response = subprocess.run(args, cwd=directory, env=environment,
-                                      stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                      stderr=subprocess.DEVNULL, timeout=config.CLAUDE_PROBE_TIMEOUT)
+            if stopped is None:
+                response = subprocess.run(args, cwd=directory, env=environment,
+                                          stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                          stderr=subprocess.DEVNULL, timeout=config.CLAUDE_PROBE_TIMEOUT)
+                output, returncode = response.stdout, response.returncode
+            else:
+                proc = subprocess.Popen(args, cwd=directory, env=environment,
+                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                        stderr=subprocess.DEVNULL, start_new_session=True)
+                chunks, eof = [], False
+                deadline = clock.CLOCK.monotonic() + config.CLAUDE_PROBE_TIMEOUT
+                try:
+                    with selectors.DefaultSelector() as selector:
+                        selector.register(proc.stdout, selectors.EVENT_READ)
+                        while True:
+                            if stopped() or clock.CLOCK.monotonic() >= deadline:
+                                timed_out = True
+                                break
+                            if eof and proc.poll() is not None:
+                                break
+                            for key, _ in selector.select(0.2):
+                                chunk = os.read(key.fileobj.fileno(), 65536)
+                                if not chunk:
+                                    selector.unregister(key.fileobj)
+                                    eof = True
+                                chunks.append(chunk)
+                finally:
+                    procs.terminate(proc)
+                    proc.stdout.close()
+                output, returncode = b"".join(chunks), proc.returncode
     except subprocess.TimeoutExpired as exc:
         output = exc.stdout or b""
         timed_out = True
     except OSError:
         return "request failed"
-    else:
-        output = response.stdout
     reason, answered = None, False
     for line in output.splitlines():
         if not line.strip():
@@ -143,7 +215,7 @@ def probe(cfg, account):
         claude_accounts.mark_limited(account["name"])
     if timed_out:
         return "request failed"
-    return reason or (None if response.returncode == 0 and answered else "request failed")
+    return reason or (None if returncode == 0 and answered else "request failed")
 
 
 def event_result(event, telemetry, token, account):

@@ -58,7 +58,8 @@ watches its input with kqueue);
 the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
 
 After saving, `claude-login` runs the same check as `claude-probe <name>`. A failed probe prints its
-reason and exits nonzero; the account remains saved.
+reason and exits nonzero; the account remains saved. Signing in to an existing account updates its
+login fields and preserves the other account settings, including `weight`.
 
 `claude-probe <name>` sends one request, `Reply with the single word OK.`, with `claude.model`,
 one maximum turn, no tools and `--permission-mode dontAsk`. It uses the same cleaned environment
@@ -82,9 +83,10 @@ For example:
 ```json
 {
   "claude": {
+    "limits_max_age_minutes": 30,
     "accounts": [
-      {"name": "first", "config_dir": "~/.claude-accounts/first", "token_keychain": "codex-worker-claude-first"},
-      {"name": "second", "config_dir": "~/.claude-accounts/second", "token_keychain": "codex-worker-claude-second"}
+      {"name": "first", "config_dir": "~/.claude-accounts/first", "token_keychain": "codex-worker-claude-first", "weight": 5},
+      {"name": "second", "config_dir": "~/.claude-accounts/second", "token_keychain": "codex-worker-claude-second", "weight": 20}
     ]
   }
 }
@@ -95,10 +97,31 @@ named `default`. With neither configured, that account retains `~/.claude-accoun
 `codex-worker-claude-reviewer`. Model, effort and maximum turns are shared settings under `claude`;
 see [settings.md](settings.md#claude-accounts).
 
-Before each review or angle, the supervisor prefers accounts below `soft_switch_at` in both the
-five-hour and seven-day windows, ordered by the earliest seven-day reset. If there are none, it
-uses the same ordering among accounts below `switch_at` in both windows. Unknown limits count as
-available. Angles in the same review prefer different available accounts.
+Each account's optional `weight` is its relative subscription size, a positive finite number
+defaulting to `1`. For example, weights `5` and `20` represent subscriptions with five and twenty
+times the base quota. Utilization percentages are always measured against each account's own limit.
+
+Each saved limit snapshot has an `updated_at` timestamp. Every probe attempt, successful or not, also
+records `probe_attempted_at`. Before choosing an account for a review or angle, the supervisor probes
+every unblocked account whose snapshot has no timestamp or is older than
+`claude.limits_max_age_minutes` (a finite nonnegative number, default `30`), unless its last probe
+attempt is younger than that interval. This prevents repeated failed probes while the old snapshot
+is still stale. Set the interval to `0` to probe before every selection. Refreshes use the same
+request as `claude-probe`; an account lock prevents simultaneous probes, and both timestamps are
+checked again after acquiring the lock. The shared limits-file lock is released during the request.
+The supervisor checks for stop before each probe and terminates a running refresh's process group
+when stopped. A failed or stopped probe leaves the previous snapshot available for selection;
+usage-limit and missing-token markers retain their usual behavior. Manual `claude-probe` always
+attempts a request regardless of snapshot or attempt age.
+
+The supervisor first considers accounts below `soft_switch_at` in both the five-hour and seven-day
+windows, then accounts below `switch_at` if none qualify. Angles in the same review prefer unused
+available accounts. Within that group it chooses the largest
+`(100 - seven_day_used_percent) * weight / max(hours_until_seven_day_reset, 1)`:
+the account whose remaining quota needs to be spent fastest before its reset. Unknown utilization
+counts as zero, an unknown or passed weekly reset as 168 hours away, and utilization is zero after a reset.
+Ties prefer lower five-hour utilization, then configuration order. With equal weights and usage,
+an earlier weekly reset still wins.
 
 A rejected rate limit or 401/403 marks that account unavailable until its reported reset and retries
 the same review on another available account. A late allowance snapshot does not clear an active
@@ -107,10 +130,21 @@ limit marker. The reset is shown as `unknown` when none was reported. `wait` pri
 the review falls back to Codex. See [review-cycle.md](review-cycle.md#review-provider) for other
 fallback causes and cancellation behavior.
 
-`accounts` prints one Claude line per account, with its name, five-hour and seven-day utilization
-percentages, local reset times and any limit marker; a missing Keychain token adds
+`accounts` prints one Claude line per account, with its name, weight, five-hour and seven-day
+utilization percentages, local reset times, snapshot time (`as of ...`), `stale` when the snapshot
+needs refreshing, and any limit marker; a missing Keychain token adds
 `(token unavailable)` for the hour it excludes the account. Without recorded windows it prints
-`no requests yet; run claude-probe <name>`; the fields in `accounts --json` are unchanged. The cache
+`no requests yet; run claude-probe <name>`. `accounts --json` includes each Claude account's numeric
+`weight`, UTC ISO `updated_at` timestamp (or `null`) and boolean `stale`, alongside its existing
+window and availability fields. `accounts --refresh` first refreshes only stale, unblocked Claude
+accounts using the same locking and failure rules as selection, then prints; it can be combined with
+`--json`. For example:
+
+```text
+claude second: weight 20; 5h 4% (reset ...); 7d 13% (reset ...); as of 2026-11-03 10:54
+```
+
+The cache
 `~/.codex/claude-tasks/claude-limits.json` stores a dictionary by account name;
 an older unnamed cache is read as `default`. Every Claude review record and journal row carries its
 account name; `report --json` includes it in each task's `reviews` list. Claude review costs and tokens remain separate from Codex.
