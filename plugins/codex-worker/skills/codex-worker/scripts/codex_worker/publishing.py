@@ -142,22 +142,25 @@ def publish_pr(st, stopped):
             if pr["state"] in ("CLOSED", "MERGED"):
                 skip("pr " + pr["state"].lower())
                 return
-            if not body:
-                receipt["action"] = "unchanged"
-                return
-        if not pr:
+        if not pr or st.get("executor") == "claude":
             if not title or not body:
                 stage = "PR text history"
-                for event in reversed(threads.events(st)):
-                    item = event.get("item") or {}
-                    if event.get("type") != "item.completed" or item.get("type") != "agent_message":
-                        continue
-                    previous = result_schema.parse_result(item.get("text", ""))
+                messages = (threads.claude_messages(st) if st.get("executor") == "claude" else
+                            [(event.get("item") or {}).get("text", "") for event in threads.events(st)
+                             if event.get("type") == "item.completed"
+                             and (event.get("item") or {}).get("type") == "agent_message"])
+                for message in reversed(messages):
+                    previous = result_schema.parse_result(message)
                     if previous is not None:
                         title = title or previous["pr_title"]
                         body = body or previous["pr_body"]
                     if title and body:
                         break
+        if pr:
+            if not body:
+                receipt["action"] = "unchanged"
+                return
+        else:
             body = body or result.get("summary", "")
         title = title or run(config.GIT + ["log", "-1", "--format=%s"])
         with tempfile.NamedTemporaryFile(mode="w+", encoding="utf-8", prefix="pr-",

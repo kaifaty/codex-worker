@@ -111,8 +111,8 @@ Without `--reviewer`, Claude tasks use Codex reviews; Codex tasks keep the confi
 | Wait for the cycle | `wait <slug> [--through-sleep]` as a **background** Bash command: it re-invokes you when the whole review/fix cycle ends; read its [output](references/results.md#what-wait-prints) |
 | Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M [--max-weekly P] [--effort E] [--review] [--review-angles LIST] [--fix-rounds 2] [--ci\|--no-ci] [--ci-rounds N]` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
 | First review | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` (only when idle), then `wait` |
-| Look | `status [<slug>]` — executor, account, state, PR, commits, last message, and the last turn's `result` |
-| Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all task threads |
+| Look | `status [<slug>]` — executor, account, state, PR, commits, last message (up to three saved messages for Claude), and the last turn's `result` |
+| Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all Codex threads; Claude work shows UTC start, active minutes, account, session, model, effort, input/output/cache tokens, dollar cost and seven-day usage growth with totals, followed by Codex reviews |
 | Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--json]` |
 | Accounts | `accounts [--json]` — logins, plans, limits, reset times and credits; JSON includes Codex and Claude pools, thresholds and the credit floor (`credits_floor`, [accounts.md](references/accounts.md#credits)); `reset-credit <account> [--credit ID] [--yes]` |
 | Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` saves an isolated Claude CLI account with a token entered at the Keychain prompt, then probes it; a failed probe leaves the account saved and exits nonzero |

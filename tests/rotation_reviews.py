@@ -11,14 +11,14 @@ from rotation_support import PYTHON, SCRIPT, RotationTestCase
 
 
 class ReviewFixTests(RotationTestCase):
-    def test_claude_executor_start_check_publish_and_say_resume_the_same_account_session(self):
+    def test_claude_pr_text_start_check_publish_and_say_resume_the_same_account_session(self):
         self.fixture_timeout = 90
         result = self.work_result(pr_title="Implement Claude execution", pr_body="Run task work with Claude.")
         accounts = self.claude_pool_fixture(runs=[
             {"write_files": {"tracked.txt": "implemented by Claude\n"},
              "commit_files": ["tracked.txt"], "push": True, "reply": result},
             {"write_files": {"tracked.txt": "follow-up by Claude\n"},
-             "commit_files": ["tracked.txt"], "push": True, "reply": result}])
+             "commit_files": ["tracked.txt"], "push": True, "reply": self.work_result()}])
         checks = self.root / "claude-checks"
         command = "printf 'checked\\n' >> " + shlex.quote(str(checks))
         self.start("claude-executor", "--executor", "claude", "--check", command,
@@ -65,6 +65,9 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(self.invocations(), [], "Codex must never run the work turn")
         self.assertEqual([event["argv"][:2] for event in self.gh_writes()],
                          [["pr", "create"], ["pr", "edit"]])
+        for event in self.gh_writes():
+            self.assertEqual(event["argv"][event["argv"].index("--title") + 1], result["pr_title"])
+            self.assertEqual(event["body"], result["pr_body"])
         self.until(lambda: len([row for row in self.phase_telemetry_journal()
                                 if row["phase"] == "work"]) == 2)
         for row in [row for row in self.phase_telemetry_journal() if row["phase"] == "work"]:
@@ -75,8 +78,18 @@ class ReviewFixTests(RotationTestCase):
                              ("fake-claude", "high", 0.125))
             self.assertEqual(row["tokens"], {"input": 150, "cached_input": 30,
                                              "output": 40, "reasoning": None})
+        self.assertEqual(state["threads"], [])
+        task_dir = self.home / "claude-tasks" / "claude-executor"
+        messages = json.loads((task_dir / "claude-messages.json").read_text())
+        self.assertEqual(len(messages), 2)
+        (task_dir / "last.md").unlink()
+        status = self.cli("status", "claude-executor").split("last message:\n", 1)[1]
+        for message in messages:
+            self.assertIn(message, status)
+        self.cli("clean", "claude-executor")
+        self.assertEqual([event for event in self.trace() if event.get("command") == "archive"], [])
 
-    def test_claude_executor_text_results_use_process_outcome_and_keep_the_last_message(self):
+    def test_claude_status_messages_text_results_use_process_outcome_and_keep_the_last_message(self):
         self.fixture_timeout = 90
         result = self.work_result()
         cases = [(json.dumps(result), 0, result), ("Final answer without JSON.", 0, None),
@@ -93,11 +106,57 @@ class ReviewFixTests(RotationTestCase):
                 self.assertEqual(state["outcome"], "failed" if code else "completed")
                 self.assertEqual(state["result"], expected)
                 self.assertEqual((self.home / "claude-tasks" / slug / "last.md").read_text(), text)
+                (self.home / "claude-tasks" / slug / "last.md").unlink()
+                self.assertIn(text, self.cli("status", slug).split("last message:\n", 1)[1])
                 self.assertEqual([check["outcome"] for check in state["checks"]], [] if code else ["passed"])
                 self.assertEqual(len(state["reviews"]), 0 if code else 1)
                 if not code:
                     self.assertFalse(state.get("error"))
         self.assertEqual([event["review"] for event in self.invocations()], [True, True])
+
+    def test_claude_stats_include_both_work_turns_totals_and_codex_review(self):
+        self.fixture_timeout = 90
+        accounts = self.claude_pool_fixture(runs=[{"reply": self.work_result()}])
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.review_result(False)}])
+        slug = "claude-stats"
+        self.start(slug, "--executor", "claude", "--effort", "high")
+        self.wait(slug)
+        self.cli("say", slug, "Complete the follow-up.")
+        self.wait(slug)
+        self.cli("review", slug)
+        self.wait(slug)
+        self.until(lambda: sum(row["phase"] == "turn" for row in self.telemetry_journal()) == 3)
+        state = self.state(slug)
+        rows = self.telemetry_journal()
+        work = [row for row in rows if row["phase"] == "work"]
+        self.assertEqual(len(work), 2)
+        for row, started, seconds, tokens, cost, weekly in (
+                (work[0], 1700000000, 90, (1100, 70, 200), 0.125, 1.25),
+                (work[1], 1700000180, 150, (2300, 90, 400), 0.375, 2.75)):
+            row.update(started=started, finished=started + seconds, active_seconds=seconds,
+                       tokens=dict(zip(("input", "output", "cached_input"), tokens)),
+                       cost_usd=cost, weekly_spent=weekly)
+        # The shared journal also contains task summaries and other task lifetimes.
+        rows.extend([dict(work[0], slug="another-task"),
+                     dict(work[0], created=state["created"] - 1)])
+        (self.home / "codex-worker-log.jsonl").write_text(
+            "\n".join(json.dumps(row) for row in rows) + "\n")
+        output = self.cli("stats", slug)
+        self.assertEqual(output.count("== Claude work\n"), 1)
+        table = output.split("== Claude work\n", 1)[1].split("== ", 1)[0].strip().splitlines()
+        for heading in ("UTC", "min", "account", "session", "model", "effort", "input",
+                        "output", "cached", "cost", "weekly"):
+            self.assertIn(heading, table[0])
+        self.assertEqual([line.split() for line in table[1:]], [
+            ["2023-11-14T22:13:20Z", "1.5", accounts[0]["name"], state["session_id"][:13],
+             "fake-claude", "high", "1100", "70", "200", "0.1250", "1.25"],
+            ["2023-11-14T22:16:20Z", "2.5", accounts[0]["name"], state["session_id"][:13],
+             "fake-claude", "high", "2300", "90", "400", "0.3750", "2.75"],
+            ["total:", "4.0", "-", "-", "-", "-", "3400", "160", "600", "0.5000", "4.00"]])
+        review, = state["reviews"]
+        self.assertIn("== %s: %s" % (review["account"], review["thread"]), output)
+        self.assertIn("total: 0 turns", output)
 
     def test_claude_executor_default_codex_reviews_and_claude_review_and_ci_repairs(self):
         self.fixture_timeout = 90

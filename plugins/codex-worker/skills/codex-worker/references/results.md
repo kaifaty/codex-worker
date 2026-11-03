@@ -27,6 +27,8 @@ when `origin` has the local branch's HEAD. The `publish` receipt records its URL
 Missing or unauthorized GitHub CLI and publication errors do not fail the turn. Closed and merged
 PRs are left unchanged.
 For a new PR, title and body fall back independently to earlier results across the task's threads.
+Claude tasks recover missing title and body from the latest nonempty values in their last three
+saved results (`claude-messages.json`), both when creating and updating a PR.
 Known non-GitHub `origin` hosts are skipped with `not a GitHub remote: <host>` before invoking the
 GitHub CLI; SSH aliases are resolved with `ssh -G`. Commit and push behavior is unchanged.
 
