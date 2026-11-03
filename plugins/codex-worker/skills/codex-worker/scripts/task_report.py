@@ -90,8 +90,8 @@ def _weekly_delta(row):
     return after - before
 
 
-def _read_rows(log_path, since, until, repo, slug):
-    """Return stage rows inside the window and every lead verdict row up to its end."""
+def _read_rows(log_path, until, repo, slug):
+    """Return stage rows and lead verdict rows up to the end of the window."""
     try:
         handle = Path(log_path).open("r", encoding="utf-8", errors="replace")
     except OSError:
@@ -115,11 +115,8 @@ def _read_rows(log_path, since, until, repo, slug):
                 if repo is not None and row["repo"] != repo or slug is not None and row["slug"] != slug:
                     continue
                 if row.get("kind") == "verdict":
-                    # A verdict follows its task, so it may fall after the window starts.
                     if row.get("verdict") in LEAD_VERDICTS:
                         verdicts.append(row)
-                    continue
-                if at < since:
                     continue
                 if not isinstance(row.get("phase"), str) or row["phase"] not in MODEL_PHASES | CHECK_PHASES | {"turn"}:
                     continue
@@ -142,7 +139,7 @@ def _task(repo, slug, created):
             "executors": [], "reviewers": [], "first_review_findings": None, "follow_ups": None,
             "lead_verdict": None, "lead_note": None,
             "_reviews": {}, "_turns": [], "_latest_turn": 0, "_model_settings": [], "_work_settings": [],
-            "_work_turns": set(), "_first_done_turn": None, "_checks": Counter(), "_ci": Counter()}
+            "_work_turns": set(), "_first_done_turn": None, "_first_review": None, "_first_review_rows": [], "_checks": Counter(), "_ci": Counter()}
 
 
 def _row_settings(row):
@@ -167,8 +164,19 @@ def _is_work_phase(row):
     return row["phase"] in ("work", "fix") or (row["phase"] == "wrapup" and row.get("kind") == "work")
 
 
-def _accumulate_work(row, task):
-    """Record the executor, its model settings, and the turn of its first done result."""
+def _attribute(row, task):
+    """Record what places a task in groups: executor, work model settings, reviewer, first review."""
+    if row["phase"] == "review":
+        reviewer = "claude" if row.get("reviewer") == "claude" else "codex"
+        if reviewer not in task["reviewers"]:
+            task["reviewers"].append(reviewer)
+        group = (_round(row.get("turn")), _round(row.get("round")))
+        if task["_first_review"] in (None, group):
+            task["_first_review"] = group
+            task["_first_review_rows"].append(row)
+        return
+    if not (_is_work_phase(row) or (row["phase"] == "turn" and row.get("kind", "work") == "work")):
+        return
     executor = "claude" if row.get("provider") == "claude" else "codex"
     if executor not in task["executors"]:
         task["executors"].append(executor)
@@ -176,6 +184,10 @@ def _accumulate_work(row, task):
         for setting in _row_settings(row):
             if setting not in task["_work_settings"]:
                 task["_work_settings"].append(setting)
+
+
+def _accumulate_work(row, task):
+    """Record the turn of the first done result and every work turn."""
     turn = _round(row.get("turn"))
     task["_work_turns"].add(turn)
     if row.get("result_status") == "done" and task["_first_done_turn"] is None:
@@ -301,8 +313,6 @@ def _accumulate_checks_and_reviews(row, task, totals):
             task["outcome"] = outcome
     if phase == "review":
         reviewer = "claude" if row.get("reviewer") == "claude" else "codex"
-        if reviewer not in task["reviewers"]:
-            task["reviewers"].append(reviewer)
         task["reviews"].append({"reviewer": reviewer, "account": _identifier(row.get("account")),
                                 "turn": _round(row.get("turn")), "round": _round(row.get("round")),
                                 "angle": _identifier(row.get("angle")),
@@ -322,16 +332,25 @@ def _accumulate_checks_and_reviews(row, task, totals):
                 totals["findings_samples"] += 1
 
 
-def _accumulate_rows(rows, identities):
-    """Return tasks, account rows, and totals for rows and their task keys."""
+def _accumulate_rows(rows, identities, since=0):
+    """Return tasks, account rows, and totals for rows and their task keys.
+
+    Rows before ``since`` only place tasks that have rows in the window into groups.
+    """
+    window = {identity for row, identity in zip(rows, identities) if row["at"] >= since}
     tasks = {}
     accounts = {}
     totals = {"tokens": _empty_tokens(), "active_seconds": 0, "turns": 0, "capacity_retries": 0,
               "checks": Counter(), "reviews": Counter(), "findings_samples": 0,
               "reviewers": {name: {"reviews": 0, "cost_usd": 0} for name in ("codex", "claude")}}
     for row, identity in zip(rows, identities):
+        if identity not in window:
+            continue
         phase = row["phase"]
         task = tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
+        _attribute(row, task)
+        if row["at"] < since:
+            continue
         if _identifier(row.get("task_type")) is not None:
             task["task_type"] = row["task_type"]
         task["_latest_turn"] = max(task["_latest_turn"], _round(row.get("turn")))
@@ -400,8 +419,10 @@ def _reconcile_tasks(tasks):
                 for setting in _row_settings(row):
                     if setting not in task["_work_settings"]:
                         task["_work_settings"].append(setting)
-        if groups:
-            first = [row for row in groups[0][1] if row.get("outcome") == "completed"
+        task.pop("_first_review")
+        first_review = task.pop("_first_review_rows")
+        if first_review:
+            first = [row for row in first_review if row.get("outcome") == "completed"
                      and _number(row.get("severe_findings")) is not None]
             if first:
                 task["first_review_findings"] = sum(row["severe_findings"] for row in first)
@@ -454,21 +475,24 @@ def _reconcile_tasks(tasks):
                        "result_status": result_status, "auto_fix_stops": auto_fix_stops}
 
 
+def _verdict_task(tasks, repo, slug, created, at):
+    """Return the task a verdict belongs to: the one born at ``created``, else the newest born by ``at``."""
+    candidates = []
+    for key, task in tasks.items():
+        if key[:2] == (repo, slug):
+            if created is not None and task["created"] == created:
+                return task
+            # Legacy tasks without a birth keep their generation, so the newest one sorts last.
+            generation = key[2][1] if isinstance(key[2], tuple) else 0
+            candidates.append(((task["created"] or 0, generation), task))
+    earlier = [item for item in candidates if item[0][0] <= at]
+    return max(earlier, key=lambda item: item[0], default=(None, None))[1]
+
+
 def _attach_lead_verdicts(tasks, verdicts):
     """Give each task its latest lead verdict, matched by repository, slug, and birth."""
-    by_pair = {}
-    for key, task in tasks.items():
-        # Legacy tasks without a birth keep their generation, so the newest one sorts last.
-        generation = key[2][1] if isinstance(key[2], tuple) else 0
-        by_pair.setdefault(key[:2], []).append(((task["created"] or 0, generation), task))
     for row in verdicts:
-        candidates = by_pair.get((row["repo"], row["slug"]), [])
-        created = _number(row.get("created"))
-        task = next((task for _, task in candidates if created is not None and task["created"] == created), None)
-        if task is None and created is None:
-            # Without a birth, the verdict belongs to the newest task born before it.
-            earlier = [(order, task) for order, task in candidates if order[0] <= row["at"]]
-            task = max(earlier, key=lambda item: item[0], default=(None, None))[1]
+        task = _verdict_task(tasks, row["repo"], row["slug"], _number(row.get("created")), row["at"])
         if task is not None:
             task["lead_verdict"] = row["verdict"]
             task["lead_note"] = row.get("note") if isinstance(row.get("note"), str) else None
@@ -519,6 +543,25 @@ def _group_tasks(tasks, by):
     return rows
 
 
+def lead_verdict(log_path, repo, slug, created, now=None):
+    """Return the lead verdict a report gives the task born at ``created``.
+
+    A missing journal has no verdicts; other read errors raise OSError.
+    """
+    now = time.time() if now is None else now
+    try:
+        Path(log_path).open("rb").close()
+    except FileNotFoundError:
+        return None
+    rows, verdicts = _read_rows(log_path, now, repo, slug)
+    tasks = {}
+    for row, identity in zip(rows, _task_identities(rows)):
+        tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
+    _attach_lead_verdicts(tasks, verdicts)
+    task = _verdict_task(tasks, repo, slug, _number(created), now)
+    return None if task is None else task["lead_verdict"]
+
+
 def build_report(log_path, since="7d", repo=None, slug=None, now=None, by=None):
     """Return JSON-safe summary, account totals, and tasks ordered by cost.
 
@@ -530,8 +573,8 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None, by=None):
     if any(key not in DIMENSIONS for key in dimensions):
         raise ValueError("--by must contain task-type, effort, model, executor, or reviewer separated by commas")
     since_at = _since_timestamp(since, now)
-    rows, verdicts = _read_rows(log_path, since_at, now, repo, slug)
-    tasks, account_rows, totals = _accumulate_rows(rows, _task_identities(rows))
+    rows, verdicts = _read_rows(log_path, now, repo, slug)
+    tasks, account_rows, totals = _accumulate_rows(rows, _task_identities(rows), since_at)
     _attach_lead_verdicts(tasks, verdicts)
     task_rows, reconciled = _reconcile_tasks(tasks)
     groups = _group_tasks(task_rows, dimensions) if dimensions else None

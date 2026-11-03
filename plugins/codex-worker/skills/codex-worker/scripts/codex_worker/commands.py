@@ -369,8 +369,16 @@ def cmd_clean(a):
     except OSError as exc:
         procs.die(f"could not archive task record to {archive}: {exc}; record kept at {record}")
     print(f"cleaned {a.slug}; record in {archive}")
-    if st.get("kind") != "scout" and not telemetry_log.has_lead_verdict(
-            a.slug, Path(st["repo"]).name, st.get("created")):
+    if st.get("kind") == "scout":
+        return
+    try:
+        # Use the report's own matching so the reminder agrees with `report`.
+        verdict = runpy.run_path(str(config.REPORT))["lead_verdict"](
+            telemetry_log.journal_path(), Path(st["repo"]).name, a.slug, st.get("created"))
+    except OSError as exc:
+        print(f"could not check the lead verdict for {a.slug}: telemetry journal unreadable ({exc})")
+        return
+    if verdict is None:
         print(f"no lead verdict for {a.slug}; record it: verdict {a.slug} "
               + "|".join(telemetry_log.LEAD_VERDICTS) + " [--note TEXT]")
 

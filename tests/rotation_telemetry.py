@@ -589,6 +589,58 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         column = header.split("  ").index("lead verdict")
         self.assertEqual(sorted(line.split("  ")[column] for line in lines), ["accepted", "redone"])
 
+    def test_verdict_matches_active_task_whose_journal_rows_lack_created(self):
+        self.configure(language="en")
+        self.start("verdict-legacy-rows")
+        self.wait("verdict-legacy-rows")
+        self.until(lambda: any(row["phase"] == "turn" for row in self.telemetry_journal()))
+        self.assertIsNotNone(self.state("verdict-legacy-rows")["created"])
+        rows = [{key: value for key, value in row.items() if key != "created"} for row in self.telemetry_journal()]
+        self.write_journal(rows)
+        self.cli("verdict", "verdict-legacy-rows", "accepted")
+        report = json.loads(self.cli("report", "--by", "executor", "--json"))
+        task, = report["tasks"]
+        self.assertEqual((task["created"], task["lead_verdict"]), (None, "accepted"))
+        self.assertEqual(report["groups"][0]["accepted_fraction"], 1)
+        self.assertNotIn("no lead verdict", self.cli("clean", "verdict-legacy-rows"))
+
+    def test_report_window_keeps_executor_model_and_first_review_from_earlier_rows(self):
+        now = time.time()
+        old = now - 8 * 86400
+
+        def row(at, phase, turn=1, **values):
+            return dict(v=1, at=at, repo="repo", slug="window-task", created=old - 100, phase=phase,
+                        kind="review" if phase == "review" else "work", turn=turn, round=0,
+                        outcome="completed", **values)
+
+        self.write_journal([
+            row(old, "work", provider="claude", model="claude-sonnet-5-5", reasoning_effort="high",
+                result_status="done", active_seconds=600, weekly_spent=5),
+            row(old + 10, "review", model="gpt-5", reasoning_effort="high", verdict="defects",
+                findings=2, severe_findings=2, active_seconds=300, weekly_spent=3),
+            row(now - 86400, "review", turn=2, model="gpt-5", reasoning_effort="high", verdict="clean",
+                findings=0, severe_findings=0, active_seconds=60, weekly_spent=1)])
+        report = json.loads(self.cli("report", "--since", "7d", "--by", "executor,model,reviewer", "--json"))
+        task, = report["tasks"]
+        self.assertEqual((task["executors"], task["first_review_findings"]), (["claude"], 2))
+        self.assertEqual((task["weekly_used_percent"], task["active_minutes"]), (1, 1))
+        group, = report["groups"]
+        self.assertEqual((group["executor"], group["model"], group["reviewer"], group["average_first_review_findings"]),
+                         ("claude", "claude-sonnet-5-5", "codex", 2))
+
+    def test_clean_reports_an_unreadable_journal_instead_of_failing(self):
+        self.configure(language="en")
+        self.start("verdict-unreadable")
+        self.wait("verdict-unreadable")
+        self.until(lambda: any(row["phase"] == "turn" for row in self.telemetry_journal()))
+        journal = self.home / "codex-worker-log.jsonl"
+        journal.unlink()
+        journal.mkdir()  # A directory cannot be read as a JSONL file even when tests run as root.
+        output = self.cli("clean", "verdict-unreadable")
+        self.assertIn("could not check the lead verdict for verdict-unreadable", output)
+        self.assertNotIn("no lead verdict", output)
+        self.assertFalse((self.home / "claude-tasks" / "verdict-unreadable").exists())
+
     def test_report_uses_merged_turn_result_after_an_angle_wrapup_is_refused(self):
         # Allow process startup under parallel load before the second angle's cap.
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "2"

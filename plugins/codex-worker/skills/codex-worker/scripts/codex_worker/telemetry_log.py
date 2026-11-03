@@ -109,12 +109,6 @@ def record_lead_verdict(slug, verdict, note=None):
     return row
 
 
-def has_lead_verdict(slug, repo, created):
-    return any(row.get("kind") == "verdict" and row["slug"] == slug and row["repo"] == repo
-               and row.get("created") == created and row.get("verdict") in LEAD_VERDICTS
-               for row in journal_rows())
-
-
 def record_turn_result(st, stopped):
     """Persist the supervisor's final result separately from measured stages."""
     try:
