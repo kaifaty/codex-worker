@@ -12,6 +12,19 @@ from . import budgets, clock, config, notifications, task_state, threads
 TELEMETRY_PHASES = []
 
 
+def claude_work_rows(st):
+    """Read measured Claude work phases for this task's lifetime."""
+    try:
+        with (config.CODEX_HOME / "codex-worker-log.jsonl").open(encoding="utf-8") as stream:
+            return [row for row in config.ROLLOUT["read_events"](stream)
+                    if isinstance(row, dict) and row.get("slug") == st["slug"]
+                    and row.get("created") == st.get("created")
+                    and row.get("provider") == "claude" and row.get("kind") == "work"
+                    and row.get("phase") in ("work", "fix", "wrapup")]
+    except FileNotFoundError:
+        return []
+
+
 def telemetry_error(st, exc):
     try:
         with (config.TASKS / st["slug"] / "stderr.log").open("a", encoding="utf-8") as errors:
