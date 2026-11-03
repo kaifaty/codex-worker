@@ -273,7 +273,8 @@ def describe(st, detail):
     pr = st.get("publish", {}).get("pr", "")
     commits = procs.sh(config.GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = config.TASKS / st["slug"] / "review.md"
-    message = review.read_text().strip() if reviewing and review.exists() else threads.last_message(st)
+    message = (review.read_text().strip() if reviewing and review.exists() else
+               "\n\n".join(threads.claude_messages(st)) if executor == "claude" else threads.last_message(st))
     return "\n".join([line, f"worktree {st['worktree']}", *result_schema.result_lines(st.get("result")),
                       f"PR: {pr or 'none'}", "commits:\n" + (commits or "(none)"),
                       "last message:\n" + (message or "(none)")])
@@ -290,6 +291,36 @@ def cmd_status(a):
 def cmd_stats(a):
     st = task_state.load(a.slug)
     cfg = config.accounts_config()
+    if st.get("executor") == "claude":
+        rows = telemetry_log.claude_work_rows(st)
+        token_fields = ("input", "output", "cached_input")
+
+        def total(values):
+            known = [value for value in values if value is not None]
+            return sum(known) if known else None
+
+        def number(value, spec):
+            return format(value, spec) if value is not None else "-"
+
+        totals = {key: total(row.get(key) for row in rows)
+                  for key in ("active_seconds", "cost_usd", "weekly_spent")}
+        totals["tokens"] = {key: total((row.get("tokens") or {}).get(key) for row in rows)
+                            for key in token_fields}
+        print("== Claude work", flush=True)
+        print(f"{'start (UTC)':20} {'min':>6} {'account':16} {'session':13} {'model':24} {'effort':7} "
+              f"{'input':>10} {'output':>10} {'cached':>10} {'cost $':>10} {'weekly %':>8}")
+        for row in rows + [totals]:
+            start = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["started"]))
+                     if row.get("started") is not None else "total:")
+            seconds = row.get("active_seconds")
+            minutes = number(seconds / 60 if seconds is not None else None, ".1f")
+            tokens = [number((row.get("tokens") or {}).get(key), ".0f") for key in token_fields]
+            print(f"{start:20} {minutes:>6} {row.get('account') or '-':16} "
+                  f"{(row.get('session_id') or '-')[:13]:13} {row.get('model') or '-':24} "
+                  f"{row.get('reasoning_effort') or '-':7} "
+                  f"{tokens[0]:>10} {tokens[1]:>10} {tokens[2]:>10} "
+                  f"{number(row.get('cost_usd'), '.4f'):>10} {number(row.get('weekly_spent'), '.2f'):>8}",
+                  flush=True)
     for entry in st["threads"] + st["reviews"]:
         if entry.get("reviewer") == "claude":
             continue
