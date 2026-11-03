@@ -105,8 +105,29 @@ precedence over `claude.model` and `claude.effort`; supported work efforts are `
 `high`, `xhigh` and `max`. Claude work supports only `--sandbox off`; `workspace` is rejected
 before launch. A task effort of `max` leaves Codex reviews at their configured effort, since
 `max` is specific to Claude. The selected account and session are kept across work turns while
-that account is available. If it becomes unavailable, or no pool account can be selected, the turn ends with
-`no available Claude account`; it does not switch accounts or wait for a reset. Work journal rows
+that account is available. If no pool account can be selected when a turn starts, including when the
+task's account is already marked unavailable, the turn ends with `no available Claude account`.
+
+When a work attempt ends with `usage limit`, `authentication failed` or `token unavailable`, the
+account is marked unavailable and the attempt is repeated on another pool account not yet tried in
+this turn. That account starts a new session with the same handoff Codex gets on rotation: the
+brief, the current message, the branch's `git log` and `git status`, and the summaries and
+`remaining` items of the last three Claude results. The task's session id is replaced by the new
+one, and `wait` prints `== rotated <a> → <b>: <reason>, new thread <session>`.
+
+When no other account is available, the task sleeps until the earliest of the pool's limit ends
+(`limited_until`, or the rejected reset) and, for accounts without an active limit, their window
+resets, plus the reset margin. Sleep uses the same `sleeping` state, `all accounts at limit;
+auto-continue at ...` line, `wait --through-sleep`, `stop` and `say` behavior and 8-day cap as
+Codex, and `wait_for_reset: false` pauses with `exhausted` instead. After waking it prefers the
+task's account and resumes its session with a short note followed by the turn's message; otherwise it
+switches to another available account with the handoff. Claude rotation uses no credits or reset
+credits. Reset waits are excluded from `--max-minutes`, which counts active time across attempts.
+
+Claude work reserves the top of each account's week for reviews: `claude.work_switch_at` (a finite
+number from `0` to `100`, default `85`) makes an account eligible for work only while both windows
+are below `min(work_switch_at, soft_switch_at)` on the first pass and below `work_switch_at` on the
+second. Reviews keep the `soft_switch_at` and `switch_at` thresholds. Work journal rows
 record the provider, account, session, model, effort, tokens, cost and the seven-day utilization
 increase for the turn. `--max-weekly` limits the accumulated utilization increase.
 
@@ -128,7 +149,7 @@ usage-limit and missing-token markers retain their usual behavior. Manual `claud
 attempts a request regardless of snapshot or attempt age.
 
 The supervisor first considers accounts below `soft_switch_at` in both the five-hour and seven-day
-windows, then accounts below `switch_at` if none qualify. Angles in the same review prefer unused
+windows, then accounts below `switch_at` if none qualify (for work, the `work_switch_at` thresholds above). Angles in the same review prefer unused
 available accounts. Within that group it chooses the largest
 `(100 - seven_day_used_percent) * weight / max(hours_until_seven_day_reset, 1)`:
 the account whose remaining quota needs to be spent fastest before its reset. Unknown utilization

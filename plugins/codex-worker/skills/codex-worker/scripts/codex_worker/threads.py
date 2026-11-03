@@ -234,13 +234,29 @@ def rollout_usage(path, offset=0):
     return first, last
 
 
+def claude_messages(st):
+    """Final messages of the task's recent Claude attempts, oldest first."""
+    try:
+        messages = json.loads((config.TASKS / st["slug"] / "claude-messages.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return []
+    return [message for message in messages if isinstance(message, str)] if isinstance(messages, list) else []
+
+
+def record_claude_message(st, message):
+    path = config.TASKS / st["slug"] / "claude-messages.json"
+    path.write_text(json.dumps((claude_messages(st) + [message])[-3:], ensure_ascii=False), encoding="utf-8")
+
+
 def handoff(st, current_message=False, cfg=None):
+    """Continuation brief for a new Codex thread or Claude session on another account."""
     cfg = config.accounts_config() if cfg is None else cfg
     ru = cfg.get("language", "en") == "ru"
     scouting = st.get("kind") == "scout"
     d = config.TASKS / st["slug"]
     prompt = (d / "brief.md").read_text().rstrip() + ("\n\n## Продолжение\n\n" if ru else "\n\n## Continuation\n\n")
-    has_threads = bool(st.get("threads") or st.get("thread"))
+    claude = st.get("executor") == "claude" and st.get("kind") not in ("review", "scout")
+    has_threads = bool(st.get("threads") or st.get("thread") or claude and st.get("session_id"))
     if has_threads and scouting:
         prompt += (("Предыдущий разведчик остановился из-за лимита подписки. "
                     "Продолжи изучение вопроса с учётом его сообщений ниже.\n\n") if ru else
@@ -276,7 +292,7 @@ def handoff(st, current_message=False, cfg=None):
         label = (("Последние сообщения предыдущего разведчика" if ru else "Latest messages from the previous scout")
                  if scouting else ("Последние сообщения предыдущего исполнителя" if ru else "Latest messages from the previous worker"))
         messages = []
-        for message in thread_messages(st)[-3:]:
+        for message in (claude_messages(st) if claude else thread_messages(st))[-3:]:
             result = None if scouting else result_schema.parse_result(message)
             if result is not None:
                 message = result["summary"]

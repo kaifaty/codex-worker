@@ -86,9 +86,10 @@ Codex. Settings belong in the `claude` object:
 | `model` | omitted | optional Claude `--model`, shared by all accounts |
 | `effort` | omitted | optional Claude `--effort`, shared by all accounts and independent of Codex `--effort` |
 | `max_turns` | `40` | positive integer passed as Claude review `--max-turns`, shared by all accounts; task work is uncapped |
+| `work_switch_at` | `85` | finite number in `[0, 100]`; Claude work uses an account only while both windows stay below it, keeping the rest of each week for reviews; see [accounts.md](accounts.md#claude-account-pool) |
 
 The top-level `soft_switch_at` and `switch_at` thresholds also apply to Claude's five-hour and
-seven-day windows. Below-soft accounts are preferred, then below-hard accounts, with the earliest
+seven-day windows; Claude work uses `min(work_switch_at, soft_switch_at)` and then `work_switch_at`. Below-soft accounts are preferred, then below-hard accounts, with the earliest
 seven-day reset first in each group. Unknown limits count as available. Legacy settings, including
 a missing `claude` object, remain a one-account pool named `default`.
 

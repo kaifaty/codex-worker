@@ -75,7 +75,8 @@ def wait_turn_lines(st, slug):
     if (st.get("kind") != "review" or st.get("work_completed")) and not (
             st.get("outcome") == "refused" and st.get("kind") != "review"):
         last = config.TASKS / slug / "last.md"
-        if (st.get("exhausted") or sleeping) and len(threads.events(st)) == st.get("event_start", 0):
+        if ((st.get("exhausted") or sleeping) and st.get("executor") != "claude"
+                and len(threads.events(st)) == st.get("event_start", 0)):
             # Paused before any exec: the thread's last message belongs to an earlier turn.
             yield "(Codex did not run this turn)"
         else:
