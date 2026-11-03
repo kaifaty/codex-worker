@@ -1,7 +1,7 @@
 """Work turns, wrap-up turns and turn execution."""
 import json
 
-from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_review, claude_runner, clock, config, notifications, prompts, publishing, task_state, telemetry_log, threads, turn_monitor
+from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_review, claude_runner, clock, config, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
 
 
 def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
@@ -12,19 +12,26 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
     settings = cfg["claude"]
     minutes = 10 if wrapup else st.get("max_turn_minutes", cfg.get("max_turn_minutes"))
     deadline = None if minutes is None else clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
-    weekly_before = weekly_after = None
+    window = (claude_accounts.read_limits().get(account["name"], {}).get("unifiedWindows") or {}).get("seven_day") or {}
+    used, reset_before = window.get("utilization"), window.get("resetsAt")
+    weekly_before = (used * 100 if result_schema.is_finite_number(used) and 0 <= used <= 1
+                     and result_schema.is_finite_number(reset_before) and reset_before > clock.CLOCK.time() else None)
+    weekly_after = None
     weekly_spent = 0
     weekly_stopped = False
 
     def progress(telemetry):
-        nonlocal weekly_before, weekly_after, weekly_spent, weekly_stopped
+        nonlocal weekly_before, reset_before, weekly_after, weekly_spent, weekly_stopped
         session_id = telemetry.get("session_id")
         if session_id and session_id != st.get("session_id"):
             st["session_id"] = session_id
             task_state.save(st)
-        weekly_before, weekly_after = telemetry.get("weekly_used_before"), telemetry.get("weekly_used_after")
-        weekly_spent = (max(0, weekly_after - weekly_before)
-                        if weekly_before is not None and weekly_after is not None else 0)
+        if weekly_before is None:
+            weekly_before, reset_before = telemetry.get("weekly_used_before"), telemetry.get("weekly_reset_before")
+        weekly_after = telemetry.get("weekly_used_after")
+        if weekly_before is not None and weekly_after is not None:
+            weekly_spent = (weekly_after if telemetry["weekly_reset_after"] > reset_before
+                            else max(0, weekly_after - weekly_before))
         budget = st.get("max_task_weekly_percent")
         weekly_stopped = (not wrapup and budget is not None
                           and st.get("weekly_used_percent", 0) + weekly_spent >= budget)
@@ -54,20 +61,25 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
                               weekly_after=weekly_after, weekly_spent=weekly_spent)
     result = response["result"]
     outcome = task_state.stop_outcome(st, stopped) or response["outcome"]
-    if weekly_stopped and not stopped():
+    if outcome == "unknown":
+        if response["reason"] in ("invalid structured output", "invalid JSON output"):
+            outcome, result = "completed", result_schema.parse_result(response["raw_message"])
+        else:
+            outcome = "failed"
+    if weekly_stopped and not stopped() and outcome != "failed":
         outcome = "completed" if result is not None else "budget_exhausted"
     if wrapup:
         st["wrapup"].update(outcome=outcome, result=result if outcome == "completed" else None)
     else:
         st.update(outcome=outcome, result=result)
-    if outcome == "completed":
+    if response["raw_message"] or outcome == "completed":
         last.write_text(response["raw_message"] or json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     if outcome == "unavailable":
         reason = response.get("reason") or "account unavailable"
         st["error"] = f"No available Claude account: {account['name']} ({reason})"
         if reason in ("usage limit", "authentication failed", "token unavailable"):
             claude_accounts.mark_limited(account["name"], token_unavailable=reason == "token unavailable")
-    elif response.get("reason"):
+    elif response.get("reason") and outcome != "completed":
         st["error"] = response["reason"]
     task_state.save(st)
     return outcome

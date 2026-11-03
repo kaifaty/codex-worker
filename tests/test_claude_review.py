@@ -163,6 +163,7 @@ if mode == "rejected_buffered":
                 + json.dumps(result) + "\n").encode())
 else:
     emit(result)
+sys.exit(run.get("exit_code", 0))
 '''
 
 
@@ -286,6 +287,8 @@ class ClaudeReviewTests(RotationTestCase):
             {"reply": {"status": "done"}, "text": "Final invalid answer " + TEST_TOKEN},
             {"omit_structured_output": True, "omit_result_text": True,
              "assistant_text": "Last assistant answer."},
+            {"omit_structured_output": True, "text": "Failed final answer.", "exit_code": 9},
+            {"mode": "is_error", "text": "Reported work failure."},
             {"limits": rejected, "reply": self.work_result()},
             {"mode": "auth_error", "status": 401}])
         worker = self.worker()
@@ -297,9 +300,17 @@ class ClaudeReviewTests(RotationTestCase):
                 response = worker.claude_review.claude_runner.run_work_turn(
                     account, self.repo, task_dir, "Work.", lambda: False)
                 self.assertEqual(response["outcome"], "unknown")
+                self.assertEqual(response["reason"], "invalid structured output")
                 self.assertIsNone(response["result"])
                 self.assertEqual(response["raw_message"], expected_raw)
                 self.assertIn(expected_raw, worker.result_schema.result_lines(None, response["raw_message"]))
+            for expected_raw in ("Failed final answer.", "Reported work failure."):
+                response = worker.claude_review.claude_runner.run_work_turn(
+                    account, self.repo, task_dir, "Work.", lambda: False)
+                self.assertEqual(response["outcome"], "unknown")
+                self.assertEqual(response["reason"], "work turn failed")
+                self.assertIsNone(response["result"])
+                self.assertEqual(response["raw_message"], expected_raw)
             response = worker.claude_review.claude_runner.run_work_turn(
                 account, self.repo, task_dir, "Work.", lambda: False)
             self.assertEqual(response["outcome"], "unavailable")

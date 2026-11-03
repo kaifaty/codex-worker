@@ -64,7 +64,9 @@ def event_result(event, telemetry, token, account, reviewing=True):
                 if (result_schema.is_finite_number(used) and 0 <= used <= 1
                         and result_schema.is_finite_number(reset) and reset > clock.CLOCK.time()):
                     telemetry.setdefault("weekly_used_before", used * 100)
+                    telemetry.setdefault("weekly_reset_before", reset)
                     telemetry["weekly_used_after"] = used * 100
+                    telemetry["weekly_reset_after"] = reset
         return None, stream_unavailable(event, account)
     usage = event.get("usage")
     if isinstance(usage, dict):
@@ -190,6 +192,9 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                     response["outcome"] = "budget_exhausted"
                     break
                 if eof and proc.poll() is not None:
+                    if (not reviewing and proc.wait() != 0 and response["reason"] in
+                            (None, "invalid structured output", "invalid JSON output", failure)):
+                        response["reason"] = failure
                     if response["reason"] is None:
                         if proc.wait() != 0:
                             response["reason"] = failure
@@ -246,7 +251,9 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                             response["result"] = result
                         if not reviewing and progress is not None:
                             progress(response["telemetry"])
-                if response["reason"] and termination is None:
+                if (response["reason"] and termination is None and
+                        (reviewing or response["reason"] not in
+                         ("invalid structured output", "invalid JSON output", failure))):
                     # Drain buffered and shutdown usage while terminating, even
                     # when the final result is larger than the stdout pipe.
                     termination = threading.Thread(target=procs.terminate, args=(proc,))

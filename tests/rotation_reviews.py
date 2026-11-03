@@ -75,6 +75,28 @@ class ReviewFixTests(RotationTestCase):
             self.assertEqual(row["tokens"], {"input": 150, "cached_input": 30,
                                              "output": 40, "reasoning": None})
 
+    def test_claude_executor_text_results_use_process_outcome_and_keep_the_last_message(self):
+        result = self.work_result()
+        cases = [(json.dumps(result), 0, result), ("Final answer without JSON.", 0, None),
+                 ("Last answer before failure.", 9, None)]
+        self.claude_pool_fixture(runs=[{"omit_structured_output": True, "text": text, "exit_code": code}
+                                       for text, code, _ in cases])
+        self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.review_result(False)}])
+        for number, (text, code, expected) in enumerate(cases):
+            with self.subTest(exit_code=code, text=text):
+                slug = "claude-executor-text-" + str(number)
+                self.start(slug, "--executor", "claude", "--check", "true", "--review")
+                self.cli("wait", slug, "--timeout", "30", timeout=45)
+                state = self.state(slug)
+                self.assertEqual(state["outcome"], "failed" if code else "completed")
+                self.assertEqual(state["result"], expected)
+                self.assertEqual((self.home / "claude-tasks" / slug / "last.md").read_text(), text)
+                self.assertEqual([check["outcome"] for check in state["checks"]], [] if code else ["passed"])
+                self.assertEqual(len(state["reviews"]), 0 if code else 1)
+                if not code:
+                    self.assertFalse(state.get("error"))
+        self.assertEqual([event["review"] for event in self.invocations()], [True, True])
+
     def test_claude_executor_default_codex_reviews_and_claude_review_and_ci_repairs(self):
         decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed with Claude."}
                      for finding in self.review_result()["findings"]]
@@ -260,21 +282,12 @@ class ReviewFixTests(RotationTestCase):
 
         checkpoint = self.work_result("partial", remaining=["Finish after the weekly budget is raised."])
         accounts = self.claude_pool_fixture(runs=[
-            {"limits_before": limits(0.50), "limits": limits(0.51), "reply": self.work_result()},
-            {"mode": "hold", "limits_before": limits(0.51), "limits": limits(0.56)},
-            {"limits_before": limits(0.56), "limits": limits(0.56), "reply": checkpoint}])
+            {"mode": "hold", "limits": limits(0.56)},
+            {"limits": limits(0.56), "reply": checkpoint}])
         worker = self.worker()
         for account in accounts:
-            worker.claude_accounts.save_limits(account["name"], limits(0.40))
-        self.start("claude-executor-weekly", "--executor", "claude", "--max-weekly", "5")
-        self.wait("claude-executor-weekly")
-        initial = self.state("claude-executor-weekly")
-        self.assertAlmostEqual(initial["weekly_used_percent"], 1)
-        self.assertEqual(initial["outcome"], "completed")
-        self.assertEqual(initial["result"], self.work_result())
-        self.assertEqual(len(self.claude_invocations()), 1)
-        self.assertFalse(initial.get("wrapup"))
-        self.cli("say", "claude-executor-weekly", "Finish the remaining work.", "--review")
+            worker.claude_accounts.save_limits(account["name"], limits(0.50))
+        self.start("claude-executor-weekly", "--executor", "claude", "--max-weekly", "5", "--review")
         output = self.wait("claude-executor-weekly")
         state = self.state("claude-executor-weekly")
         self.assertEqual(state["outcome"], "budget_exhausted")
@@ -283,17 +296,37 @@ class ReviewFixTests(RotationTestCase):
         self.assertAlmostEqual(state["turn_stop"]["spent"], 6)
         self.assertEqual(state["result"], checkpoint)
         self.assertEqual(state["wrapup"], {"outcome": "completed", "result": checkpoint})
-        work, interrupted, wrapup = self.claude_invocations()
+        work, wrapup = self.claude_invocations()
         self.assertEqual(wrapup["argv"][wrapup["argv"].index("--resume") + 1], work["session_id"])
-        self.assertEqual(interrupted["session_id"], work["session_id"])
         self.assertEqual(self.invocations(), [], "weekly budget must skip the Codex review")
         self.assertIn("weekly budget 5% exhausted", output)
         rows = [row for row in self.phase_telemetry_journal() if row["phase"] == "work"]
-        self.assertEqual(len(rows), 2)
-        for row, before, after, spent in zip(rows, (50, 51), (51, 56), (1, 5)):
-            self.assertAlmostEqual(row["weekly_used_before"], before)
-            self.assertAlmostEqual(row["weekly_used_after"], after)
-            self.assertAlmostEqual(row["weekly_spent"], spent)
+        self.assertEqual(len(rows), 1)
+        self.assertAlmostEqual(rows[0]["weekly_used_before"], 50)
+        self.assertAlmostEqual(rows[0]["weekly_used_after"], 56)
+        self.assertAlmostEqual(rows[0]["weekly_spent"], 6)
+
+    def test_claude_executor_weekly_budget_counts_usage_in_a_new_window(self):
+        before = {"status": "allowed", "unifiedWindows": {
+            "seven_day": {"utilization": 0.90, "resetsAt": self.reset}}}
+        after = {"status": "allowed", "unifiedWindows": {
+            "seven_day": {"utilization": 0.06, "resetsAt": self.reset + 604800}}}
+        result = self.work_result()
+        accounts = self.claude_pool_fixture(runs=[{"limits": after, "reply": result}])
+        worker = self.worker()
+        for account in accounts:
+            worker.claude_accounts.save_limits(account["name"], before)
+        self.start("claude-executor-new-window", "--executor", "claude")
+        self.wait("claude-executor-new-window")
+        state = self.state("claude-executor-new-window")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["result"], result)
+        self.assertAlmostEqual(state["weekly_used_percent"], 6)
+        self.assertEqual(len(self.claude_invocations()), 1)
+        row, = [row for row in self.phase_telemetry_journal() if row["phase"] == "work"]
+        self.assertAlmostEqual(row["weekly_used_before"], 90)
+        self.assertAlmostEqual(row["weekly_used_after"], 6)
+        self.assertAlmostEqual(row["weekly_spent"], 6)
 
     def advance_review_base(self, files):
         checkout = self.root / "base-checkout"
