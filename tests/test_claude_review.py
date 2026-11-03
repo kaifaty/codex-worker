@@ -103,9 +103,17 @@ if mode == "rejected_shutdown":
     while not stopped[0]:
         time.sleep(0.02)
 if mode == "hold":
+    child = os.fork() if run.get("child") else None
+    if child == 0:
+        trace({"command": "holding_child"})
+        while not stopped[0]:
+            time.sleep(0.02)
+        sys.exit(130)
     trace({"command": "holding"})
     while not stopped[0]:
         time.sleep(0.02)
+    if child is not None:
+        os.waitpid(child, 0)
     sys.exit(130)
 if mode == "modify":
     Path(run.get("path", "reviewer-change.txt")).write_text("Reviewer must leave this visible.\n")
@@ -118,12 +126,18 @@ if mode == "invalid_json":
 emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
       "input": {"command": "git diff --stat"}}]}})
 emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "fixture diff"}]}})
+if run.get("assistant_text"):
+    emit({"type": "assistant", "message": {"content": [{"type": "text", "text": run["assistant_text"]}]}})
 result = {"type": "result", "subtype": "success", "is_error": mode == "is_error",
-          "result": "OK",
+          "result": run.get("text", "OK"),
           "structured_output": run.get("reply"), "num_turns": 3,
           "usage": {"input_tokens": 100, "cache_creation_input_tokens": 20,
                     "cache_read_input_tokens": 30, "output_tokens": 40},
           "total_cost_usd": run.get("cost_usd", 0.125)}
+if run.get("omit_structured_output"):
+    result.pop("structured_output")
+if run.get("omit_result_text"):
+    result.pop("result")
 emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "StructuredOutput",
       "input": run.get("reply")}]}})
 if mode == "rejected_buffered":
@@ -135,6 +149,168 @@ else:
 
 
 class ClaudeReviewTests(RotationTestCase):
+    def test_claude_work_turn_argv_environment_and_result(self):
+        result = self.work_result()
+        self.claude_fixture(runs=[{"mode": "modify", "reply": result}, {"reply": result}])
+        worker = self.worker()
+        account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
+        task_dir = self.root / "work-turn-task"
+        task_dir.mkdir()
+        (self.repo / "AGENTS.md").write_text("Root task instructions.\n")
+        prompts = []
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for options in ({"model": "claude-work-model", "effort": "xhigh"},
+                            {"session_id": "prior-session", "max_turns": 19, "effort": "max"}):
+                response = worker.claude_review.claude_runner.run_work_turn(
+                    account, self.repo, task_dir, "Implement the task.", lambda: False, **options)
+                self.assertEqual(response["outcome"], "completed")
+                self.assertEqual(response["result"], result)
+                telemetry = response["telemetry"]
+                self.assertTrue(telemetry["session_id"])
+                self.assertEqual(telemetry["model"], "fake-claude")
+                self.assertEqual(telemetry["reasoning_effort"], options["effort"])
+                self.assertEqual(telemetry["usage"], {
+                    "input_tokens": 100, "output_tokens": 40,
+                    "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30})
+                self.assertEqual(telemetry["cost_usd"], 0.125)
+                self.assertEqual(telemetry["num_turns"], 3)
+                entry = self.claude_invocations()[-1]
+                self.assertTrue(entry["token_matches"])
+                self.assertEqual(entry["config_dir"], str(self.claude_config_dir))
+                self.assertEqual(entry["inherited_provider_keys"], [])
+                self.assertEqual(entry["cwd"], str(self.repo))
+                self.assertEqual(entry["pid"], entry["pgid"])
+                self.assertEqual(entry["stdin"], "")
+                argv = entry["argv"]
+                self.assertEqual(argv[:2], ["-p", "Implement the task."])
+                self.assertEqual(argv[argv.index("--output-format") + 1], "stream-json")
+                self.assertIn("--verbose", argv)
+                self.assertEqual(json.loads(argv[argv.index("--json-schema") + 1]),
+                                 worker.result_schema.RESULT_SCHEMA)
+                self.assertEqual(argv[argv.index("--permission-mode") + 1], "bypassPermissions")
+                self.assertIn("--strict-mcp-config", argv)
+                self.assertNotIn("--mcp-config", argv)
+                self.assertNotIn("--allowedTools", argv)
+                self.assertNotIn("--disallowedTools", argv)
+                for key in ("session_id", "max_turns", "model", "effort"):
+                    flag = "--" + {"session_id": "resume", "max_turns": "max-turns"}.get(key, key)
+                    if key in options:
+                        self.assertEqual(argv[argv.index(flag) + 1], str(options[key]))
+                    else:
+                        self.assertNotIn(flag, argv)
+                path = Path(argv[argv.index("--append-system-prompt-file") + 1])
+                self.assertEqual(path.parent, task_dir)
+                prompts.append(path)
+                text = path.read_text()
+                self.assertIn("git worktree", text)
+                self.assertIn("Root task instructions.\n", text)
+                self.assertIn("nested AGENTS.md", text)
+        self.assertNotEqual(*prompts)
+        self.assertEqual((self.repo / "reviewer-change.txt").read_text(),
+                         "Reviewer must leave this visible.\n")
+        self.assertEqual(len(self.security_trace_path.read_text().splitlines()), 2)
+
+    def test_claude_work_turn_system_prompt_bounds_root_instructions(self):
+        self.claude_fixture(runs=[{"reply": self.work_result()}])
+        worker = self.worker()
+        account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
+        task_dir = self.root / "work-turn-task"
+        task_dir.mkdir()
+        root_rules = self.repo / "AGENTS.md"
+        root_rules.write_bytes(b"a" * 65536 + b"ROOT-CONTENT-PAST-LIMIT")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            response = worker.claude_review.claude_runner.run_work_turn(
+                account, self.repo, task_dir, "Work.", lambda: False)
+            self.assertEqual(response["outcome"], "completed")
+            argv = self.claude_invocations()[-1]["argv"]
+            text = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text()
+            self.assertIn("a" * 65536, text)
+            self.assertIn("[AGENTS.md truncated at 64 KiB]", text)
+            self.assertNotIn("ROOT-CONTENT-PAST-LIMIT", text)
+            root_rules.unlink()
+            response = worker.claude_review.claude_runner.run_work_turn(
+                account, self.repo, task_dir, "Work again.", lambda: False)
+            self.assertEqual(response["outcome"], "completed")
+            argv = self.claude_invocations()[-1]["argv"]
+            text = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text()
+            self.assertIn("git worktree", text)
+            self.assertIn("nested AGENTS.md", text)
+            self.assertEqual(len(text.strip().split("\n\n")), 2)
+            self.assertNotIn("truncated", text)
+
+    def test_claude_work_turn_unknown_results_and_unavailable_accounts(self):
+        rejected = {"status": "rejected", "utilization": 1, "resetsAt": self.reset,
+                    "unifiedWindows": {"seven_day": {"utilization": 1, "resetsAt": self.reset}}}
+        self.claude_fixture(runs=[
+            {"reply": {"status": "done"}, "text": "Final invalid answer " + TEST_TOKEN},
+            {"omit_structured_output": True, "omit_result_text": True,
+             "assistant_text": "Last assistant answer."},
+            {"limits": rejected, "reply": self.work_result()},
+            {"mode": "auth_error", "status": 401}])
+        worker = self.worker()
+        account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
+        task_dir = self.root / "work-turn-task"
+        task_dir.mkdir()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for expected_raw in ("Final invalid answer [REDACTED]", "Last assistant answer."):
+                response = worker.claude_review.claude_runner.run_work_turn(
+                    account, self.repo, task_dir, "Work.", lambda: False)
+                self.assertEqual(response["outcome"], "unknown")
+                self.assertIsNone(response["result"])
+                self.assertEqual(response["raw_message"], expected_raw)
+                self.assertIn(expected_raw, worker.result_schema.result_lines(None, response["raw_message"]))
+            response = worker.claude_review.claude_runner.run_work_turn(
+                account, self.repo, task_dir, "Work.", lambda: False)
+            self.assertEqual(response["outcome"], "unavailable")
+            self.assertEqual(response["reason"], "usage limit")
+            self.assertIsNone(response["result"])
+            limits = worker.claude_accounts.read_limits()[account["name"]]
+            for key, value in rejected.items():
+                self.assertEqual(limits[key], value)
+            response = worker.claude_review.claude_runner.run_work_turn(
+                account, self.repo, task_dir, "Work.", lambda: False)
+            self.assertEqual(response["outcome"], "unavailable")
+            self.assertEqual(response["reason"], "authentication failed")
+
+    def test_claude_work_turn_stop_deadline_and_invalid_effort(self):
+        self.enable_fake_clock(auto_advance=False)
+        self.claude_fixture(runs=[{"mode": "hold", "child": True}])
+        worker = self.worker()
+        account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
+        task_dir = self.root / "work-turn-task"
+        task_dir.mkdir()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            with self.assertRaisesRegex(ValueError, "effort.*low.*medium.*high.*xhigh.*max"):
+                worker.claude_review.claude_runner.run_work_turn(
+                    account, self.repo, task_dir, "Work.", lambda: False, effort="ultra")
+            self.assertFalse(self.claude_invocations())
+            self.assertFalse(self.security_trace_path.exists())
+            for expected in ("stopped", "budget_exhausted"):
+                self.claude_trace_path.unlink(missing_ok=True)
+                advanced = [False]
+
+                def stopped():
+                    ready = any(event["command"] == "holding_child" for event in self.claude_trace())
+                    if ready and expected == "budget_exhausted" and not advanced[0]:
+                        self.advance_fake_clock(61)
+                        advanced[0] = True
+                    return ready and expected == "stopped"
+
+                response = worker.claude_review.claude_runner.run_work_turn(
+                    account, self.repo, task_dir, "Work.", stopped,
+                    deadline=worker.clock.CLOCK.monotonic() + 60)
+                self.assertEqual(response["outcome"], expected)
+                trace = self.claude_trace()
+                parent = self.claude_invocations()[-1]
+                child = next(event for event in trace if event["command"] == "holding_child")
+                self.extra_pids.update((parent["pid"], child["pid"]))
+                self.assertEqual(parent["pid"], parent["pgid"])
+                self.assertEqual(child["pgid"], parent["pgid"])
+                for pid in (parent["pid"], child["pid"]):
+                    self.assertFalse(self.process_is_live(pid))
+                    self.assertTrue(any(event["command"] == "signal" and event["signal"] == 2
+                                        and event["pid"] == pid for event in trace))
+
     def claude_fixture(self, runs=None, **settings):
         self.claude = self.root / "claude"
         self.claude.write_text("#!" + PYTHON + "\n" + FAKE_CLAUDE)

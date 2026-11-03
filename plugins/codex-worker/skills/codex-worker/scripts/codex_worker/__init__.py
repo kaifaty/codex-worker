@@ -12,6 +12,7 @@ Layer 2:
     accounts (implemented): account homes, RPC, limits, and availability.
     claude_accounts (implemented): role-neutral Claude account pool and cached limits.
 Layer 3:
+    claude_runner (implemented): isolated Claude transport and writable work turns.
     credit_resets (implemented): credit reset journal and actions.
     threads (implemented): thread messages, rollout files, and handoffs.
     budgets (implemented): weekly and elapsed-time budget monitoring.
