@@ -1,4 +1,5 @@
 """One isolated Claude Code review, with no persisted CLI output or credentials."""
+import fcntl
 import hashlib
 import json
 import os
@@ -92,7 +93,35 @@ def event_unavailable(event, account):
     return None
 
 
-def probe(cfg, account):
+def refresh_limits(cfg):
+    """Refresh stale, unblocked accounts before any role chooses from the pool."""
+    limits = claude_accounts.read_limits()
+    for account in claude_accounts.accounts(cfg):
+        info = limits.get(account["name"], {})
+        now = clock.CLOCK.time()
+        if not claude_accounts.limited(info, now) and claude_accounts.stale(cfg, info, now):
+            probe(cfg, account, stale_only=True)
+
+
+def select_account(cfg, role, exclude=(), prefer_unused=()):
+    refresh_limits(cfg)
+    return claude_accounts.select(cfg, role, exclude, prefer_unused)
+
+
+def probe(cfg, account, stale_only=False):
+    """Serialize account probes, rechecking stale snapshots after taking the lock."""
+    config.TASKS.mkdir(parents=True, exist_ok=True)
+    with (config.TASKS / ("claude-probe-" + account["name"] + ".lock")).open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if stale_only:
+            info = claude_accounts.read_limits().get(account["name"], {})
+            now = clock.CLOCK.time()
+            if claude_accounts.limited(info, now) or not claude_accounts.stale(cfg, info, now):
+                return None
+        return _probe(cfg, account)
+
+
+def _probe(cfg, account):
     """Send one short request without tools or persisted CLI output."""
     environment, token = account_environment(account, config.ACCOUNT_TIMEOUT)
     if not token:

@@ -10,7 +10,7 @@
   codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model] [--json]
   codex_task.py stop <slug>                           interrupt without rotating
   codex_task.py clean <slug> [--keep-branch]          remove worktree, archive all threads
-  codex_task.py accounts [--json]                    read account limits and login status
+  codex_task.py accounts [--json] [--refresh]        read account limits and login status
   codex_task.py reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
   codex_task.py login <name> [--browser]              add/sign in to an isolated account
   codex_task.py claude-login <name> [--config-dir DIR] [--keychain SERVICE]  add/sign in to a Claude account
@@ -304,6 +304,7 @@ def main():
     s.add_argument("--keep-branch", action="store_true")
     s = sub.add_parser("accounts", help="read each account's limits (no task is started)")
     s.add_argument("--json", action="store_true", help="print account limits as JSON")
+    s.add_argument("--refresh", action="store_true", help="refresh stale Claude account limits before printing")
     s = sub.add_parser("reset-credit", help="preview or consume a free limit reset")
     s.add_argument("account")
     s.add_argument("--credit", help="choose an available reset by ID")

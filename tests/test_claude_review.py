@@ -83,6 +83,9 @@ signal.signal(signal.SIGTERM, interrupted)
 emit({"type": "system", "subtype": "init", "session_id": str(uuid.uuid4()), "model": "fake-claude"})
 if run.get("delay"):
     clock.sleep(run["delay"])
+if run.get("gate"):
+    while not Path(run["gate"]).exists():
+        time.sleep(0.01)
 mode = run.get("mode", "complete")
 if mode == "auth_error":
     status = run.get("status", 401)
@@ -115,6 +118,7 @@ emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": 
       "input": {"command": "git diff --stat"}}]}})
 emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "fixture diff"}]}})
 result = {"type": "result", "subtype": "success", "is_error": mode == "is_error",
+          "result": "OK",
           "structured_output": run.get("reply"), "num_turns": 3,
           "usage": {"input_tokens": 100, "cache_creation_input_tokens": 20,
                     "cache_read_input_tokens": 30, "output_tokens": 40},
@@ -160,6 +164,10 @@ class ClaudeReviewTests(RotationTestCase):
         options = {"config_dir": str(self.claude_config_dir)}
         options.update(settings.pop("claude", {}))
         self.configure(language="en", claude=options, **settings)
+        # Review tests script actual reviews; freshness tests expire these snapshots.
+        worker = self.worker()
+        for account in worker.claude_accounts.accounts(worker.config.accounts_config()):
+            worker.claude_accounts.save_limits(account["name"], {"unifiedWindows": {}})
 
     def claude_trace(self):
         if not self.claude_trace_path.exists():
@@ -574,7 +582,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.claude_fixture(reviewer="claude")
         self.worker().claude_accounts.save_limits("default", {"unifiedWindows": {
             "five_hour": {"resetsAt": self.reset}, "seven_day": {"resetsAt": self.reset}}})
-        self.assertIn("claude default: 5h unknown", self.cli("accounts"))
+        self.assertIn("claude default: weight 1; 5h unknown", self.cli("accounts"))
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
         self.start("claude-limits", "--review")
         self.wait("claude-limits")
@@ -598,6 +606,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertNotIn("--effort", argv)
 
     def test_claude_rate_limit_event_huge_number_is_ignored(self):
+        clock = self.enable_fake_clock()
         worker = self.worker()
         huge = 10 ** 400
         event = json.loads(json.dumps({"type": "rate_limit_event", "rate_limit_info": {
@@ -607,7 +616,7 @@ class ClaudeReviewTests(RotationTestCase):
                 "seven_day": {"utilization": .5, "resetsAt": huge}}}}))
         self.assertIsNone(worker.claude_review.event_unavailable(event, "default"))
         self.assertEqual(worker.claude_accounts.read_limits()["default"], {
-            "status": "allowed", "unifiedWindows": {
+            "status": "allowed", "updated_at": clock.time(), "unifiedWindows": {
                 "five_hour": {"resetsAt": self.reset}, "seven_day": {"utilization": .5}}})
 
     def test_claude_pool_selects_both_windows_then_earliest_long_reset(self):
@@ -628,7 +637,7 @@ class ClaudeReviewTests(RotationTestCase):
             ({"first": limits(.2, .2, self.reset),
               "second": limits(.2, .5, self.reset + 3600)}, (), (), "first"),
             ({"first": limits(.2, .9, self.reset),
-              "second": limits(.8, .5, self.reset + 3600)}, (), (), "first"),
+              "second": limits(.8, .5, self.reset + 3600)}, (), (), "second"),
             ({"first": limits(.99, .1, self.reset)}, ("second",), (), None),
             ({}, ("second",), (), "first"),
             ({}, (), ("first",), "second"),
@@ -662,6 +671,146 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(defaults[0]["name"], "default")
         self.assertTrue(defaults[0]["config_dir"].endswith("/.claude-accounts/reviewer"))
         self.assertEqual(defaults[0]["token_keychain"], "codex-worker-claude-reviewer")
+
+    def test_claude_even_spends_weighted_weekly_quota_before_reset(self):
+        self.claude_pool_fixture()
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        first, second = cfg["claude"]["accounts"]
+        first["weight"], second["weight"] = 5, 20
+        now = clock.time()
+
+        def save(name, used, hours, short=.1):
+            worker.claude_accounts.save_limits(name, {"unifiedWindows": {
+                "five_hour": {"utilization": short, "resetsAt": now + 3600},
+                "seven_day": {"utilization": used, "resetsAt": now + hours * 3600}}})
+
+        save("first", .13, 120)
+        save("second", 0, 168)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "second")
+        save("first", .1, 6)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "first")
+        first.pop("weight")
+        second.pop("weight")
+        save("first", .1, 120)
+        save("second", .1, 168)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "first")
+        save("first", .1, 168, short=.2)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "second")
+        save("first", .1, 168)
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "first")
+
+    def test_claude_fresh_selection_refreshes_stale_limits_and_keeps_failed_snapshot(self):
+        self.claude_pool_fixture(runs=[{"limits": {"status": "allowed", "unifiedWindows": {
+            "seven_day": {"utilization": .9, "resetsAt": self.reset}}}}])
+        clock = self.enable_fake_clock()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        path = worker.config.TASKS / "claude-limits.json"
+        entries = {name: {"unifiedWindows": {"seven_day": {
+            "utilization": used, "resetsAt": self.reset}}}
+                   for name, used in (("first", .1), ("second", .2))}
+        entries["second"]["updated_at"] = clock.time()
+        path.write_text(json.dumps(entries))
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], "first")
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(worker.claude_review.select_account(cfg, "review")["name"], "second")
+            self.assertEqual(worker.claude_review.select_account(cfg, "review")["name"], "second")
+        self.assertEqual(len(self.claude_invocations()), 1)
+        self.assertEqual(worker.claude_accounts.read_limits()["first"]["updated_at"], clock.time())
+        self.assertEqual(worker.claude_accounts.read_limits()["first"]["unifiedWindows"]["seven_day"]["utilization"], .9)
+
+        entries["first"]["updated_at"] = clock.time() - 1801
+        path.write_text(json.dumps(entries))
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["runs"] = [{"mode": "invalid_json", "limits": {}}]
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            self.assertEqual(worker.claude_review.select_account(cfg, "review")["name"], "first")
+        self.assertEqual(len(self.claude_invocations()), 2)
+        self.assertEqual(worker.claude_accounts.read_limits()["first"], entries["first"])
+
+    def test_claude_fresh_concurrent_selections_probe_once_without_holding_limits_lock(self):
+        gate = self.root / "release-probe"
+        self.claude_pool_fixture(runs=[{"gate": str(gate)}], names=("first",))
+        worker = self.worker()
+        worker.claude_accounts.clear_limits("first")
+        start = self.root / "start-select"
+        code = (WORKER_BOOTSTRAP + "import sys, time\nfrom pathlib import Path\n"
+                "worker = load_worker(script=" + repr(str(SCRIPT)) + ")\n"
+                "Path(sys.argv[1]).touch()\n"
+                "while not Path(sys.argv[2]).exists(): time.sleep(.01)\n"
+                "print(worker.claude_review.select_account(worker.config.accounts_config(), 'review')['name'])\n")
+        processes = []
+        try:
+            for number in range(2):
+                process = subprocess.Popen([PYTHON, "-I", "-c", code, str(self.root / ("ready-" + str(number))),
+                                            str(start)], cwd=self.root, env=self.env,
+                                           text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+                processes.append(process)
+                self.extra_pids.add(process.pid)
+            self.until(lambda: all((self.root / ("ready-" + str(number))).exists() for number in range(2)))
+            start.touch()
+            self.until(lambda: len(self.claude_invocations()) == 1)
+            # Saving another account must finish while the request is still blocked.
+            save_code = (WORKER_BOOTSTRAP + "worker = load_worker(script=" + repr(str(SCRIPT)) + ")\n"
+                         "worker.claude_accounts.save_limits('other', {'status': 'allowed'})\n")
+            saved = subprocess.run([PYTHON, "-I", "-c", save_code], cwd=self.root, env=self.env,
+                                   text=True, capture_output=True, timeout=5)
+            self.assertEqual(saved.returncode, 0, saved.stdout + saved.stderr)
+        finally:
+            start.touch()
+            gate.touch()
+            for process in processes:
+                stdout, stderr = process.communicate(timeout=15)
+                self.assertEqual(process.returncode, 0, stdout + stderr)
+                self.assertEqual(stdout.strip(), "first")
+        self.assertEqual(len(self.claude_invocations()), 1)
+
+    def test_claude_fresh_accounts_json_and_refresh_only_stale_unblocked_accounts(self):
+        self.claude_pool_fixture(names=("old", "fresh", "blocked"))
+        clock = self.enable_fake_clock()
+        settings_path = self.home / "claude-accounts.json"
+        settings = json.loads(settings_path.read_text())
+        settings["claude"]["accounts"][0]["weight"] = 20
+        settings_path.write_text(json.dumps(settings))
+        worker = self.worker()
+        self.assertEqual(worker.config.accounts_config()["claude"]["limits_max_age_minutes"], 30)
+        path = worker.config.TASKS / "claude-limits.json"
+        entries = worker.claude_accounts.read_limits()
+        entries["old"]["updated_at"] = clock.time() - 1801
+        entries["blocked"].update(updated_at=clock.time() - 1801, limited_until=self.reset)
+        path.write_text(json.dumps(entries))
+        reported = json.loads(self.cli("accounts", "--json"))["claude"]
+        self.assertEqual([entry["weight"] for entry in reported], [20, 1, 1])
+        self.assertEqual([entry["stale"] for entry in reported], [True, False, True])
+        self.assertEqual(reported[0]["updated_at"], datetime.datetime.fromtimestamp(
+            entries["old"]["updated_at"], datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
+        self.assertEqual(self.claude_invocations(), [])
+        self.assertRegex(self.cli("accounts"), r"claude old: weight 20; .*as of .*stale")
+        reported = json.loads(self.cli("accounts", "--refresh", "--json"))["claude"]
+        self.assertEqual([entry["stale"] for entry in reported], [False, False, True])
+        self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()],
+                         [settings["claude"]["accounts"][0]["config_dir"]])
+        self.cli("accounts", "--refresh")
+        self.assertEqual(len(self.claude_invocations()), 1)
+        settings["claude"]["limits_max_age_minutes"] = 0
+        settings_path.write_text(json.dumps(settings))
+        self.cli("accounts", "--refresh")
+        self.assertEqual(len(self.claude_invocations()), 3)
+
+    def test_claude_quota_settings_reject_invalid_numbers(self):
+        accounts = self.claude_pool_fixture()
+        worker = self.worker()
+        for field, invalid in (("weight", (0, True, float("nan"))),
+                               ("limits_max_age_minutes", (-1, "30", float("inf")))):
+            for value in invalid:
+                with self.subTest(field=field, value=value):
+                    claude = {"accounts": [dict(accounts[0], weight=value)]} if field == "weight" else {field: value}
+                    self.configure(claude=claude)
+                    with self.assertRaisesRegex(SystemExit, field):
+                        worker.config.accounts_config()
 
     def test_claude_pool_stale_allowed_snapshot_keeps_active_limit(self):
         self.claude_pool_fixture()
@@ -707,6 +856,9 @@ class ClaudeReviewTests(RotationTestCase):
 
     def missing_token_fixture(self, missing=("default",)):
         accounts = self.claude_pool_fixture(names=("default", "first"))
+        settings = json.loads((self.home / "claude-accounts.json").read_text())
+        settings["claude"]["limits_max_age_minutes"] = 120
+        (self.home / "claude-accounts.json").write_text(json.dumps(settings))
         fixture = json.loads(self.claude_fixture_path.read_text())
         fixture["security"] = {"codex-worker-claude-" + name: {"unavailable": True} for name in missing}
         self.claude_fixture_path.write_text(json.dumps(fixture))

@@ -350,6 +350,8 @@ def cmd_clean(a):
 
 def cmd_accounts(a):
     cfg = config.accounts_config()
+    if getattr(a, "refresh", False):
+        claude_review.refresh_limits(cfg)
     infos = accounts.snapshots(cfg)
     if getattr(a, "json", False):
         print(json.dumps(accounts_json(infos, cfg), ensure_ascii=False))
@@ -406,6 +408,9 @@ def accounts_json(infos, cfg):
         active = claude_accounts.limited(info)
         limited_until = info.get("limited_until", info.get("resetsAt")) if active else None
         claude.append({"name": account["name"],
+                       "weight": account.get("weight", 1),
+                       "updated_at": iso_time(info.get("updated_at")),
+                       "stale": claude_accounts.stale(cfg, info),
                        "five_hour": window(windows.get("five_hour"), claude=True),
                        "seven_day": window(windows.get("seven_day"), claude=True),
                        "limited_until": iso_time(limited_until),

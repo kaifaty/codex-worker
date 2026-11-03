@@ -241,9 +241,10 @@ class AccountAuthTests(RotationTestCase):
         worker = self.worker()
         cfg = worker.config.accounts_config()
         self.assertEqual(worker.accounts.claude_account_lines(cfg),
-                         ["claude probe: no requests yet; run claude-probe probe"])
+                         ["claude probe: weight 1; no requests yet; run claude-probe probe; as of unknown (stale)"])
         self.assertEqual(worker.commands.accounts_json([], cfg)["claude"], [{
-            "name": "probe", "five_hour": None, "seven_day": None,
+            "name": "probe", "weight": 1, "updated_at": None, "stale": True,
+            "five_hour": None, "seven_day": None,
             "limited_until": None, "token_unavailable": None}])
         windows = {"five_hour": {"utilization": 0.25, "resetsAt": self.reset - 3600},
                    "seven_day": {"utilization": 0.5, "resetsAt": self.reset}}
@@ -1429,8 +1430,9 @@ class AccountAuthTests(RotationTestCase):
                     "token_keychain": "fixture-legacy-service"}}
         path.write_text(json.dumps(settings))
         worker.claude_accounts.save_limits("default", {"status": "allowed"})
+        saved_limits = worker.claude_accounts.read_limits()
         with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "default"]), \
                 self.assertRaisesRegex(SystemExit, "switch reviewer to codex"):
             worker.cli.main()
         self.assertEqual(json.loads(path.read_text()), settings)
-        self.assertEqual(worker.claude_accounts.read_limits(), {"default": {"status": "allowed"}})
+        self.assertEqual(worker.claude_accounts.read_limits(), saved_limits)
