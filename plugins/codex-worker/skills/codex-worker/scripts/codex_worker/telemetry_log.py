@@ -71,6 +71,8 @@ def record_turn_result(st, stopped):
                "capacity_retries": st.get("capacity_retries", 0),
                "max_task_weekly_percent": st.get("max_task_weekly_percent"),
                "budget_stop": budgets.budget_stop(st), "turn_stops": st.get("turn_stops", [])}
+        if st.get("executor") == "claude" and st.get("kind", "work") == "work":
+            row.update(provider="claude", session_id=st.get("session_id"))
         write_telemetry(st, row, stopped)
     except Exception as exc:
         telemetry_error(st, exc)
@@ -98,6 +100,8 @@ class PhaseTelemetry:
         self.cost_usd = None
         self.model = None
         self.reasoning_effort = None
+        self.provider = ("claude" if st.get("executor") == "claude" and self.kind == "work"
+                         and phase in ("work", "fix", "wrapup") else None)
 
     def add_usage(self, account, thread, before, path, offset, weekly_spent=0,
                   model=None, reasoning_effort=None):
@@ -124,7 +128,7 @@ class PhaseTelemetry:
                                                  if (last or {}).get("weekly") is not None else weekly_before),
                            "weekly_spent": weekly_spent})
 
-    def add_claude_usage(self, telemetry, account):
+    def add_claude_usage(self, telemetry, account, weekly_before=None, weekly_after=None, weekly_spent=0):
         self.reviewer = "claude"
         self.cost_usd = telemetry.get("cost_usd")
         self.model = telemetry.get("model")
@@ -137,9 +141,14 @@ class PhaseTelemetry:
                   if any(value is not None for value in inputs) else None,
                   "cached_input": usage.get("cache_read_input_tokens"),
                   "output": usage.get("output_tokens"), "reasoning": None}
-        self.usage.append({"account": account, "thread": None, "tokens": tokens,
-                           "model": self.model, "reasoning_effort": self.reasoning_effort,
-                           "weekly_used_before": None, "weekly_used_after": None, "weekly_spent": 0})
+        entry = {"account": account, "thread": None, "tokens": tokens,
+                 "model": self.model, "reasoning_effort": self.reasoning_effort,
+                 "weekly_used_before": weekly_before, "weekly_used_after": weekly_after,
+                 "weekly_spent": weekly_spent}
+        if self.kind == "work":
+            self.provider = "claude"
+            entry.update(provider="claude", session_id=telemetry.get("session_id"), cost_usd=self.cost_usd)
+        self.usage.append(entry)
 
     def finish(self, outcome=None, result=None):
         if self.finished:
@@ -191,6 +200,10 @@ class PhaseTelemetry:
                 row["reviewer"] = self.reviewer
                 if self.reviewer == "claude":
                     row.update(thread=None, weekly_spent=0, cost_usd=self.cost_usd)
+            if self.provider == "claude":
+                row.update(provider="claude", account=last.get("account", st.get("claude_account")),
+                           thread=None, session_id=last.get("session_id", st.get("session_id")),
+                           cost_usd=self.cost_usd)
             write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)

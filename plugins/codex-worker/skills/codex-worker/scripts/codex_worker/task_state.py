@@ -40,6 +40,9 @@ class StateField(NamedTuple):
 # Factories allocate fresh mutable defaults for each state/turn.
 STATE_FIELDS = {
     "account": StateField("cursor", load_default=lambda st: "main"),
+    "executor": StateField("task", load_default=lambda st: "codex"),
+    "claude_account": StateField("task"),
+    "session_id": StateField("cursor"),
     "threads": StateField("history", load_default=lambda st: (
         [{"account": st["account"], "thread": st["thread"], "started": st.get("created", 0)}]
         if st.get("thread") else [])),
@@ -114,6 +117,7 @@ STATE_FIELDS = {
     "plugin_version": StateField("task"),
     "pid": StateField("runtime"),
     "codex_pid": StateField("runtime"),
+    "claude_pid": StateField("runtime"),
     "check_pid": StateField("runtime"),
     "account_ids": StateField("task"),  # Task-wide identity cache, refreshed by probes.
     # Auth retry bookkeeping is reset by _run_turn(new_turn=True), not spawn.

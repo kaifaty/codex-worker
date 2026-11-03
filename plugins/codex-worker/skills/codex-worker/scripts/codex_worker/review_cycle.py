@@ -126,7 +126,7 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
     st["review_account"] = None
     records = []
-    used_accounts = set()
+    used_accounts = {st["claude_account"]} if st.get("executor") == "claude" and st.get("claude_account") else set()
     result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
     st.pop("review_result", None)

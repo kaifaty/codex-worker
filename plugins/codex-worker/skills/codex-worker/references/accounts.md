@@ -33,8 +33,12 @@ subscriptions, the settings can contain:
 
 ## Claude account pool
 
-`claude.accounts` is a pool of isolated Claude Code CLI accounts without assigned roles. Reviews
-are its first consumer; `--reviewer claude` keeps implementation and fix rounds in Codex.
+`claude.accounts` is a pool of isolated Claude Code CLI accounts without assigned roles.
+`start --executor claude` runs work, follow-ups, review fixes, CI repairs and wrap-up through this
+pool. `--executor codex` uses Codex; the default comes from `executor` in `codex-worker.json`,
+otherwise `codex`. The executor is saved and cannot change during a task. Without an explicit
+`--reviewer`, Claude tasks use Codex reviews and Codex tasks keep the configured reviewer default.
+With `--reviewer claude`, reviews prefer an available account other than the Claude worker account.
 Install Claude Code CLI, then have the human add each Anthropic subscription:
 
 ```sh
@@ -95,14 +99,21 @@ For example:
 The legacy `claude.config_dir` and `claude.token_keychain` settings still form a one-account pool
 named `default`. With neither configured, that account retains `~/.claude-accounts/reviewer` and
 `codex-worker-claude-reviewer`. Model, effort and maximum turns are shared settings under `claude`;
-see [settings.md](settings.md#claude-accounts).
+see [settings.md](settings.md#claude-accounts). For work, task `--model` and `--effort` take
+precedence over `claude.model` and `claude.effort`; supported work efforts are `low`, `medium`,
+`high`, `xhigh` and `max`. Claude work supports only `--sandbox off`; `workspace` is rejected
+before launch. The selected account and session are kept across work turns while that account
+is available. If it becomes unavailable, or no pool account can be selected, the turn ends with
+`no available Claude account`; it does not switch accounts or wait for a reset. Work journal rows
+record the provider, account, session, model, effort, tokens, cost and the seven-day utilization
+increase for the turn. `--max-weekly` limits the accumulated utilization increase.
 
 Each account's optional `weight` is its relative subscription size, a positive finite number
 defaulting to `1`. For example, weights `5` and `20` represent subscriptions with five and twenty
 times the base quota. Utilization percentages are always measured against each account's own limit.
 
 Each saved limit snapshot has an `updated_at` timestamp. Every probe attempt, successful or not, also
-records `probe_attempted_at`. Before choosing an account for a review or angle, the supervisor probes
+records `probe_attempted_at`. Before choosing an account for work, a review or an angle, the supervisor probes
 every unblocked account whose snapshot has no timestamp or is older than
 `claude.limits_max_age_minutes` (a finite nonnegative number, default `30`), unless its last probe
 attempt is younger than that interval. This prevents repeated failed probes while the old snapshot

@@ -106,7 +106,7 @@ def claude_binary():
 def require_claude():
     if not claude_binary():
         procs.die("Claude Code CLI was not found. Install Claude Code or set "
-                  "CODEX_TASK_CLAUDE to its executable path to use --reviewer claude.")
+                  "CODEX_TASK_CLAUDE to its executable path to use --executor claude or --reviewer claude.")
 
 
 def accounts_config():
@@ -130,6 +130,7 @@ def accounts_config():
     cfg.setdefault("max_turn_minutes", None)
     cfg.setdefault("max_task_weekly_percent", None)
     cfg.setdefault("max_review_minutes", 30)
+    cfg.setdefault("executor", "codex")
     cfg.setdefault("reviewer", "codex")
     cfg.setdefault("claude", {})
     cfg.setdefault("ci", False)
@@ -138,6 +139,8 @@ def accounts_config():
     cfg.setdefault("repeat_limit", 3)
     cfg.setdefault("sandbox", "off")
     cfg.setdefault("writable_dirs", [])
+    if cfg["executor"] not in ("codex", "claude"):
+        procs.die('executor must be "codex" or "claude"')
     if cfg["reviewer"] not in ("codex", "claude"):
         procs.die('reviewer must be "codex" or "claude"')
     claude = cfg["claude"]
