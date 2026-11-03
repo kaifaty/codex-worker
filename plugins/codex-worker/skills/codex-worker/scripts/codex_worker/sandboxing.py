@@ -1,8 +1,29 @@
 """Workspace sandbox rules and filter checks."""
 import json
 import subprocess
+import tempfile
+from pathlib import Path
 
 from . import config
+
+
+def claude_system_prompt(worktree, task_dir):
+    """Save this turn's workspace instructions outside the worktree."""
+    text = ("You are the task executor in a git worktree. "
+            "Make changes only inside this worktree.\n")
+    agents = Path(worktree) / "AGENTS.md"
+    if agents.is_file():
+        with agents.open("rb") as stream:
+            content = stream.read(65537)
+        text += "\nRoot AGENTS.md:\n" + content[:65536].decode("utf-8", errors="replace")
+        if len(content) > 65536:
+            text += "\n[AGENTS.md truncated at 64 KiB]"
+        text += "\n"
+    text += ("\nRead and follow nested AGENTS.md files in the directories you change.\n")
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", prefix="claude-system-",
+                                     suffix=".md", dir=task_dir, delete=False) as stream:
+        stream.write(text)
+        return Path(stream.name)
 
 
 def unsafe_filter_driver(cwd):

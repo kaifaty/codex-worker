@@ -7,11 +7,10 @@ import selectors
 import stat
 import subprocess
 import tempfile
-import threading
 import time
 from pathlib import Path
 
-from . import claude_accounts, clock, config, procs, result_schema, task_state
+from . import claude_accounts, claude_runner, clock, config, procs, task_state
 
 
 def worktree_snapshot(st):
@@ -60,38 +59,9 @@ def worktree_snapshot(st):
     return head, status, files
 
 
-def account_environment(account, timeout):
-    """Read an isolated account's token without exposing credential output."""
-    environment = {key: value for key, value in os.environ.items()
-                   if not key.startswith(("CLAUDE", "ANTHROPIC"))}
-    environment["CLAUDE_CONFIG_DIR"] = str(Path(account["config_dir"]).expanduser())
-    try:
-        credential = subprocess.run(
-            ["security", "find-generic-password", "-s", account["token_keychain"],
-             "-a", os.environ.get("USER", ""), "-w"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True,
-            timeout=timeout, env=environment)
-    except (OSError, subprocess.TimeoutExpired):
-        return environment, ""
-    token = credential.stdout.strip() if credential.returncode == 0 else ""
-    if token:
-        environment["CLAUDE_CODE_OAUTH_TOKEN"] = token
-    return environment, token
-
-
 def event_unavailable(event, account):
-    """Persist safe limit fields and recognize account availability errors."""
-    kind = event.get("type")
-    if (kind == "result" or kind == "system" and event.get("subtype") == "api_retry"):
-        if event.get("error_status", event.get("api_error_status")) in (401, 403):
-            return "authentication failed"
-    if kind == "rate_limit_event":
-        info = event.get("rate_limit_info")
-        if isinstance(info, dict):
-            claude_accounts.save_limits(account, info, event.get("timestamp"))
-            if info.get("status") == "rejected":
-                return "usage limit"
-    return None
+    """Recognize review account errors using the shared transport parser."""
+    return claude_runner.stream_unavailable(event, account)
 
 
 def refresh_limits(cfg, stopped=None):
@@ -139,7 +109,7 @@ def probe(cfg, account, stale_only=False, stopped=None):
 
 def _probe(cfg, account, stopped=None):
     """Send one short request without tools or persisted CLI output."""
-    environment, token = account_environment(account, config.ACCOUNT_TIMEOUT)
+    environment, token = claude_runner.account_environment(account, config.ACCOUNT_TIMEOUT)
     if stopped is not None and stopped():
         return "request failed"
     if not token:
@@ -218,43 +188,6 @@ def _probe(cfg, account, stopped=None):
     return reason or (None if returncode == 0 and answered else "request failed")
 
 
-def event_result(event, telemetry, token, account):
-    """Decode selected stream fields; return (result, unavailability reason)."""
-    if not isinstance(event, dict):
-        return None, "invalid JSON output"
-    kind = event.get("type")
-    if kind == "system" and event.get("subtype") == "init":
-        for key in ("session_id", "model"):
-            value = event.get(key)
-            if isinstance(value, str) and token not in value:
-                telemetry[key] = value
-    if kind != "result":
-        return None, event_unavailable(event, account)
-    usage = event.get("usage")
-    if isinstance(usage, dict):
-        telemetry["usage"] = {key: usage[key] for key in
-                              ("input_tokens", "output_tokens", "cache_creation_input_tokens",
-                               "cache_read_input_tokens") if result_schema.is_finite_number(usage.get(key))}
-    if result_schema.is_finite_number(event.get("total_cost_usd")):
-        telemetry["cost_usd"] = event["total_cost_usd"]
-    if type(event.get("num_turns")) is int:
-        telemetry["num_turns"] = event["num_turns"]
-    reason = event_unavailable(event, account)
-    if reason:
-        return None, reason
-    if event.get("is_error"):
-        return None, "review failed"
-    result = event.get("structured_output")
-    if not result_schema.matches_schema(result, result_schema.REVIEW_SCHEMA):
-        return None, "invalid structured output"
-    # A tool may echo its environment. Even a schema-valid answer must not
-    # carry the credential into state, review files, or telemetry.
-    serialized = json.dumps(result)
-    if token in serialized:
-        result = json.loads(serialized.replace(token, "[REDACTED]"))
-    return result, None
-
-
 def record_timeout(st, minutes):
     st["turn_stop"] = {"outcome": "budget_exhausted", "minutes": minutes}
     st.setdefault("turn_stops", []).append(dict(
@@ -282,105 +215,28 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response["reason"] = "Claude CLI was not found"
         return response
     settings = cfg["claude"]
-    args = [executable, "-p", prompt, "--output-format", "stream-json", "--verbose",
-            "--json-schema", json.dumps(result_schema.REVIEW_SCHEMA),
-            "--permission-mode", "dontAsk", "--allowedTools", "Read,Grep,Glob,Bash",
-            "--disallowedTools", "Edit,Write,NotebookEdit",
-            "--max-turns", str(settings["max_turns"])]
-    for key in ("model", "effort"):
-        if settings.get(key):
-            args += ["--" + key, settings[key]]
     before = worktree_snapshot(st)
-    # Read immediately before launch. Neither subprocess argv, stderr nor any
-    # task artifact contains the token or the raw output of either process.
-    remaining = deadline - clock.CLOCK.monotonic()
-    if remaining <= 0:
-        response["outcome"] = "budget_exhausted"
-        record_timeout(st, minutes)
-        return response
-    environment, token = account_environment(account, min(config.ACCOUNT_TIMEOUT, remaining))
-    if stopped():
-        response["outcome"] = task_state.stop_outcome(st, stopped)
-        return response
-    if clock.CLOCK.monotonic() >= deadline:
-        response["outcome"] = "budget_exhausted"
-        record_timeout(st, minutes)
-        return response
-    if not token:
-        response["reason"] = "token unavailable"
-        return response
-    claude_accounts.token_available(account["name"])
-    if stopped():
-        response["outcome"] = task_state.stop_outcome(st, stopped)
-        return response
-    try:
-        proc = subprocess.Popen(args, cwd=st["worktree"], env=environment,
-                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, start_new_session=True)
-    except OSError:
-        response["reason"] = "Claude CLI could not be started"
-        return response
-    response["telemetry"].update(model=settings.get("model"), reasoning_effort=settings.get("effort"))
-    st["codex_pid"] = proc.pid
-    buffer, eof, termination = b"", False, None
-    try:
+    launched = False
+
+    def started(proc):
+        nonlocal launched
+        launched = True
+        st["codex_pid"] = proc.pid
         task_state.save(st)
-        with selectors.DefaultSelector() as selector:
-            selector.register(proc.stdout, selectors.EVENT_READ)
-            while True:
-                if stopped():
-                    response["outcome"] = task_state.stop_outcome(st, stopped)
-                    break
-                if clock.CLOCK.monotonic() >= deadline:
-                    response["outcome"] = "budget_exhausted"
-                    record_timeout(st, minutes)
-                    break
-                if eof and proc.poll() is not None:
-                    if response["reason"] is None:
-                        if proc.wait() != 0:
-                            response["reason"] = "review failed"
-                        elif response["result"] is None:
-                            response["reason"] = "invalid structured output"
-                        else:
-                            response["outcome"] = "completed"
-                    break
-                for key, _ in selector.select(0.2):
-                    chunk = os.read(key.fileobj.fileno(), 65536)
-                    if not chunk:
-                        selector.unregister(key.fileobj)
-                        eof = True
-                    buffer += chunk
-                    while b"\n" in buffer or (eof and buffer):
-                        line, separator, remaining = buffer.partition(b"\n")
-                        buffer = remaining if separator else b""
-                        if not line.strip():
-                            continue
-                        try:
-                            event = json.loads(line)
-                        except (ValueError, UnicodeError):
-                            response["reason"] = response["reason"] or "invalid JSON output"
-                            response["result"] = None
-                            continue
-                        result, reason = event_result(event, response["telemetry"], token, account["name"])
-                        if reason is not None:
-                            response["reason"] = response["reason"] or reason
-                            response["result"] = None
-                        elif result is not None and response["reason"] is None:
-                            response["result"] = result
-                if response["reason"] and termination is None:
-                    # Interrupt once, then drain buffered and shutdown output:
-                    # keep reading while shutdown waits, so a large final result
-                    # can flush its usage without filling the stdout pipe.
-                    termination = threading.Thread(target=procs.terminate, args=(proc,))
-                    termination.start()
+
+    try:
+        response = claude_runner.run_claude(
+            account, st["worktree"], prompt, stopped, deadline,
+            settings.get("model"), settings.get("effort"), settings["max_turns"],
+            reviewing=True, started=started)
+        if response["outcome"] == "stopped":
+            response["outcome"] = task_state.stop_outcome(st, stopped)
+        elif response["outcome"] == "budget_exhausted":
+            record_timeout(st, minutes)
     finally:
-        if termination is None:
-            procs.terminate(proc)
-        else:
-            termination.join()
-        proc.stdout.close()
-        st.pop("codex_pid", None)
-        task_state.save(st)
-    if worktree_snapshot(st) != before:
+        if launched:
+            st.pop("codex_pid", None)
+            task_state.save(st)
+    if launched and worktree_snapshot(st) != before:
         response.update(outcome="failed", result=None, reason="reviewer modified the worktree")
     return response
