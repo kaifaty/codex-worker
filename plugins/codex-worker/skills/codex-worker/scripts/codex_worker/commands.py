@@ -273,8 +273,8 @@ def describe(st, detail):
     pr = st.get("publish", {}).get("pr", "")
     commits = procs.sh(config.GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = config.TASKS / st["slug"] / "review.md"
-    message = ("\n\n".join(threads.claude_messages(st)) if executor == "claude" else
-               review.read_text().strip() if reviewing and review.exists() else threads.last_message(st))
+    message = (review.read_text().strip() if reviewing and review.exists() else
+               "\n\n".join(threads.claude_messages(st)) if executor == "claude" else threads.last_message(st))
     return "\n".join([line, f"worktree {st['worktree']}", *result_schema.result_lines(st.get("result")),
                       f"PR: {pr or 'none'}", "commits:\n" + (commits or "(none)"),
                       "last message:\n" + (message or "(none)")])

@@ -107,7 +107,9 @@ class ReviewFixTests(RotationTestCase):
                 self.assertEqual(state["result"], expected)
                 self.assertEqual((self.home / "claude-tasks" / slug / "last.md").read_text(), text)
                 (self.home / "claude-tasks" / slug / "last.md").unlink()
-                self.assertIn(text, self.cli("status", slug).split("last message:\n", 1)[1])
+                status_message = (text if code else
+                                  (self.home / "claude-tasks" / slug / "review.md").read_text().strip())
+                self.assertIn(status_message, self.cli("status", slug).split("last message:\n", 1)[1])
                 self.assertEqual([check["outcome"] for check in state["checks"]], [] if code else ["passed"])
                 self.assertEqual(len(state["reviews"]), 0 if code else 1)
                 if not code:
@@ -126,6 +128,8 @@ class ReviewFixTests(RotationTestCase):
         self.wait(slug)
         self.cli("review", slug)
         self.wait(slug)
+        review_text = (self.home / "claude-tasks" / slug / "review.md").read_text().strip()
+        self.assertIn(review_text, self.cli("status", slug).split("last message:\n", 1)[1])
         self.until(lambda: sum(row["phase"] == "turn" for row in self.telemetry_journal()) == 3)
         state = self.state(slug)
         rows = self.telemetry_journal()
