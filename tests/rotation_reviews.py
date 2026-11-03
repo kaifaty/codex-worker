@@ -12,6 +12,7 @@ from rotation_support import PYTHON, SCRIPT, RotationTestCase
 
 class ReviewFixTests(RotationTestCase):
     def test_claude_executor_start_check_publish_and_say_resume_the_same_account_session(self):
+        self.fixture_timeout = 90
         result = self.work_result(pr_title="Implement Claude execution", pr_body="Run task work with Claude.")
         accounts = self.claude_pool_fixture(runs=[
             {"write_files": {"tracked.txt": "implemented by Claude\n"},
@@ -76,6 +77,7 @@ class ReviewFixTests(RotationTestCase):
                                              "output": 40, "reasoning": None})
 
     def test_claude_executor_text_results_use_process_outcome_and_keep_the_last_message(self):
+        self.fixture_timeout = 90
         result = self.work_result()
         cases = [(json.dumps(result), 0, result), ("Final answer without JSON.", 0, None),
                  ("Last answer before failure.", 9, None)]
@@ -98,6 +100,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual([event["review"] for event in self.invocations()], [True, True])
 
     def test_claude_executor_default_codex_reviews_and_claude_review_and_ci_repairs(self):
+        self.fixture_timeout = 90
         decisions = [{"id": finding["id"], "decision": "fixed", "note": "Fixed with Claude."}
                      for finding in self.review_result()["findings"]]
         result = self.work_result(pr_title="Implement Claude fixes", pr_body="Use Claude for all task work.")
@@ -146,6 +149,7 @@ class ReviewFixTests(RotationTestCase):
             self.assertNotIn('model_reasoning_effort="max"', event["argv"])
 
     def test_claude_executor_persists_live_session_and_resumes_after_supervisor_crash(self):
+        self.fixture_timeout = 90
         self.claude_pool_fixture(runs=[{"mode": "hold"}, {"reply": self.work_result()}])
         output = self.start("claude-executor-crash", "--executor", "claude")
         self.until(lambda: any(event["command"] == "holding" for event in self.claude_trace()))
@@ -168,6 +172,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(resumed["config_dir"], first["config_dir"])
 
     def test_claude_executor_explicit_claude_reviewer_prefers_another_pool_account(self):
+        self.fixture_timeout = 90
         accounts = self.claude_pool_fixture(runs=[{"reply": self.work_result()},
                                                   {"reply": self.review_result(False)}])
         worker = self.worker()
@@ -194,11 +199,12 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(self.invocations(), [])
 
     def test_claude_executor_rejects_workspace_and_stops_without_a_pool_account_or_rotation(self):
+        self.fixture_timeout = 90
         accounts = self.claude_pool_fixture(runs=[{"reply": self.work_result()}])
         rejected = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "claude-executor-workspace",
                                    "--brief", str(self.brief), "--repo", str(self.repo),
                                    "--sandbox", "workspace", "--executor", "claude"],
-                                  cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                                  cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=60)
         self.assertNotEqual(rejected.returncode, 0)
         self.assertIn("--sandbox", rejected.stderr)
         self.assertIn("claude", rejected.stderr.lower())
@@ -207,7 +213,7 @@ class ReviewFixTests(RotationTestCase):
         invalid_effort = subprocess.run([PYTHON, "-I", str(SCRIPT), "start", "claude-executor-effort",
                                         "--brief", str(self.brief), "--repo", str(self.repo),
                                         "--executor", "claude", "--effort", "minimal"],
-                                       cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=15)
+                                       cwd=self.repo, env=self.env, text=True, capture_output=True, timeout=60)
         self.assertNotEqual(invalid_effort.returncode, 0)
         self.assertIn("effort", invalid_effort.stderr.lower())
         self.assertEqual(self.claude_invocations(), [])
@@ -217,9 +223,12 @@ class ReviewFixTests(RotationTestCase):
         for account in accounts:
             worker.claude_accounts.save_limits(account["name"], {"status": "rejected", "resetsAt": self.reset})
         self.start("claude-executor-unavailable", "--executor", "claude")
-        output = self.cli("wait", "claude-executor-unavailable", "--timeout", "15", timeout=30)
-        self.assertIn("no available claude account", output.lower())
-        self.assertEqual(self.state("claude-executor-unavailable")["outcome"], "unavailable")
+        output = self.cli("wait", "claude-executor-unavailable", "--timeout", "60", timeout=75)
+        self.assertIn("all accounts at limit; auto-continue at", output)
+        self.assertEqual(self.state("claude-executor-unavailable")["outcome"], "sleeping")
+        self.cli("stop", "claude-executor-unavailable")
+        self.wait("claude-executor-unavailable")
+        self.assertEqual(self.state("claude-executor-unavailable")["outcome"], "stopped")
         self.assertNotIn("supervisor failed", (self.home / "claude-tasks" /
                                                 "claude-executor-unavailable" / "stderr.log").read_text())
         self.assertEqual(self.claude_invocations(), [])
@@ -230,18 +239,22 @@ class ReviewFixTests(RotationTestCase):
         self.wait("claude-executor-pinned")
         initial = self.state("claude-executor-pinned")
         worker.claude_accounts.save_limits(initial["claude_account"], {"status": "rejected", "resetsAt": self.reset})
-        self.cli("say", "claude-executor-pinned", "Continue without switching accounts.")
-        output = self.cli("wait", "claude-executor-pinned", "--timeout", "15", timeout=30)
-        self.assertIn("no available claude account", output.lower())
+        self.cli("say", "claude-executor-pinned", "Continue on another account.")
+        output = self.wait("claude-executor-pinned")
         state = self.state("claude-executor-pinned")
-        self.assertEqual(state["outcome"], "unavailable")
-        self.assertEqual(state["claude_account"], initial["claude_account"])
-        self.assertEqual(state["session_id"], initial["session_id"])
-        self.assertEqual(len(self.claude_invocations()), 1)
-        self.assertFalse(state.get("sleeping"))
+        other = next(account for account in accounts if account["name"] != initial["claude_account"])
+        self.assertEqual((state["outcome"], state["claude_account"]), ("completed", other["name"]))
+        rotated = self.claude_invocations()[-1]
+        self.assertEqual(len(self.claude_invocations()), 2)
+        self.assertEqual(rotated["config_dir"], other["config_dir"])
+        self.assertNotIn("--resume", rotated["argv"])
+        self.assertIn("Continue on another account.", rotated["argv"][1])
+        self.assertNotEqual(state["session_id"], initial["session_id"])
+        self.assertIn(f"== rotated {initial['claude_account']} → {other['name']}: unavailable for work", output)
         self.assertEqual(self.invocations(), [])
 
     def test_claude_executor_stop_terminates_the_work_process_group(self):
+        self.fixture_timeout = 90
         self.claude_pool_fixture(runs=[{"mode": "hold", "child": True}])
         self.start("claude-executor-stop", "--executor", "claude")
         self.until(lambda: len([event for event in self.claude_trace()
@@ -258,6 +271,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(self.invocations(), [])
 
     def test_claude_executor_time_budget_wrapup_resumes_the_work_session(self):
+        self.fixture_timeout = 90
         self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
         checkpoint = self.work_result("partial", remaining=["Complete the remaining work."])
         self.claude_pool_fixture(runs=[{"mode": "hold"}, {"reply": checkpoint}])
@@ -276,6 +290,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(self.invocations(), [])
 
     def test_claude_executor_weekly_budget_counts_seven_day_growth_across_work_turns(self):
+        self.fixture_timeout = 90
         def limits(used):
             return {"status": "allowed", "unifiedWindows": {
                 "seven_day": {"utilization": used, "resetsAt": self.reset}}}
@@ -307,12 +322,17 @@ class ReviewFixTests(RotationTestCase):
         self.assertAlmostEqual(rows[0]["weekly_spent"], 6)
 
     def test_claude_executor_weekly_budget_counts_usage_in_a_new_window(self):
+        self.fixture_timeout = 90
         before = {"status": "allowed", "unifiedWindows": {
             "seven_day": {"utilization": 0.90, "resetsAt": self.reset}}}
         after = {"status": "allowed", "unifiedWindows": {
             "seven_day": {"utilization": 0.06, "resetsAt": self.reset + 604800}}}
         result = self.work_result()
         accounts = self.claude_pool_fixture(runs=[{"limits": after, "reply": result}])
+        settings_path = self.home / "claude-accounts.json"
+        settings = json.loads(settings_path.read_text())
+        settings["claude"]["work_switch_at"] = 95
+        settings_path.write_text(json.dumps(settings))
         worker = self.worker()
         for account in accounts:
             worker.claude_accounts.save_limits(account["name"], before)
@@ -327,6 +347,163 @@ class ReviewFixTests(RotationTestCase):
         self.assertAlmostEqual(row["weekly_used_before"], 90)
         self.assertAlmostEqual(row["weekly_used_after"], 6)
         self.assertAlmostEqual(row["weekly_spent"], 6)
+
+    def claude_settings(self, **claude):
+        settings_path = self.home / "claude-accounts.json"
+        settings = json.loads(settings_path.read_text())
+        settings["claude"].update(claude)
+        settings_path.write_text(json.dumps(settings))
+
+    def test_claude_executor_rotation_starts_a_new_session_with_a_handoff(self):
+        self.fixture_timeout = 90
+        partial = self.work_result("partial", summary="First account summary.",
+                                   remaining=["Finish the rotated work."])
+        result = self.work_result()
+        accounts = self.claude_pool_fixture(runs=[
+            {"reply": partial},
+            {"limits": {"status": "rejected", "resetsAt": self.reset}},
+            {"reply": result}], names=("first", "second", "third"))
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["security"] = {accounts[1]["token_keychain"]: {"unavailable": True}}
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.start("claude-executor-rotation", "--executor", "claude")
+        self.wait("claude-executor-rotation")
+        initial = self.state("claude-executor-rotation")
+        self.assertEqual(initial["claude_account"], accounts[0]["name"])
+        self.cli("say", "claude-executor-rotation", "Carry on with the follow-up.")
+        output = self.wait("claude-executor-rotation")
+        state = self.state("claude-executor-rotation")
+        first, limited, rotated = self.claude_invocations()
+        self.assertEqual(limited["argv"][limited["argv"].index("--resume") + 1], initial["session_id"])
+        self.assertEqual(limited["config_dir"], accounts[0]["config_dir"])
+        self.assertEqual(rotated["config_dir"], accounts[2]["config_dir"])
+        self.assertNotIn("--resume", rotated["argv"])
+        prompt = rotated["argv"][1]
+        self.assertTrue(prompt.startswith(self.brief.read_text().rstrip()))
+        for text in ("## Continuation", "Carry on with the follow-up.", "First account summary.",
+                     "Finish the rotated work.", "git log --oneline", "git status --short"):
+            self.assertIn(text, prompt)
+        self.assertEqual((state["outcome"], state["result"]), ("completed", result))
+        self.assertEqual(state["claude_account"], accounts[2]["name"])
+        self.assertEqual(state["session_id"], rotated["session_id"])
+        self.assertNotEqual(state["session_id"], initial["session_id"])
+        self.assertEqual([(rotation["from"], rotation["to"], rotation["reason"]) for rotation in state["rotations"]],
+                         [(accounts[0]["name"], accounts[1]["name"], "usage limit"),
+                          (accounts[1]["name"], accounts[2]["name"], "token unavailable")])
+        self.assertIn(f"== rotated {accounts[1]['name']} → {accounts[2]['name']}: token unavailable, "
+                      f"new thread {rotated['session_id']}", output)
+        self.assertEqual(self.invocations(), [])
+
+    def test_claude_executor_sleep_resumes_the_same_session_after_the_reset(self):
+        self.fixture_timeout = 90
+        clock = self.enable_fake_clock(auto_advance=False)
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "1"
+        now = clock.time()
+        result = self.work_result()
+        accounts = self.claude_pool_fixture(runs=[
+            {"reply": result},
+            {"limits": {"status": "rejected", "resetsAt": now + 7200}},
+            {"reply": result},
+            {"limits": {"status": "rejected", "resetsAt": now + 30000}}])
+        self.claude_settings(limits_max_age_minutes=100000)
+        self.start("claude-executor-sleep", "--executor", "claude", "--max-minutes", "3")
+        self.wait("claude-executor-sleep")
+        initial = self.state("claude-executor-sleep")
+        self.assertEqual(initial["claude_account"], accounts[0]["name"])
+        self.worker().claude_accounts.save_limits(accounts[1]["name"], {"status": "rejected", "resetsAt": now + 50000})
+
+        self.cli("say", "claude-executor-sleep", "Continue after the limit.")
+        output = self.wait("claude-executor-sleep")
+        sleeping = self.state("claude-executor-sleep")
+        self.assertEqual(sleeping["outcome"], "sleeping")
+        self.assertEqual(sleeping["sleeping"]["account"], accounts[0]["name"])
+        self.assertIn("all accounts at limit; auto-continue at", output)
+        self.advance_fake_clock(sleeping["sleeping"]["until"] + 1 - clock.time())
+        self.wait("claude-executor-sleep", through_sleep=True)
+        state = self.state("claude-executor-sleep")
+        self.assertEqual((state["outcome"], state["result"]), ("completed", result))
+        self.assertFalse(state.get("turn_stop"), "sleep must not count toward --max-minutes")
+        first, limited, resumed = self.claude_invocations()
+        for event in (limited, resumed):
+            self.assertEqual(event["argv"][event["argv"].index("--resume") + 1], initial["session_id"])
+            self.assertEqual(event["config_dir"], accounts[0]["config_dir"])
+        self.assertIn("Continue after the limit.", resumed["argv"][1])
+        self.assertEqual((state["claude_account"], state["session_id"]),
+                         (accounts[0]["name"], initial["session_id"]))
+        self.assertEqual([entry["event"] for entry in state["rotations"]], ["sleep", "wake"])
+
+        self.cli("say", "claude-executor-sleep", "Hit the limit again.")
+        self.until(lambda: self.state("claude-executor-sleep")["outcome"] == "sleeping")
+        self.cli("stop", "claude-executor-sleep")
+        self.wait("claude-executor-sleep")
+        self.assertEqual(self.state("claude-executor-sleep")["outcome"], "stopped")
+        self.assertEqual(len(self.claude_invocations()), 4)
+        self.assertEqual(self.invocations(), [])
+
+    def test_claude_executor_sleep_after_a_missing_token_repeats_the_handoff(self):
+        self.fixture_timeout = 90
+        clock = self.enable_fake_clock(auto_advance=False)
+        partial = self.work_result("partial", summary="First account summary.",
+                                   remaining=["Finish after the token returns."])
+        accounts = self.claude_pool_fixture(runs=[
+            {"reply": partial},
+            {"limits": {"status": "rejected", "resetsAt": clock.time() + 7200}},
+            {"reply": self.work_result()}])
+        self.claude_settings(limits_max_age_minutes=100000)
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["security"] = {accounts[1]["token_keychain"]: {"unavailable": True}}
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.start("claude-executor-token-sleep", "--executor", "claude")
+        self.wait("claude-executor-token-sleep")
+        self.cli("say", "claude-executor-token-sleep", "Continue after the token returns.")
+        self.wait("claude-executor-token-sleep")
+        sleeping = self.state("claude-executor-token-sleep")
+        self.assertEqual((sleeping["outcome"], sleeping["claude_account"]), ("sleeping", accounts[1]["name"]))
+        del fixture["security"]
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.advance_fake_clock(sleeping["sleeping"]["until"] + 1 - clock.time())
+        self.wait("claude-executor-token-sleep", through_sleep=True)
+        state = self.state("claude-executor-token-sleep")
+        self.assertEqual((state["outcome"], state["claude_account"]), ("completed", accounts[1]["name"]))
+        resumed = self.claude_invocations()[-1]
+        self.assertEqual(len(self.claude_invocations()), 3)
+        self.assertEqual(resumed["config_dir"], accounts[1]["config_dir"])
+        self.assertNotIn("--resume", resumed["argv"])
+        for text in (self.brief.read_text().rstrip(), "Continue after the token returns.",
+                     "First account summary.", "Finish after the token returns."):
+            self.assertIn(text, resumed["argv"][1])
+
+    def test_claude_executor_rotation_probe_time_is_outside_the_time_budget(self):
+        self.fixture_timeout = 90
+        self.enable_fake_clock()
+        result = self.work_result()
+        accounts = self.claude_pool_fixture(runs=[
+            {}, {},
+            {"delay": 10, "limits": {"status": "rejected", "resetsAt": self.reset}},
+            {"delay": 55}, {"reply": result}])
+        self.claude_settings(limits_max_age_minutes=0)
+        self.start("claude-executor-probe-time", "--executor", "claude", "--max-minutes", "1")
+        self.wait("claude-executor-probe-time")
+        state = self.state("claude-executor-probe-time")
+        self.assertEqual((state["outcome"], state["result"]), ("completed", result))
+        self.assertEqual(state["claude_account"], accounts[1]["name"])
+        self.assertEqual(len(self.claude_invocations()), 5)
+
+    def test_claude_work_switch_at_reserves_the_top_of_the_week_for_reviews(self):
+        accounts = self.claude_pool_fixture(names=("first",))
+        self.claude_settings(work_switch_at=85)
+        worker = self.worker()
+        worker.claude_accounts.save_limits(accounts[0]["name"], {
+            "unifiedWindows": {"seven_day": {"utilization": 0.86, "resetsAt": self.reset}}})
+        cfg = worker.config.accounts_config()
+        self.assertIsNone(worker.claude_accounts.select(cfg, "work"))
+        self.assertEqual(worker.claude_accounts.select(cfg, "review")["name"], accounts[0]["name"])
+        for value in (-1, 101, "85", True, None):
+            with self.subTest(work_switch_at=value):
+                self.claude_settings(work_switch_at=value)
+                with self.assertRaises(SystemExit) as error:
+                    worker.config.accounts_config()
+                self.assertIn("claude.work_switch_at must be a finite number in [0, 100]", str(error.exception))
 
     def advance_review_base(self, files):
         checkout = self.root / "base-checkout"

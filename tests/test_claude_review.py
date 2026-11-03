@@ -86,8 +86,6 @@ def interrupted(signum, frame):
 signal.signal(signal.SIGINT, interrupted)
 signal.signal(signal.SIGTERM, interrupted)
 emit({"type": "system", "subtype": "init", "session_id": session_id, "model": "fake-claude"})
-if run.get("limits_before"):
-    emit({"type": "rate_limit_event", "rate_limit_info": run["limits_before"]})
 if run.get("delay"):
     clock.sleep(run["delay"])
 if run.get("gate"):

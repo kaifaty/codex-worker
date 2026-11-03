@@ -172,6 +172,9 @@ def accounts_config():
     claude.setdefault("effort", None)
     claude.setdefault("max_turns", 40)
     claude.setdefault("limits_max_age_minutes", 30)
+    claude.setdefault("work_switch_at", 85)
+    if not result_schema.is_finite_number(claude["work_switch_at"]) or not 0 <= claude["work_switch_at"] <= 100:
+        procs.die("claude.work_switch_at must be a finite number in [0, 100]")
     age = claude["limits_max_age_minutes"]
     if not result_schema.is_finite_number(age) or age < 0:
         procs.die("claude.limits_max_age_minutes must be a finite nonnegative number")

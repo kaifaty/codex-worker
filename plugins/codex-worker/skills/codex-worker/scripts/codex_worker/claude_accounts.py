@@ -203,7 +203,12 @@ def select(cfg, role, exclude=(), prefer_unused=()):
     limits, now = read_limits(), clock.CLOCK.time()
     choices = [account for account in accounts(cfg) if account["name"] not in exclude
                and not limited(limits.get(account["name"], {}), now)]
-    for threshold in (cfg.get("soft_switch_at", cfg["switch_at"]), cfg["switch_at"]):
+    thresholds = (cfg.get("soft_switch_at", cfg["switch_at"]), cfg["switch_at"])
+    if role == "work":
+        # Work keeps the top of each account's week in reserve for reviews.
+        work = cfg["claude"].get("work_switch_at", 85)
+        thresholds = (min(work, thresholds[0]), work)
+    for threshold in thresholds:
         available = [account for account in choices if all(
             _window_used((limits.get(account["name"], {}).get("unifiedWindows") or {}).get(window) or {}, now)
             < threshold for window in ("five_hour", "seven_day"))]

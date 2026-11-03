@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import accounts, clock, config, credit_resets, notifications, task_state, telemetry_log
+from . import accounts, claude_accounts, claude_review, clock, config, credit_resets, notifications, result_schema, task_state, telemetry_log
 
 
 def limit_reason(info, cfg, soft=False):
@@ -306,5 +306,98 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             chosen = (current if current.get("logged_in") and accounts.has_credits(current, cfg)
                       else accounts.credit_account(infos, cfg))
         if chosen:
+            return chosen
+    return None
+
+
+def claude_reset(cfg):
+    """Earliest future limit end or window reset in the Claude pool."""
+    limits, now, resets = claude_accounts.read_limits(), clock.CLOCK.time(), []
+    for account in claude_accounts.accounts(cfg):
+        info = limits.get(account["name"], {})
+        windows = info.get("unifiedWindows") or {}
+        # A limited account returns at its known limit end, whatever its windows say.
+        stamps = ([info.get("limited_until", info.get("resetsAt"))]
+                  if claude_accounts.limited(info, now) else [])
+        if not any(result_schema.is_finite_number(stamp) for stamp in stamps):
+            stamps = [window.get("resetsAt") for window in windows.values() if isinstance(window, dict)]
+        resets += [(stamp, account["name"]) for stamp in stamps
+                   if result_schema.is_finite_number(stamp) and stamp > now]
+    return min(resets) if resets else (None, None)
+
+
+def claude_choice(st, cfg, stopped, exclude=()):
+    """Prefer the task's account and session, then any other pool account."""
+    current = st.get("claude_account")
+    others = [account["name"] for account in claude_accounts.accounts(cfg) if account["name"] != current]
+    if current and current not in exclude:
+        chosen = claude_review.select_account(cfg, "work", exclude=others, stopped=stopped)
+        if chosen is not None or stopped():
+            return chosen
+    return claude_review.select_account(cfg, "work", exclude=set(exclude) | {current}, stopped=stopped)
+
+
+def wait_for_claude_account(st, cfg, reason, stopped, sleep=None):
+    """Sleep until the Claude pool's earliest reset, without credits or reset credits."""
+    sleep = sleep or clock.CLOCK.sleep
+    wait_started = clock.CLOCK.time()
+    already_waited = st.get("reset_wait_seconds", 0)
+    deadline = wait_started + config.MAX_RESET_WAIT_SECONDS - already_waited
+
+    def update_waited():
+        st["reset_wait_seconds"] = already_waited + max(0, clock.CLOCK.time() - wait_started)
+
+    def exhausted(why):
+        stamp, name = claude_reset(cfg)
+        st.pop("sleeping", None)
+        st.update(outcome="exhausted", exhausted={"at": clock.CLOCK.time(), "reset": stamp,
+                                                  "account": name, "reason": why})
+        task_state.save(st)
+        notifications.notify(st, cfg, "paused", f"paused: {why}", until=stamp)
+
+    while not stopped():
+        update_waited()
+        started = clock.CLOCK.time()
+        if started >= deadline:
+            exhausted(reason + "; reset wait exceeded 8 days")
+            return None
+        if not cfg["wait_for_reset"]:
+            exhausted(reason)
+            return None
+        stamp, name = claude_reset(cfg)
+        # A delayed reset may still have its old timestamp. Avoid a tight probe loop.
+        until = stamp + config.RESET_MARGIN if stamp is not None else started + config.RESET_RETRY_SECONDS
+        if until <= started:
+            until = started + config.SLEEP_STEP
+        until = min(until, deadline)
+        sleeping = {"until": until, "account": name, "reason": reason}
+        st.update(outcome="sleeping", sleeping=sleeping, exhausted=None)
+        st["rotations"].append(dict(sleeping, at=started, event="sleep"))
+        task_state.save(st)
+        notifications.notify(st, cfg, "paused", f"paused until {config.local_time(until)}: {reason}", until=until)
+        phase = telemetry_log.telemetry_phase(st)
+        sleep_started = clock.CLOCK.monotonic()
+        try:
+            while not stopped():
+                left = until - clock.CLOCK.time()
+                if left <= 0:
+                    break
+                sleep(min(config.SLEEP_STEP, left))
+        finally:
+            if phase is not None:
+                phase.sleep_seconds += max(0, clock.CLOCK.monotonic() - sleep_started)
+            update_waited()
+        if stopped():
+            return None
+        if st["reset_wait_seconds"] >= config.MAX_RESET_WAIT_SECONDS:
+            exhausted(reason + "; reset wait exceeded 8 days")
+            return None
+        st.pop("sleeping", None)
+        st["outcome"] = "running"
+        st["rotations"].append(dict(sleeping, at=clock.CLOCK.time(), event="wake"))
+        task_state.save(st)
+        notifications.notify(st, cfg, "woke", "woke to recheck account limits")
+        chosen = claude_choice(st, cfg, stopped)
+        if chosen is not None and not stopped():
             return chosen
     return None
