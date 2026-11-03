@@ -126,8 +126,9 @@ def run_claude_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
         st.pop("error", None)
         previous = st.get("claude_account")
         if account is not None and chosen["name"] == account["name"]:
-            attempt_prompt = (prompts.reset_resume_prompt(cfg) + "\n\n" + prompt
-                              if st.get("session_id") else prompt)
+            # Without a session, repeat the previous attempt's prompt, including any handoff.
+            if st.get("session_id"):
+                attempt_prompt = prompts.reset_resume_prompt(cfg) + "\n\n" + prompt
         elif previous and chosen["name"] != previous:
             attempt_prompt = threads.handoff(st, current_message=current_message, cfg=cfg)
             st["rotations"].append({"at": clock.CLOCK.time(), "from": previous, "to": chosen["name"],

@@ -428,6 +428,39 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(len(self.claude_invocations()), 4)
         self.assertEqual(self.invocations(), [])
 
+    def test_claude_executor_sleep_after_a_missing_token_repeats_the_handoff(self):
+        self.fixture_timeout = 60
+        clock = self.enable_fake_clock(auto_advance=False)
+        partial = self.work_result("partial", summary="First account summary.",
+                                   remaining=["Finish after the token returns."])
+        accounts = self.claude_pool_fixture(runs=[
+            {"reply": partial},
+            {"limits": {"status": "rejected", "resetsAt": clock.time() + 7200}},
+            {"reply": self.work_result()}])
+        self.claude_settings(limits_max_age_minutes=100000)
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["security"] = {accounts[1]["token_keychain"]: {"unavailable": True}}
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.start("claude-executor-token-sleep", "--executor", "claude")
+        self.wait("claude-executor-token-sleep")
+        self.cli("say", "claude-executor-token-sleep", "Continue after the token returns.")
+        self.wait("claude-executor-token-sleep")
+        sleeping = self.state("claude-executor-token-sleep")
+        self.assertEqual((sleeping["outcome"], sleeping["claude_account"]), ("sleeping", accounts[1]["name"]))
+        del fixture["security"]
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.advance_fake_clock(sleeping["sleeping"]["until"] + 1 - clock.time())
+        self.wait("claude-executor-token-sleep", through_sleep=True)
+        state = self.state("claude-executor-token-sleep")
+        self.assertEqual((state["outcome"], state["claude_account"]), ("completed", accounts[1]["name"]))
+        resumed = self.claude_invocations()[-1]
+        self.assertEqual(len(self.claude_invocations()), 3)
+        self.assertEqual(resumed["config_dir"], accounts[1]["config_dir"])
+        self.assertNotIn("--resume", resumed["argv"])
+        for text in (self.brief.read_text().rstrip(), "Continue after the token returns.",
+                     "First account summary.", "Finish after the token returns."):
+            self.assertIn(text, resumed["argv"][1])
+
     def test_claude_executor_rotation_probe_time_is_outside_the_time_budget(self):
         self.enable_fake_clock()
         result = self.work_result()
