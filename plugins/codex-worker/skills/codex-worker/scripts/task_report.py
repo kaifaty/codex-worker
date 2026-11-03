@@ -139,7 +139,7 @@ def _task(repo, slug, created):
             "executors": [], "reviewers": [], "first_review_findings": None, "follow_ups": None,
             "lead_verdict": None, "lead_note": None,
             "_reviews": {}, "_turns": [], "_latest_turn": 0, "_model_settings": [], "_work_settings": [],
-            "_work_turns": set(), "_first_done_turn": None, "_first_review": None, "_first_review_rows": [], "_checks": Counter(), "_ci": Counter()}
+            "_work_turns": set(), "_first_done_turn": None, "_first_review": None, "_first_review_rows": [], "_started": None, "_checks": Counter(), "_ci": Counter()}
 
 
 def _row_settings(row):
@@ -165,7 +165,7 @@ def _is_work_phase(row):
 
 
 def _attribute(row, task):
-    """Record what places a task in groups: executor, work model settings, reviewer, first review."""
+    """Record what places a task in groups: executor, work model settings, reviewer, first review, follow-ups."""
     if row["phase"] == "review":
         reviewer = "claude" if row.get("reviewer") == "claude" else "codex"
         if reviewer not in task["reviewers"]:
@@ -184,6 +184,7 @@ def _attribute(row, task):
         for setting in _row_settings(row):
             if setting not in task["_work_settings"]:
                 task["_work_settings"].append(setting)
+    _accumulate_work(row, task)
 
 
 def _accumulate_work(row, task):
@@ -348,6 +349,7 @@ def _accumulate_rows(rows, identities, since=0):
             continue
         phase = row["phase"]
         task = tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
+        task["_started"] = task["_started"] or row["at"]
         _attribute(row, task)
         if row["at"] < since:
             continue
@@ -356,8 +358,6 @@ def _accumulate_rows(rows, identities, since=0):
         task["_latest_turn"] = max(task["_latest_turn"], _round(row.get("turn")))
         if phase == "turn":
             # Final supervisor results carry no additional stage cost or usage.
-            if row.get("kind", "work") == "work":
-                _accumulate_work(row, task)
             task["_turns"].append(row)
             task["turn_stops"] = row.get("turn_stops", [])
             task["rounds"] = max(task["rounds"], _round(row.get("round")))
@@ -381,8 +381,6 @@ def _accumulate_rows(rows, identities, since=0):
             if ((phase != "wrapup" or row.get("outcome") in CANCELLATION_OUTCOMES + ("refused",))
                     and _identifier(row.get("outcome"))):
                 task["outcome"] = row["outcome"]
-        if _is_work_phase(row):
-            _accumulate_work(row, task)
         if phase == "scout":
             task["result_status"] = None
         elif phase in ("work", "fix") or (phase == "wrapup" and row.get("kind") == "work"):
@@ -485,7 +483,9 @@ def _verdict_task(tasks, repo, slug, created, at):
             # Legacy tasks without a birth keep their generation, so the newest one sorts last.
             generation = key[2][1] if isinstance(key[2], tuple) else 0
             candidates.append(((task["created"] or 0, generation), task))
-    earlier = [item for item in candidates if item[0][0] <= at]
+    # A task without a birth started at its first journal row.
+    earlier = [item for item in candidates
+               if (item[1]["created"] if item[1]["created"] is not None else item[1]["_started"]) <= at]
     return max(earlier, key=lambda item: item[0], default=(None, None))[1]
 
 
@@ -556,7 +556,8 @@ def lead_verdict(log_path, repo, slug, created, now=None):
     rows, verdicts = _read_rows(log_path, now, repo, slug)
     tasks = {}
     for row, identity in zip(rows, _task_identities(rows)):
-        tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
+        task = tasks.setdefault(identity, _task(row["repo"], row["slug"], _number(identity[2])))
+        task["_started"] = task["_started"] or row["at"]
     _attach_lead_verdicts(tasks, verdicts)
     task = _verdict_task(tasks, repo, slug, _number(created), now)
     return None if task is None else task["lead_verdict"]
@@ -579,7 +580,7 @@ def build_report(log_path, since="7d", repo=None, slug=None, now=None, by=None):
     task_rows, reconciled = _reconcile_tasks(tasks)
     groups = _group_tasks(task_rows, dimensions) if dimensions else None
     for task in task_rows:
-        for key in ("_model_settings", "_work_settings", "_checks", "_ci"):
+        for key in ("_model_settings", "_work_settings", "_checks", "_ci", "_started"):
             task.pop(key)
     checks = totals["checks"]
     reviews = totals["reviews"]

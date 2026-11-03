@@ -618,11 +618,14 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
                 result_status="done", active_seconds=600, weekly_spent=5),
             row(old + 10, "review", model="gpt-5", reasoning_effort="high", verdict="defects",
                 findings=2, severe_findings=2, active_seconds=300, weekly_spent=3),
+            # The lead's say yesterday follows the done result from before the window.
+            row(now - 86500, "work", turn=2, provider="claude", model="claude-sonnet-5-5",
+                reasoning_effort="high", result_status="blocked"),
             row(now - 86400, "review", turn=2, model="gpt-5", reasoning_effort="high", verdict="clean",
                 findings=0, severe_findings=0, active_seconds=60, weekly_spent=1)])
         report = json.loads(self.cli("report", "--since", "7d", "--by", "executor,model,reviewer", "--json"))
         task, = report["tasks"]
-        self.assertEqual((task["executors"], task["first_review_findings"]), (["claude"], 2))
+        self.assertEqual((task["executors"], task["first_review_findings"], task["follow_ups"]), (["claude"], 2, 1))
         self.assertEqual((task["weekly_used_percent"], task["active_minutes"]), (1, 1))
         group, = report["groups"]
         self.assertEqual((group["executor"], group["model"], group["reviewer"], group["average_first_review_findings"]),
@@ -855,11 +858,13 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
                           for row in report["tasks"]],
                          [(None, 6, 66, "clean"), (None, 2, 22, "defects")])
         with (self.home / "codex-worker-log.jsonl").open("a") as stream:
-            stream.write(json.dumps({"v": 1, "kind": "verdict", "at": now - 1, "repo": "repo",
-                                     "slug": "legacy-reuse", "created": None, "verdict": "accepted"}) + "\n")
+            # The first verdict precedes the second generation, so it stays with the first.
+            for at, verdict in ((now - 95, "redone"), (now - 1, "accepted")):
+                stream.write(json.dumps({"v": 1, "kind": "verdict", "at": at, "repo": "repo",
+                                         "slug": "legacy-reuse", "created": None, "verdict": verdict}) + "\n")
         report = json.loads(self.cli("report", "--slug", "legacy-reuse", "--json"))
         self.assertEqual([(row["turns"], row["lead_verdict"]) for row in report["tasks"]],
-                         [(6, None), (2, "accepted")])
+                         [(6, "redone"), (2, "accepted")])
         no_turn = json.loads(self.cli("report", "--slug", "legacy-no-turn", "--json"))
         self.assertEqual((no_turn["summary"]["tasks"], no_turn["summary"]["turns"]), (1, 4))
 

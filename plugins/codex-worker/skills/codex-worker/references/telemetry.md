@@ -56,8 +56,8 @@ python3 -I "$T" report --by executor,reviewer,task-type
 provider of its review phases (`codex` or `claude`), or `none` when the task had no review.
 
 The `--since` window decides which tasks a report includes and limits their costs, tokens, minutes and
-weekly percentages to rows inside it. The executor, reviewer, work model and effort, first-review findings
-and lead verdict come from all of a task's journal rows, so a task whose work happened before the window
+weekly percentages to rows inside it. The executor, reviewer, work model and effort, first-review findings,
+follow-ups and lead verdict come from all of a task's journal rows, so a task whose work happened before the window
 keeps its executor and model.
 
 The grouped table has these columns (JSON group keys in brackets):
@@ -102,7 +102,7 @@ Reports show it in the `lead verdict` column of `Tasks by cost`; JSON task recor
 `lead_verdict`, `lead_note`, `executors`, `reviewers`, `first_review_findings`, and `follow_ups`.
 A verdict belongs to the task with the same repository, slug and creation time. When no reported task
 has that creation time, for example because older journal rows have none, it belongs to the newest task
-with that slug started no later than the verdict. `clean` uses the same rule for its reminder; when the
+with that slug started no later than the verdict; a task without a creation time starts at its first journal row. `clean` uses the same rule for its reminder; when the
 journal cannot be read, it prints one line saying the verdict could not be checked and still exits 0.
 
 ## The journal
