@@ -56,6 +56,7 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual([event["config_dir"] for event in (first, followup)],
                          [accounts[0]["config_dir"]] * 2)
         for event in (first, followup):
+            self.assertNotIn("--max-turns", event["argv"])
             self.assertEqual(event["argv"][event["argv"].index("--model") + 1], "claude-task-model")
             self.assertEqual(event["argv"][event["argv"].index("--effort") + 1], "high")
         self.assertEqual(checks.read_text().splitlines(), ["checked", "checked"])
@@ -95,7 +96,7 @@ class ReviewFixTests(RotationTestCase):
             {"mode": "complete", "reply": self.review_result(False)}])
         self.configure_ci([[self.ci_check("fail")], [self.ci_check()]],
                           jobs={"123": "AssertionError: repair this Claude CI fixture\n"})
-        self.start("claude-executor-fixes", "--review", "--fix-rounds", "1", "--ci", "--check", "true")
+        self.start("claude-executor-fixes", "--effort", "max", "--review", "--fix-rounds", "1", "--ci", "--check", "true")
         self.wait("claude-executor-fixes")
         state = self.state("claude-executor-fixes")
         self.assertEqual(state["reviewer"], "codex", "Claude work defaults to Codex even when config says Claude")
@@ -110,11 +111,39 @@ class ReviewFixTests(RotationTestCase):
             self.assertEqual(event["config_dir"], work["config_dir"])
             self.assertEqual(event["session_id"], work["session_id"])
             self.assertEqual(event["argv"][event["argv"].index("--model") + 1], "configured-claude")
-            self.assertEqual(event["argv"][event["argv"].index("--effort") + 1], "medium")
+            self.assertEqual(event["argv"][event["argv"].index("--effort") + 1], "max")
+            self.assertNotIn("--max-turns", event["argv"])
         for event in (fix, ci):
             self.assertEqual(event["argv"][event["argv"].index("--resume") + 1], work["session_id"])
         self.assertIn("F1", fix["argv"][1])
         self.assertIn("repair this Claude CI fixture", ci["argv"][1])
+        self.cli("review", "claude-executor-fixes")
+        self.wait("claude-executor-fixes")
+        self.assertEqual(len(self.invocations()), 3)
+        for event in self.invocations():
+            self.assertNotIn('model_reasoning_effort="max"', event["argv"])
+
+    def test_claude_executor_persists_live_session_and_resumes_after_supervisor_crash(self):
+        self.claude_pool_fixture(runs=[{"mode": "hold"}, {"reply": self.work_result()}])
+        output = self.start("claude-executor-crash", "--executor", "claude")
+        self.until(lambda: any(event["command"] == "holding" for event in self.claude_trace()))
+        initial = self.state("claude-executor-crash")
+        first, = self.claude_invocations()
+        session_id = first["session_id"]
+        self.assertEqual(initial["session_id"], session_id)
+        self.assertIn("session " + session_id, output)
+        self.assertIn("session " + session_id[:13], self.cli("status", "claude-executor-crash"))
+        self.extra_pids.update((initial["pid"], first["pid"]))
+        os.kill(initial["pid"], signal.SIGKILL)
+        os.killpg(first["pgid"], signal.SIGTERM)
+        worker = self.worker()
+        self.until(lambda: not worker.procs.alive(initial["pid"]))
+        self.until(lambda: not self.process_is_live(first["pid"]))
+        self.cli("say", "claude-executor-crash", "Continue the interrupted task.")
+        self.wait("claude-executor-crash")
+        resumed = self.claude_invocations()[-1]
+        self.assertEqual(resumed["argv"][resumed["argv"].index("--resume") + 1], session_id)
+        self.assertEqual(resumed["config_dir"], first["config_dir"])
 
     def test_claude_executor_explicit_claude_reviewer_prefers_another_pool_account(self):
         accounts = self.claude_pool_fixture(runs=[{"reply": self.work_result()},
@@ -219,6 +248,7 @@ class ReviewFixTests(RotationTestCase):
         work, wrapup = self.claude_invocations()
         self.assertEqual(wrapup["argv"][wrapup["argv"].index("--resume") + 1], work["session_id"])
         self.assertEqual(wrapup["config_dir"], work["config_dir"])
+        self.assertNotIn("--max-turns", wrapup["argv"])
         self.assertEqual(wrapup["argv"][1],
                          self.worker().prompts.wrapup_prompt(state, state["turn_stop"], {"language": "en"}))
         self.assertEqual(self.invocations(), [])
@@ -228,12 +258,22 @@ class ReviewFixTests(RotationTestCase):
             return {"status": "allowed", "unifiedWindows": {
                 "seven_day": {"utilization": used, "resetsAt": self.reset}}}
 
+        checkpoint = self.work_result("partial", remaining=["Finish after the weekly budget is raised."])
         accounts = self.claude_pool_fixture(runs=[
-            {"limits_before": limits(0.50), "limits": limits(0.52), "reply": self.work_result()},
-            {"limits": limits(0.56), "reply": self.work_result()}])
+            {"limits_before": limits(0.50), "limits": limits(0.51), "reply": self.work_result()},
+            {"mode": "hold", "limits_before": limits(0.51), "limits": limits(0.56)},
+            {"limits_before": limits(0.56), "limits": limits(0.56), "reply": checkpoint}])
+        worker = self.worker()
+        for account in accounts:
+            worker.claude_accounts.save_limits(account["name"], limits(0.40))
         self.start("claude-executor-weekly", "--executor", "claude", "--max-weekly", "5")
         self.wait("claude-executor-weekly")
-        self.assertAlmostEqual(self.state("claude-executor-weekly")["weekly_used_percent"], 2)
+        initial = self.state("claude-executor-weekly")
+        self.assertAlmostEqual(initial["weekly_used_percent"], 1)
+        self.assertEqual(initial["outcome"], "completed")
+        self.assertEqual(initial["result"], self.work_result())
+        self.assertEqual(len(self.claude_invocations()), 1)
+        self.assertFalse(initial.get("wrapup"))
         self.cli("say", "claude-executor-weekly", "Finish the remaining work.", "--review")
         output = self.wait("claude-executor-weekly")
         state = self.state("claude-executor-weekly")
@@ -241,11 +281,16 @@ class ReviewFixTests(RotationTestCase):
         self.assertEqual(state["turn_stop"]["weekly"], 5)
         self.assertAlmostEqual(state["weekly_used_percent"], 6)
         self.assertAlmostEqual(state["turn_stop"]["spent"], 6)
+        self.assertEqual(state["result"], checkpoint)
+        self.assertEqual(state["wrapup"], {"outcome": "completed", "result": checkpoint})
+        work, interrupted, wrapup = self.claude_invocations()
+        self.assertEqual(wrapup["argv"][wrapup["argv"].index("--resume") + 1], work["session_id"])
+        self.assertEqual(interrupted["session_id"], work["session_id"])
         self.assertEqual(self.invocations(), [], "weekly budget must skip the Codex review")
         self.assertIn("weekly budget 5% exhausted", output)
         rows = [row for row in self.phase_telemetry_journal() if row["phase"] == "work"]
         self.assertEqual(len(rows), 2)
-        for row, before, after, spent in zip(rows, (50, 52), (52, 56), (2, 4)):
+        for row, before, after, spent in zip(rows, (50, 51), (51, 56), (1, 5)):
             self.assertAlmostEqual(row["weekly_used_before"], before)
             self.assertAlmostEqual(row["weekly_used_after"], after)
             self.assertAlmostEqual(row["weekly_spent"], spent)

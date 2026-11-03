@@ -99,7 +99,7 @@ def cmd_start(a):
     proc = supervisor.spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
         st = task_state.load(a.slug)
-        if st["thread"] or st.get("claude_pid") or st.get("session_id") or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
+        if st["thread"] or st.get("session_id") or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
             break
         time.sleep(0.1)
     account = st.get("claude_account") if executor == "claude" else st["account"]
@@ -261,7 +261,7 @@ def describe(st, detail):
         line += f"\nmodel {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
-    if st.get("error"):
+    if executor == "claude" and st.get("error"):
         line += "\n" + st["error"]
     switch = st.get("base_switch")
     if switch:

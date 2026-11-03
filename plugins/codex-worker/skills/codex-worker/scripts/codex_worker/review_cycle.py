@@ -126,6 +126,7 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
     st["review_account"] = None
     records = []
+    codex_effort = None if st.get("executor") == "claude" and effort == "max" else effort
     used_accounts = {st["claude_account"]} if st.get("executor") == "claude" and st.get("claude_account") else set()
     result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
@@ -150,9 +151,9 @@ def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=
                 if outcome == "unavailable" and not stopped():
                     reviewer = "codex"
                     st["review_account"] = None
-                    turns.run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
+                    turns.run_turn(st, cfg, focused, codex_effort, False, stopped, sleep, new_turn=new_turn)
             else:
-                turns.run_turn(st, cfg, focused, effort, False, stopped, sleep, new_turn=new_turn)
+                turns.run_turn(st, cfg, focused, codex_effort, False, stopped, sleep, new_turn=new_turn)
             reviews = [entry for entry in st.get("reviews", [])[start:] if not entry.get("unavailable")]
             outcome = task_state.stop_outcome(st, stopped) or st["outcome"]
             result = reviews[-1].get("result") if reviews else None

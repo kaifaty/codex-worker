@@ -1,16 +1,7 @@
 """Work turns, wrap-up turns and turn execution."""
 import json
 
-from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_review, claude_runner, clock, config, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
-
-
-def claude_weekly_window(account):
-    window = (claude_accounts.read_limits().get(account, {}).get("unifiedWindows") or {}).get("seven_day") or {}
-    used, reset = window.get("utilization"), window.get("resetsAt")
-    if (result_schema.is_finite_number(used) and 0 <= used <= 1
-            and result_schema.is_finite_number(reset) and reset > clock.CLOCK.time()):
-        return used * 100, reset
-    return None, None
+from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_review, claude_runner, clock, config, notifications, prompts, publishing, task_state, telemetry_log, threads, turn_monitor
 
 
 def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
@@ -21,19 +12,22 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
     settings = cfg["claude"]
     minutes = 10 if wrapup else st.get("max_turn_minutes", cfg.get("max_turn_minutes"))
     deadline = None if minutes is None else clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
-    weekly_before, reset_before = claude_weekly_window(account["name"])
+    weekly_before = weekly_after = None
+    weekly_spent = 0
     weekly_stopped = False
 
-    def cancelled():
-        nonlocal weekly_stopped
-        if stopped():
-            return True
-        after, reset = claude_weekly_window(account["name"])
-        spent = max(0, after - weekly_before) if after is not None and weekly_before is not None and reset == reset_before else 0
+    def progress(telemetry):
+        nonlocal weekly_before, weekly_after, weekly_spent, weekly_stopped
+        session_id = telemetry.get("session_id")
+        if session_id and session_id != st.get("session_id"):
+            st["session_id"] = session_id
+            task_state.save(st)
+        weekly_before, weekly_after = telemetry.get("weekly_used_before"), telemetry.get("weekly_used_after")
+        weekly_spent = (max(0, weekly_after - weekly_before)
+                        if weekly_before is not None and weekly_after is not None else 0)
         budget = st.get("max_task_weekly_percent")
         weekly_stopped = (not wrapup and budget is not None
-                          and st.get("weekly_used_percent", 0) + spent >= budget)
-        return weekly_stopped
+                          and st.get("weekly_used_percent", 0) + weekly_spent >= budget)
 
     def started(proc):
         st["claude_pid"] = proc.pid
@@ -41,11 +35,11 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
 
     try:
         response = claude_runner.run_work_turn(
-            account, st["worktree"], directory, prompt, cancelled,
+            account, st["worktree"], directory, prompt, lambda: stopped() or weekly_stopped,
             session_id=st.get("session_id") or None,
             model=st.get("task_model") or settings.get("model"),
-            effort=effort or settings.get("effort"), max_turns=settings.get("max_turns"),
-            deadline=deadline, started=started)
+            effort=effort or settings.get("effort"),
+            deadline=deadline, started=started, progress=progress)
     finally:
         st.pop("claude_pid", None)
         task_state.save(st)
@@ -53,15 +47,6 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
     if telemetry.get("session_id"):
         st["session_id"] = telemetry["session_id"]
     st.update(model=telemetry.get("model"), reasoning_effort=telemetry.get("reasoning_effort"))
-    cached_after, reset_after = claude_weekly_window(account["name"])
-    if weekly_before is None:
-        weekly_before = telemetry.get("weekly_used_before")
-    weekly_after = telemetry.get("weekly_used_after")
-    if weekly_after is None:
-        weekly_after = cached_after
-    weekly_spent = (max(0, weekly_after - weekly_before)
-                    if weekly_before is not None and weekly_after is not None
-                    and (reset_before is None or reset_before == reset_after) else 0)
     st["weekly_used_percent"] = st.get("weekly_used_percent", 0) + weekly_spent
     phase = telemetry_log.telemetry_phase(st)
     if phase is not None:

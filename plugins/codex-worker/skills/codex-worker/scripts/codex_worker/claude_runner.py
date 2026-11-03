@@ -98,7 +98,7 @@ def validate_work_effort(effort):
 
 
 def run_work_turn(account, worktree, task_dir, prompt, stopped, session_id=None,
-                  model=None, effort=None, max_turns=None, deadline=None, started=None):
+                  model=None, effort=None, max_turns=None, deadline=None, started=None, progress=None):
     """Run a writable turn without supervisor task state.
 
     The caller supplies an existing task directory and a monotonic deadline.
@@ -109,13 +109,13 @@ def run_work_turn(account, worktree, task_dir, prompt, stopped, session_id=None,
     system_prompt = sandboxing.claude_system_prompt(worktree, task_dir)
     try:
         return run_claude(account, worktree, prompt, stopped, deadline, model, effort, max_turns,
-                          session_id=session_id, system_prompt=system_prompt, started=started)
+                          session_id=session_id, system_prompt=system_prompt, started=started, progress=progress)
     finally:
         system_prompt.unlink(missing_ok=True)
 
 
 def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, effort=None,
-               max_turns=None, *, session_id=None, system_prompt=None, reviewing=False, started=None):
+               max_turns=None, *, session_id=None, system_prompt=None, reviewing=False, started=None, progress=None):
     """Execute and drain one stream; callers own role-specific lifecycle state."""
     response = {"outcome": "unavailable", "result": None, "reason": None, "deadline": deadline,
                 "telemetry": {"usage": {}, "cost_usd": None, "session_id": None,
@@ -244,6 +244,8 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                             response["result"] = None
                         elif result is not None and response["reason"] is None:
                             response["result"] = result
+                        if not reviewing and progress is not None:
+                            progress(response["telemetry"])
                 if response["reason"] and termination is None:
                     # Drain buffered and shutdown usage while terminating, even
                     # when the final result is larger than the stdout pipe.
