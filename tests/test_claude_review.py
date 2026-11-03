@@ -66,7 +66,11 @@ def trace(value):
 def emit(value):
     print(json.dumps(value), flush=True)
 
+session_id = sys.argv[sys.argv.index("--resume") + 1] if "--resume" in sys.argv else str(uuid.uuid4())
+system_prompt = (Path(sys.argv[sys.argv.index("--append-system-prompt-file") + 1]).read_text()
+                 if "--append-system-prompt-file" in sys.argv else None)
 trace({"command": "review", "argv": sys.argv[1:], "cwd": os.getcwd(),
+       "session_id": session_id, "system_prompt": system_prompt,
        "token_matches": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "fixture-claude-reviewer-oauth-secret",
        "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
        "inherited_provider_keys": sorted(key for key in os.environ
@@ -81,7 +85,9 @@ def interrupted(signum, frame):
 
 signal.signal(signal.SIGINT, interrupted)
 signal.signal(signal.SIGTERM, interrupted)
-emit({"type": "system", "subtype": "init", "session_id": str(uuid.uuid4()), "model": "fake-claude"})
+emit({"type": "system", "subtype": "init", "session_id": session_id, "model": "fake-claude"})
+if run.get("limits_before"):
+    emit({"type": "rate_limit_event", "rate_limit_info": run["limits_before"]})
 if run.get("delay"):
     clock.sleep(run["delay"])
 if run.get("gate"):
@@ -123,6 +129,18 @@ if mode == "move_head":
 if mode == "invalid_json":
     print('{"type":"result",broken', flush=True)
     sys.exit(0)
+if run.get("non_json"):
+    print(run["non_json"], flush=True)
+for filename, content in run.get("write_files", {}).items():
+    Path(filename).parent.mkdir(parents=True, exist_ok=True)
+    Path(filename).write_text(content)
+if run.get("commit_files"):
+    import subprocess
+    subprocess.run(["git", "add", "--"] + run["commit_files"], check=True)
+    subprocess.run(["git", "commit", "-qm", "Implement fixture task"], check=True)
+if run.get("push"):
+    import subprocess
+    subprocess.run(["git", "push", "--quiet", "-u", "origin", "HEAD"], check=True)
 emit({"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Bash",
       "input": {"command": "git diff --stat"}}]}})
 emit({"type": "user", "message": {"content": [{"type": "tool_result", "content": "fixture diff"}]}})
@@ -145,6 +163,7 @@ if mode == "rejected_buffered":
                 + json.dumps(result) + "\n").encode())
 else:
     emit(result)
+sys.exit(run.get("exit_code", 0))
 '''
 
 
@@ -201,10 +220,11 @@ class ClaudeReviewTests(RotationTestCase):
                 path = Path(argv[argv.index("--append-system-prompt-file") + 1])
                 self.assertEqual(path.parent, task_dir)
                 prompts.append(path)
-                text = path.read_text()
+                text = entry["system_prompt"]
                 self.assertIn("git worktree", text)
                 self.assertIn("Root task instructions.\n", text)
                 self.assertIn("nested AGENTS.md", text)
+                self.assertFalse(path.exists())
         self.assertNotEqual(*prompts)
         self.assertEqual((self.repo / "reviewer-change.txt").read_text(),
                          "Reviewer must leave this visible.\n")
@@ -223,7 +243,7 @@ class ClaudeReviewTests(RotationTestCase):
                 account, self.repo, task_dir, "Work.", lambda: False)
             self.assertEqual(response["outcome"], "completed")
             argv = self.claude_invocations()[-1]["argv"]
-            text = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text()
+            text = self.claude_invocations()[-1]["system_prompt"]
             self.assertIn("a" * 65536, text)
             self.assertIn("[AGENTS.md truncated at 64 KiB]", text)
             self.assertNotIn("ROOT-CONTENT-PAST-LIMIT", text)
@@ -232,11 +252,33 @@ class ClaudeReviewTests(RotationTestCase):
                 account, self.repo, task_dir, "Work again.", lambda: False)
             self.assertEqual(response["outcome"], "completed")
             argv = self.claude_invocations()[-1]["argv"]
-            text = Path(argv[argv.index("--append-system-prompt-file") + 1]).read_text()
+            text = self.claude_invocations()[-1]["system_prompt"]
             self.assertIn("git worktree", text)
             self.assertIn("nested AGENTS.md", text)
             self.assertEqual(len(text.strip().split("\n\n")), 2)
             self.assertNotIn("truncated", text)
+
+    def test_claude_work_turn_ignores_non_json_but_review_rejects_it(self):
+        diagnostic = "Unexpected stream output " + TEST_TOKEN
+        self.claude_fixture(runs=[{"reply": self.work_result(), "non_json": diagnostic},
+                                  {"reply": self.review_result(False), "non_json": diagnostic}])
+        worker = self.worker()
+        account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
+        task_dir = self.root / "work-turn-task"
+        task_dir.mkdir()
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            response = worker.claude_review.claude_runner.run_work_turn(
+                account, self.repo, task_dir, "Work.", lambda: False)
+            self.assertEqual(response["outcome"], "completed")
+            self.assertEqual(response["result"], self.work_result())
+            self.assertEqual((task_dir / "stderr.log").read_text(),
+                             "Unexpected stream output [REDACTED]\n")
+            self.assertFalse(list(task_dir.glob("claude-system-*.md")))
+            response = worker.claude_review.claude_runner.run_claude(
+                account, self.repo, "Review.", lambda: False, reviewing=True)
+            self.assertEqual(response["outcome"], "unavailable")
+            self.assertEqual(response["reason"], "invalid JSON output")
+            self.assertIsNone(response["result"])
 
     def test_claude_work_turn_unknown_results_and_unavailable_accounts(self):
         rejected = {"status": "rejected", "utilization": 1, "resetsAt": self.reset,
@@ -245,6 +287,8 @@ class ClaudeReviewTests(RotationTestCase):
             {"reply": {"status": "done"}, "text": "Final invalid answer " + TEST_TOKEN},
             {"omit_structured_output": True, "omit_result_text": True,
              "assistant_text": "Last assistant answer."},
+            {"omit_structured_output": True, "text": "Failed final answer.", "exit_code": 9},
+            {"mode": "is_error", "text": "Reported work failure."},
             {"limits": rejected, "reply": self.work_result()},
             {"mode": "auth_error", "status": 401}])
         worker = self.worker()
@@ -256,9 +300,17 @@ class ClaudeReviewTests(RotationTestCase):
                 response = worker.claude_review.claude_runner.run_work_turn(
                     account, self.repo, task_dir, "Work.", lambda: False)
                 self.assertEqual(response["outcome"], "unknown")
+                self.assertEqual(response["reason"], "invalid structured output")
                 self.assertIsNone(response["result"])
                 self.assertEqual(response["raw_message"], expected_raw)
                 self.assertIn(expected_raw, worker.result_schema.result_lines(None, response["raw_message"]))
+            for expected_raw in ("Failed final answer.", "Reported work failure."):
+                response = worker.claude_review.claude_runner.run_work_turn(
+                    account, self.repo, task_dir, "Work.", lambda: False)
+                self.assertEqual(response["outcome"], "unknown")
+                self.assertEqual(response["reason"], "work turn failed")
+                self.assertIsNone(response["result"])
+                self.assertEqual(response["raw_message"], expected_raw)
             response = worker.claude_review.claude_runner.run_work_turn(
                 account, self.repo, task_dir, "Work.", lambda: False)
             self.assertEqual(response["outcome"], "unavailable")
@@ -271,6 +323,7 @@ class ClaudeReviewTests(RotationTestCase):
                 account, self.repo, task_dir, "Work.", lambda: False)
             self.assertEqual(response["outcome"], "unavailable")
             self.assertEqual(response["reason"], "authentication failed")
+        self.assertFalse(list(task_dir.glob("claude-system-*.md")))
 
     def test_claude_work_turn_stop_deadline_and_invalid_effort(self):
         self.enable_fake_clock(auto_advance=False)
@@ -310,6 +363,7 @@ class ClaudeReviewTests(RotationTestCase):
                     self.assertFalse(self.process_is_live(pid))
                     self.assertTrue(any(event["command"] == "signal" and event["signal"] == 2
                                         and event["pid"] == pid for event in trace))
+                self.assertFalse(list(task_dir.glob("claude-system-*.md")))
 
     def claude_fixture(self, runs=None, **settings):
         self.claude = self.root / "claude"

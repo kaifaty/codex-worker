@@ -135,6 +135,9 @@ def thread_messages(st):
 
 
 def last_message(st):
+    if st.get("executor") == "claude":
+        last = config.TASKS / st["slug"] / "last.md"
+        return last.read_text(encoding="utf-8").strip() if last.exists() else ""
     msgs = thread_messages(st)
     return msgs[-1] if msgs else ""
 
@@ -149,7 +152,7 @@ def followup_prompt(st, message, cfg, source="claude"):
     with (config.TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"at": clock.CLOCK.time(), "text": message, "source": source},
                                 ensure_ascii=False) + "\n")
-    if st.get("thread"):
+    if st.get("thread") or st.get("session_id"):
         switch = st.get("base_switch")
         if switch:
             message += (f"\n\nТеперь база задачи — {st['base']}; используй её вместо {switch['from']}."

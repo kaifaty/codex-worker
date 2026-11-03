@@ -109,7 +109,7 @@ st[dynamic_key] = 1
         unused = registered - used
         self.assertFalse(missing, "Unregistered state keys: " + ", ".join(sorted(missing)))
         self.assertFalse(unused, "Unused state registry keys: " + ", ".join(sorted(unused)))
-        self.assertEqual(len(registered), 84)
+        self.assertEqual(len(registered), 88)
         for key, field in self.worker.task_state.STATE_FIELDS.items():
             with self.subTest(key=key):
                 self.assertIn(field.lifetime, {"task", "history", "cursor", "turn", "attempt", "runtime"})
@@ -117,6 +117,7 @@ st[dynamic_key] = 1
     def complete_state(self):
         st = {
             "account": "old-work", "account_ids": {"old-work": "old-identity"},
+            "executor": "claude", "claude_account": "old-claude", "session_id": "old-session",
             "auth_excluded": ["old-work"], "auth_excluded_ids": ["old-identity"],
             "auth_failures": {"old-work": 2}, "auth_transitions": 2,
             "auto_fix_escalations": [{"id": "F1"}], "auto_fix_stop": "old-stop",
@@ -127,7 +128,7 @@ st[dynamic_key] = 1
             "check": "python3 check.py", "check_paths": ["check.py"], "check_pid": 101,
             "check_start": 19, "check_timeout": 42, "checks": [{}, {}, {}],
             "ci": {"status": "failed"}, "ci_enabled": True, "ci_command": "true", "ci_rounds": 3,
-            "ci_timeout_minutes": 17, "codex_pid": 102, "created": 1000,
+            "ci_timeout_minutes": 17, "codex_pid": 102, "claude_pid": 104, "created": 1000,
             "effort": "high", "error": "old-error", "event_start": 18,
             "task_type": "fix", "model": "old-model", "reasoning_effort": "high",
             "task_model": "work-model", "review_model": "review-model",
@@ -222,7 +223,7 @@ st[dynamic_key] = 1
         return self.worker.task_state.load("registry-test")
 
     def test_load_keeps_the_same_defaults_and_insertion_order(self):
-        expected = {"account": "main", "threads": [], "rotations": [], "reviews": [],
+        expected = {"account": "main", "executor": "codex", "threads": [], "rotations": [], "reviews": [],
                     "checks": [], "turn_stops": [], "result": None, "fix_rounds": 0, "rounds": [],
                     "guards": [], "base_check": False, "sandbox": "off", "writable_dirs": [],
                     "reviewer": "codex"}

@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import accounts, budgets, claude_accounts, claude_review, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, threads
+from . import accounts, budgets, claude_accounts, claude_review, claude_runner, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, threads
 
 
 def main_repo(path):
@@ -29,8 +29,17 @@ def cmd_start(a):
     no_push = getattr(a, "no_push", False)
     if no_push and (a.ci or a.ci_command is not None):
         procs.die("--no-push cannot be combined with --ci or --ci-command; CI requires a published branch")
-    reviewer = getattr(a, "reviewer", None) or cfg["reviewer"]
-    if reviewer == "claude":
+    executor = getattr(a, "executor", None) or cfg["executor"]
+    reviewer = getattr(a, "reviewer", None) or ("codex" if executor == "claude" else cfg["reviewer"])
+    sandbox = a.sandbox if a.sandbox is not None else cfg["sandbox"]
+    if executor == "claude" and sandbox != "off":
+        procs.die("--executor claude supports only --sandbox off; --sandbox workspace is not supported")
+    if executor == "claude":
+        try:
+            claude_runner.validate_work_effort(a.effort or cfg["claude"].get("effort"))
+        except ValueError as exc:
+            procs.die(str(exc))
+    if executor == "claude" or reviewer == "claude":
         config.require_claude()
     if (config.TASKS / a.slug).exists():
         procs.die(f"task {a.slug!r} exists; pick another slug or clean it")
@@ -40,7 +49,6 @@ def cmd_start(a):
     brief = sys.stdin.read() if a.brief == "-" else Path(a.brief).read_text()
     if not brief.strip():
         procs.die("empty brief")
-    sandbox = a.sandbox if a.sandbox is not None else cfg["sandbox"]
     rules = sandboxing.rules_text(cfg, no_push=no_push)
     if sandbox == "workspace":
         rules += "\n\n" + sandboxing.sandbox_rules(cfg, no_push=no_push)
@@ -71,7 +79,7 @@ def cmd_start(a):
             'report that with the numbers instead of fixing it.')
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
-          "effort": a.effort, "task_type": a.task_type,
+          "executor": executor, "effort": a.effort, "task_type": a.task_type,
           "task_model": None if getattr(a, "model", None) == "default" else getattr(a, "model", None),
           "review_model": None if getattr(a, "review_model", None) == "default" else getattr(a, "review_model", None),
           "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
@@ -91,10 +99,12 @@ def cmd_start(a):
     proc = supervisor.spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
         st = task_state.load(a.slug)
-        if st["thread"] or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
+        if st["thread"] or st.get("session_id") or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
             break
         time.sleep(0.1)
-    print(f"started {a.slug}: account {st['account']}, thread {st['thread'] or '?'}, pid {st.get('pid')}\n  worktree {wt}\n  branch {branch}")
+    account = st.get("claude_account") if executor == "claude" else st["account"]
+    cursor = ("session " + (st.get("session_id") or "?")) if executor == "claude" else "thread " + (st["thread"] or "?")
+    print(f"started {a.slug}: executor {executor}, account {account or '?'}, {cursor}, pid {st.get('pid')}\n  worktree {wt}\n  branch {branch}")
     print(f"  wait: {config.SCRIPT} wait {a.slug}   (run it as a background command)")
 
 
@@ -156,6 +166,12 @@ def cmd_say(a):
     if not msg or not msg.strip():
         procs.die("empty message")
     cfg = config.accounts_config()
+    if st.get("executor") == "claude":
+        try:
+            claude_runner.validate_work_effort(a.effort or st.get("effort") or cfg["claude"].get("effort"))
+        except ValueError as exc:
+            procs.die(str(exc))
+        config.require_claude()
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     if getattr(a, "model", None) is not None:
         st["task_model"] = None if a.model == "default" else a.model
@@ -224,6 +240,9 @@ def describe(st, detail):
     reviewing = st.get("kind") == "review"
     scouting = st.get("kind") == "scout"
     account, thread = st["account"], st.get("thread", "")
+    executor = st.get("executor", "codex")
+    if executor == "claude":
+        account, thread = st.get("claude_account") or "?", st.get("session_id") or ""
     if reviewing:
         account, thread = st.get("review_account") or "?", ""
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
@@ -232,14 +251,18 @@ def describe(st, detail):
     location = st["worktree"] if scouting else st["branch"]
     label = "  scout" if scouting else ("  review" if reviewing else "")
     line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {location}  "
-            f"account {account}  thread {thread[:13]}" + label
+            f"executor {executor}  account {account}  {'session' if executor == 'claude' and not reviewing else 'thread'} {thread[:13]}" + label
             + "  sandbox " + ("read-only" if scouting else st.get("sandbox", "off")))
     if st.get("no_push"):
         line += "  push disabled (--no-push)"
+    if executor == "claude" and reviewing:
+        line += f"\nClaude work account {st.get('claude_account') or '?'}, session {st.get('session_id') or '?'}"
     if st.get("task_model"):
         line += f"\nmodel {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
+    if executor == "claude" and st.get("error"):
+        line += "\n" + st["error"]
     switch = st.get("base_switch")
     if switch:
         line += f"\nbase {switch['from']} is gone; checked against {switch['to']}"

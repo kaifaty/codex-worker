@@ -1,6 +1,125 @@
 """Work turns, wrap-up turns and turn execution."""
+import json
 
-from . import account_rotation, accounts, budgets, checking, clock, config, notifications, prompts, publishing, task_state, telemetry_log, threads, turn_monitor
+from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_review, claude_runner, clock, config, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
+
+
+def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False):
+    """Run one pinned Claude session, sharing the work result and phase gates."""
+    directory = config.TASKS / st["slug"]
+    last = directory / "last.md"
+    last.unlink(missing_ok=True)
+    settings = cfg["claude"]
+    minutes = 10 if wrapup else st.get("max_turn_minutes", cfg.get("max_turn_minutes"))
+    deadline = None if minutes is None else clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
+    window = (claude_accounts.read_limits().get(account["name"], {}).get("unifiedWindows") or {}).get("seven_day") or {}
+    used, reset_before = window.get("utilization"), window.get("resetsAt")
+    weekly_before = (used * 100 if result_schema.is_finite_number(used) and 0 <= used <= 1
+                     and result_schema.is_finite_number(reset_before) and reset_before > clock.CLOCK.time() else None)
+    weekly_after = None
+    weekly_spent = 0
+    weekly_stopped = False
+
+    def progress(telemetry):
+        nonlocal weekly_before, reset_before, weekly_after, weekly_spent, weekly_stopped
+        session_id = telemetry.get("session_id")
+        if session_id and session_id != st.get("session_id"):
+            st["session_id"] = session_id
+            task_state.save(st)
+        if weekly_before is None:
+            weekly_before, reset_before = telemetry.get("weekly_used_before"), telemetry.get("weekly_reset_before")
+        weekly_after = telemetry.get("weekly_used_after")
+        if weekly_before is not None and weekly_after is not None:
+            weekly_spent = (weekly_after if telemetry["weekly_reset_after"] > reset_before
+                            else max(0, weekly_after - weekly_before))
+        budget = st.get("max_task_weekly_percent")
+        weekly_stopped = (not wrapup and budget is not None
+                          and st.get("weekly_used_percent", 0) + weekly_spent >= budget)
+
+    def started(proc):
+        st["claude_pid"] = proc.pid
+        task_state.save(st)
+
+    try:
+        response = claude_runner.run_work_turn(
+            account, st["worktree"], directory, prompt, lambda: stopped() or weekly_stopped,
+            session_id=st.get("session_id") or None,
+            model=st.get("task_model") or settings.get("model"),
+            effort=effort or settings.get("effort"),
+            deadline=deadline, started=started, progress=progress)
+    finally:
+        st.pop("claude_pid", None)
+        task_state.save(st)
+    telemetry = response["telemetry"]
+    if telemetry.get("session_id"):
+        st["session_id"] = telemetry["session_id"]
+    st.update(model=telemetry.get("model"), reasoning_effort=telemetry.get("reasoning_effort"))
+    st["weekly_used_percent"] = st.get("weekly_used_percent", 0) + weekly_spent
+    phase = telemetry_log.telemetry_phase(st)
+    if phase is not None:
+        phase.add_claude_usage(telemetry, account=account["name"], weekly_before=weekly_before,
+                              weekly_after=weekly_after, weekly_spent=weekly_spent)
+    result = response["result"]
+    outcome = task_state.stop_outcome(st, stopped) or response["outcome"]
+    if outcome == "unknown":
+        if response["reason"] in ("invalid structured output", "invalid JSON output"):
+            outcome, result = "completed", result_schema.parse_result(response["raw_message"])
+        else:
+            outcome = "failed"
+    if weekly_stopped and not stopped() and outcome != "failed":
+        outcome = "completed" if result is not None else "budget_exhausted"
+    if wrapup:
+        st["wrapup"].update(outcome=outcome, result=result if outcome == "completed" else None)
+    else:
+        st.update(outcome=outcome, result=result)
+    if response["raw_message"] or outcome == "completed":
+        last.write_text(response["raw_message"] or json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
+    if outcome == "unavailable":
+        reason = response.get("reason") or "account unavailable"
+        st["error"] = f"No available Claude account: {account['name']} ({reason})"
+        if reason in ("usage limit", "authentication failed", "token unavailable"):
+            claude_accounts.mark_limited(account["name"], token_unavailable=reason == "token unavailable")
+    elif response.get("reason") and outcome != "completed":
+        st["error"] = response["reason"]
+    task_state.save(st)
+    return outcome
+
+
+def run_claude_turn(st, cfg, prompt, effort, stopped):
+    """Select once; subsequent work turns may use only the task's account."""
+    pinned = st.get("claude_account")
+    excluded = [account["name"] for account in claude_accounts.accounts(cfg)
+                if pinned and account["name"] != pinned]
+    account = claude_review.select_account(cfg, "work", exclude=excluded, stopped=stopped)
+    if stopped():
+        st["outcome"] = task_state.stop_outcome(st, stopped)
+        return
+    if account is None:
+        st.update(outcome="unavailable", result=None,
+                  error="No available Claude account" + (f": {pinned}" if pinned else " in the pool"))
+        task_state.save(st)
+        return
+    st["claude_account"] = account["name"]
+    st.pop("error", None)
+    task_state.save(st)
+    outcome = claude_work_turn(st, cfg, prompt, effort, stopped, account)
+    if outcome == "budget_exhausted" and not stopped():
+        phase = telemetry_log.telemetry_phase(st)
+        if phase is not None:
+            phase.finish(outcome=outcome)
+        reason = ({"outcome": "budget_exhausted", "weekly": st["max_task_weekly_percent"],
+                   "spent": st["weekly_used_percent"]} if budgets.weekly_budget_exhausted(st) else
+                  {"outcome": "budget_exhausted", "minutes": st.get("max_turn_minutes", cfg.get("max_turn_minutes"))})
+        wrapup_turn(st, cfg, account, effort, stopped, reason)
+    elif budgets.weekly_budget_exhausted(st):
+        if outcome == "completed":
+            phase = telemetry_log.telemetry_phase(st)
+            if phase is not None:
+                phase.finish(outcome=outcome)
+            publishing.publish_work(st, stopped)
+            publishing.publish_pr(st, stopped)
+        budgets.stop_at_weekly_budget(st)
+        task_state.save(st)
 
 
 def wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
@@ -18,19 +137,25 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     st["wrapup"] = {"outcome": "not_run", "result": None}
     task_state.save(st)
     notifications.notify(st, cfg, reason["outcome"], turn_monitor.turn_stop_message(reason), account=account["name"], **reason)
+    claude_work = st.get("executor") == "claude" and st.get("kind") not in ("review", "scout")
     thread = ((review_entry or {}).get("thread") if st.get("kind") == "review"
+              else st.get("session_id") if claude_work
               else st.get("thread"))
     if not thread or stopped():
         return
     if st.get("kind") not in ("review", "scout"):
         st["result"] = None
     try:
-        control = turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3))
-        result, _ = turn_monitor.monitor(st, cfg, account, prompts.wrapup_prompt(st, reason, cfg), effort, stopped,
-                            lambda *args: None, control=control,
-                            wrapup=True, wrapup_thread=thread)
+        if claude_work:
+            result = claude_work_turn(st, cfg, prompts.wrapup_prompt(st, reason, cfg), effort,
+                                      stopped, account, wrapup=True)
+        else:
+            control = turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3))
+            result, _ = turn_monitor.monitor(st, cfg, account, prompts.wrapup_prompt(st, reason, cfg), effort, stopped,
+                                lambda *args: None, control=control,
+                                wrapup=True, wrapup_thread=thread)
         st["wrapup"]["outcome"] = result
-        if result in ("stuck", "budget_exhausted"):
+        if not claude_work and result in ("stuck", "budget_exhausted"):
             st["turn_stops"].append(dict(control.reason, turn=st.get("turns", 0), phase="wrapup",
                                          active_seconds=round(control.elapsed, 3), at=clock.CLOCK.time()))
     except (Exception, SystemExit) as exc:
@@ -60,6 +185,8 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
 def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
     st.pop("refusal", None)
+    if st.get("executor") == "claude" and st.get("kind") not in ("review", "scout"):
+        return run_claude_turn(st, cfg, prompt, effort, stopped)
     reviewing = st.get("kind") == "review"
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))

@@ -85,7 +85,7 @@ Codex. Settings belong in the `claude` object:
 | `token_keychain` | `"codex-worker-claude-reviewer"` | legacy macOS Keychain service, used when `accounts` is absent |
 | `model` | omitted | optional Claude `--model`, shared by all accounts |
 | `effort` | omitted | optional Claude `--effort`, shared by all accounts and independent of Codex `--effort` |
-| `max_turns` | `40` | positive integer passed as Claude `--max-turns`, shared by all accounts |
+| `max_turns` | `40` | positive integer passed as Claude review `--max-turns`, shared by all accounts; task work is uncapped |
 
 The top-level `soft_switch_at` and `switch_at` thresholds also apply to Claude's five-hour and
 seven-day windows. Below-soft accounts are preferred, then below-hard accounts, with the earliest

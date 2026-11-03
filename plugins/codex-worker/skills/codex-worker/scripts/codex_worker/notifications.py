@@ -21,7 +21,7 @@ def current_turn_account(st):
             return None
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         return st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
-    return st["account"]
+    return st.get("claude_account") if st.get("executor") == "claude" else st["account"]
 
 
 def unblock_notification_signals():

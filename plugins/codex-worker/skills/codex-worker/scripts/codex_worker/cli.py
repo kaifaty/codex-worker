@@ -1,6 +1,6 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--executor codex|claude] [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
   codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
   codex_task.py say <slug> "message" | --file FILE [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
   codex_task.py review <slug> [--effort E] [--review-model M] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
@@ -23,7 +23,7 @@ All commands accept -h/--help.
 soft_switch_at (same as switch_at),
 credits (false), credits_floor (0), credits_floor_until (none),
 wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
-reviewer (codex), claude (isolated reviewer settings), review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
+executor (codex), reviewer (codex), claude (isolated account pool settings), review_angles_min_lines (400), repeat_limit (3), sandbox (off), writable_dirs ([]), notify and notify_events.
 start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
 start/say --ci-command CMD enables CI via sh -c; say inherits it, and --no-ci-command removes it.
 say --ci/--no-ci enables/disables CI; --ci-rounds N replaces the saved round limit. ci_timeout_minutes defaults to 30.
@@ -123,14 +123,18 @@ OPTION_REGISTRY = (
     {"names": ("--no-push",),
      "argparse": {"action": "store_true", "help": "keep commits local; disable branch and PR publication and CI"},
      "synopsis": "[--no-push]", "commands": {"start": {}}},
+    {"names": ("--executor",),
+     "argparse": {"choices": ("codex", "claude"), "default": None,
+                  "help": "work provider saved for the task (default: executor setting, codex)"},
+     "synopsis": "[--executor codex|claude]", "commands": {"start": {}}},
     {"names": ("--file",), "argparse": {},
      "synopsis": "--file FILE", "commands": {"say": {}}},
     {"names": ("--effort",), "argparse": {"default": None},
      "synopsis": "[--effort E]",
-     "commands": {"start": {"help": "default: model_reasoning_effort from ~/.codex/config.toml"},
+     "commands": {"start": {"help": "default: executor configuration"},
                   "say": {}, "review": {}}},
     {"names": ("--model",),
-     "argparse": {"type": model_name, "metavar": "M", "help": "Codex work model; default clears the saved override"},
+     "argparse": {"type": model_name, "metavar": "M", "help": "work model; default clears the saved override"},
      "synopsis": "[--model M]", "commands": {"start": {}, "say": {}}},
     {"names": ("--review-model",),
      "argparse": {"type": model_name, "metavar": "M", "help": "Codex review model; default clears the saved override"},
@@ -158,7 +162,7 @@ OPTION_REGISTRY = (
      "synopsis": "[--review]", "commands": {"start": {}, "say": {}}},
     {"names": ("--reviewer",),
      "argparse": {"choices": ("codex", "claude"), "default": None,
-                  "help": "review provider (default: saved reviewer or reviewer setting, codex)"},
+                  "help": "review provider (default: saved reviewer; Claude work uses Codex reviews)"},
      "synopsis": "[--reviewer codex|claude]", "commands": {"start": {}, "say": {}, "review": {}}},
     {"names": ("--review-angles",),
      "argparse": {"type": review_angles, "metavar": "LIST",

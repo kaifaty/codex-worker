@@ -55,6 +55,18 @@ def event_result(event, telemetry, token, account, reviewing=True):
             if isinstance(value, str) and token not in value:
                 telemetry[key] = value
     if kind != "result":
+        if not reviewing and kind == "rate_limit_event":
+            info = event.get("rate_limit_info")
+            windows = info.get("unifiedWindows") if isinstance(info, dict) else None
+            window = windows.get("seven_day") if isinstance(windows, dict) else None
+            if isinstance(window, dict):
+                used, reset = window.get("utilization"), window.get("resetsAt")
+                if (result_schema.is_finite_number(used) and 0 <= used <= 1
+                        and result_schema.is_finite_number(reset) and reset > clock.CLOCK.time()):
+                    telemetry.setdefault("weekly_used_before", used * 100)
+                    telemetry.setdefault("weekly_reset_before", reset)
+                    telemetry["weekly_used_after"] = used * 100
+                    telemetry["weekly_reset_after"] = reset
         return None, stream_unavailable(event, account)
     usage = event.get("usage")
     if isinstance(usage, dict):
@@ -82,23 +94,30 @@ def event_result(event, telemetry, token, account, reviewing=True):
     return result, None
 
 
+def validate_work_effort(effort):
+    if effort is not None and effort not in ("low", "medium", "high", "xhigh", "max"):
+        raise ValueError("Invalid Claude effort: expected low, medium, high, xhigh, or max")
+
+
 def run_work_turn(account, worktree, task_dir, prompt, stopped, session_id=None,
-                  model=None, effort=None, max_turns=None, deadline=None):
+                  model=None, effort=None, max_turns=None, deadline=None, started=None, progress=None):
     """Run a writable turn without supervisor task state.
 
     The caller supplies an existing task directory and a monotonic deadline.
     An unparsed result returns outcome ``unknown``, result ``None``, and the
     last answer in ``raw_message``. Session and usage fields are in telemetry.
     """
-    if effort is not None and effort not in ("low", "medium", "high", "xhigh", "max"):
-        raise ValueError("Invalid Claude effort: expected low, medium, high, xhigh, or max")
+    validate_work_effort(effort)
     system_prompt = sandboxing.claude_system_prompt(worktree, task_dir)
-    return run_claude(account, worktree, prompt, stopped, deadline, model, effort, max_turns,
-                      session_id=session_id, system_prompt=system_prompt)
+    try:
+        return run_claude(account, worktree, prompt, stopped, deadline, model, effort, max_turns,
+                          session_id=session_id, system_prompt=system_prompt, started=started, progress=progress)
+    finally:
+        system_prompt.unlink(missing_ok=True)
 
 
 def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, effort=None,
-               max_turns=None, *, session_id=None, system_prompt=None, reviewing=False, started=None):
+               max_turns=None, *, session_id=None, system_prompt=None, reviewing=False, started=None, progress=None):
     """Execute and drain one stream; callers own role-specific lifecycle state."""
     response = {"outcome": "unavailable", "result": None, "reason": None, "deadline": deadline,
                 "telemetry": {"usage": {}, "cost_usd": None, "session_id": None,
@@ -173,6 +192,9 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                     response["outcome"] = "budget_exhausted"
                     break
                 if eof and proc.poll() is not None:
+                    if (not reviewing and proc.wait() != 0 and response["reason"] in
+                            (None, "invalid structured output", "invalid JSON output", failure)):
+                        response["reason"] = failure
                     if response["reason"] is None:
                         if proc.wait() != 0:
                             response["reason"] = failure
@@ -198,6 +220,12 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                         try:
                             event = json.loads(line)
                         except (ValueError, UnicodeError):
+                            if not reviewing:
+                                with (Path(system_prompt).parent / "stderr.log").open(
+                                        "a", encoding="utf-8") as errors:
+                                    errors.write(line.decode("utf-8", errors="replace").replace(
+                                        token, "[REDACTED]") + "\n")
+                                continue
                             response["reason"] = response["reason"] or "invalid JSON output"
                             response["result"] = None
                             continue
@@ -221,7 +249,11 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                             response["result"] = None
                         elif result is not None and response["reason"] is None:
                             response["result"] = result
-                if response["reason"] and termination is None:
+                        if not reviewing and progress is not None:
+                            progress(response["telemetry"])
+                if (response["reason"] and termination is None and
+                        (reviewing or response["reason"] not in
+                         ("invalid structured output", "invalid JSON output", failure))):
                     # Drain buffered and shutdown usage while terminating, even
                     # when the final result is larger than the stdout pipe.
                     termination = threading.Thread(target=procs.terminate, args=(proc,))
