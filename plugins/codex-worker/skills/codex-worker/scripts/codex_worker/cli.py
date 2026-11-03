@@ -7,7 +7,8 @@
   codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex_task.py status [<slug>]                       state, account and current thread
   codex_task.py stats <slug>                          codex-stats.py for every task thread
-  codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model] [--json]
+  codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model|executor|reviewer] [--json]
+  codex_task.py verdict <slug> accepted|revised|redone|dropped [--note TEXT]  record the lead's verdict
   codex_task.py stop <slug>                           interrupt without rotating
   codex_task.py clean <slug> [--keep-branch]          remove worktree, archive all threads
   codex_task.py accounts [--json] [--refresh]        read account limits and login status
@@ -38,7 +39,7 @@ import math
 import re
 import sys
 
-from . import commands, config, prompts, supervisor, wait_view
+from . import commands, config, prompts, supervisor, telemetry_log, wait_view
 
 
 HELP_TEXT = __doc__
@@ -256,6 +257,7 @@ COMMAND_HANDLERS = {
     "status": commands.cmd_status,
     "stats": commands.cmd_stats,
     "report": commands.cmd_report,
+    "verdict": commands.cmd_verdict,
     "stop": commands.cmd_stop,
     "clean": commands.cmd_clean,
     "accounts": commands.cmd_accounts,
@@ -301,8 +303,13 @@ def main():
     s.add_argument("--since", default="7d", metavar="7d|30d|YYYY-MM-DD")
     s.add_argument("--repo", help="repository directory name")
     s.add_argument("--slug")
-    s.add_argument("--by", help="group by task-type, effort, model, or comma-separated dimensions")
+    s.add_argument("--by", help="group by task-type, effort, model, executor, reviewer, "
+                   "or comma-separated dimensions")
     s.add_argument("--json", action="store_true")
+    s = sub.add_parser("verdict", help="record the lead's verdict on a task for report")
+    s.add_argument("slug")
+    s.add_argument("verdict", choices=telemetry_log.LEAD_VERDICTS)
+    s.add_argument("--note", help="short free-text note stored with the verdict")
     s = sub.add_parser("clean")
     s.add_argument("slug")
     s.add_argument("--keep-branch", action="store_true")

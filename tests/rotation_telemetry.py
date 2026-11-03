@@ -444,22 +444,27 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.assertEqual(report["by"], ["effort", "task-type"])
         self.assertEqual(report["groups"], [
             {"effort": "high", "task_type": "feature", "tasks": 2, "done_fraction": 0.5,
-             "median_rounds": 2, "median_active_minutes": 4, "median_weekly_used_percent": 7},
+             "median_rounds": 2, "median_active_minutes": 4, "median_weekly_used_percent": 7,
+             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
             {"effort": "high", "task_type": "fix", "tasks": 1, "done_fraction": 1,
-             "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3},
+             "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3,
+             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
             {"effort": "low", "task_type": "fix", "tasks": 1, "done_fraction": 1,
-             "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3},
+             "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3,
+             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
             {"effort": "unknown", "task_type": "unknown", "tasks": 1, "done_fraction": 0,
-             "median_rounds": 0, "median_active_minutes": 4, "median_weekly_used_percent": 9}])
+             "median_rounds": 0, "median_active_minutes": 4, "median_weekly_used_percent": 9,
+             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": None}])
         tasks = {task["slug"]: task for task in report["tasks"]}
         self.assertEqual((tasks["gamma"]["models"], tasks["gamma"]["reasoning_efforts"]),
                          (["model-b", "model-c"], ["low", "high"]))
         self.assertEqual((tasks["legacy"]["task_type"], tasks["legacy"]["models"],
                           tasks["legacy"]["reasoning_efforts"]), (None, [None], [None]))
         text = self.cli("report", "--repo", "repo", "--by", "effort,task-type")
-        self.assertIn("effort  task-type  tasks  done  median rounds  median minutes  median weekly %", text)
-        self.assertIn("high  feature  2  50.0%  2  4.0  7.00", text)
-        self.assertIn("unknown  unknown  1  0.0%  0  4.0  9.00", text)
+        self.assertIn("effort  task-type  tasks  done  median rounds  median minutes  median weekly %"
+                      "  accepted %  findings  checks %  ci %  follow-ups", text)
+        self.assertIn("high  feature  2  50.0%  2  4.0  7.00  n/a  n/a  n/a  n/a  0", text)
+        self.assertIn("unknown  unknown  1  0.0%  0  4.0  9.00  n/a  n/a  n/a  n/a  n/a", text)
         models = json.loads(self.cli("report", "--repo", "repo", "--by", "model,effort", "--json"))
         self.assertEqual([(group["model"], group["effort"], group["tasks"]) for group in models["groups"]],
                          [("model-a", "high", 2), ("model-b", "low", 1),
@@ -467,6 +472,122 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         plain = json.loads(self.cli("report", "--repo", "repo", "--json"))
         self.assertEqual(plain["summary"], report["summary"])
         self.assertNotIn("groups", plain)
+
+    def write_journal(self, rows):
+        (self.home / "codex-worker-log.jsonl").write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+
+    def test_report_by_executor_and_reviewer_uses_only_work_phase_models(self):
+        now = time.time()
+
+        def row(slug, phase, **values):
+            return dict(v=1, at=now - 100, repo="repo", slug=slug, created=now - 1000, phase=phase,
+                        kind="review" if phase == "review" else "work", turn=1, round=0,
+                        outcome="completed", **values)
+
+        self.write_journal([
+            row("codex-task", "work", model="gpt-5", reasoning_effort="high", result_status="done"),
+            row("codex-task", "review", reviewer="claude", model="claude-opus-5-5",
+                reasoning_effort="high", verdict="clean", findings=0, severe_findings=0),
+            # A Claude reviewer leaves its model in task state, so the final row repeats it.
+            row("codex-task", "turn", model="claude-opus-5-5", reasoning_effort="high", result_status="done"),
+            row("claude-task", "work", provider="claude", model="claude-sonnet-5-5",
+                reasoning_effort="medium", result_status="done"),
+            row("claude-task", "review", model="gpt-5", reasoning_effort="xhigh",
+                verdict="clean", findings=0, severe_findings=0),
+            row("claude-task", "turn", provider="claude", model="claude-sonnet-5-5",
+                reasoning_effort="medium", result_status="done")])
+
+        def groups(by):
+            report = json.loads(self.cli("report", "--by", by, "--json"))
+            return [tuple(group[key.replace("-", "_")] for key in by.split(",")) + (group["tasks"],)
+                    for group in report["groups"]]
+
+        self.assertEqual(groups("executor"), [("claude", 1), ("codex", 1)])
+        self.assertEqual(groups("reviewer"), [("claude", 1), ("codex", 1)])
+        self.assertEqual(groups("executor,reviewer"), [("claude", "codex", 1), ("codex", "claude", 1)])
+        self.assertEqual(groups("model,effort,executor"), [("claude-sonnet-5-5", "medium", "claude", 1),
+                                                           ("gpt-5", "high", "codex", 1)])
+
+    def test_report_groups_findings_checks_ci_and_follow_ups(self):
+        now = time.time()
+        rows = []
+
+        def add(slug, phase, turn=1, **values):
+            row = dict(v=1, at=now - 500 + len(rows), repo="repo", slug=slug, created=now - 1000,
+                       phase=phase, kind="review" if phase == "review" else "work", turn=turn,
+                       round=0, outcome="completed")
+            row.update(values)
+            rows.append(row)
+
+        # Three P1/P2 findings in the first review, follow-ups on turns 2 and 3 after done.
+        add("first", "work", result_status="done")
+        add("first", "review", angle="correctness", verdict="defects", findings=3, severe_findings=2)
+        add("first", "review", angle="security", verdict="defects", findings=1, severe_findings=1)
+        add("first", "fix", round=1, result_status="done")
+        add("first", "review", round=1, verdict="defects", findings=5, severe_findings=5)
+        add("first", "check", check_outcome="passed")
+        add("first", "check", check_outcome="failed")
+        add("first", "base_check", check_outcome="failed")
+        add("first", "turn", round=1, result_status="done", ci={"outcome": "passed"})
+        add("first", "work", turn=2, result_status="done")
+        add("first", "work", turn=3, result_status="done")
+        # One finding; done on turn 2 without later follow-ups.
+        add("second", "work", result_status="partial")
+        add("second", "work", turn=2, result_status="done")
+        add("second", "review", turn=2, verdict="defects", findings=2, severe_findings=1)
+        add("second", "check", turn=2, check_outcome="passed")
+        add("second", "turn", turn=2, result_status="done", ci={"outcome": "failed"})
+        # No done result and no review: excluded from findings and follow-ups.
+        add("third", "work", result_status="blocked")
+        self.write_journal(rows)
+
+        group, = json.loads(self.cli("report", "--by", "executor", "--json"))["groups"]
+        self.assertEqual(group["tasks"], 3)
+        self.assertEqual(group["average_first_review_findings"], 2)
+        self.assertAlmostEqual(group["check_pass_fraction"], 2 / 3)
+        self.assertEqual(group["ci_pass_fraction"], 0.5)
+        self.assertEqual(group["median_follow_ups"], 1)
+        self.assertIsNone(group["accepted_fraction"])
+        text = self.cli("report", "--by", "executor")
+        self.assertIn("  2.00  66.7%  50.0%  1", text)
+
+    def test_verdict_records_latest_lead_verdict_for_active_and_cleaned_tasks(self):
+        self.configure(language="en")
+        for slug in ("verdict-active", "verdict-cleaned"):
+            self.start(slug)
+            self.wait(slug)
+        self.until(lambda: len([row for row in self.telemetry_journal() if row.get("phase") == "turn"]) == 2)
+        created = self.state("verdict-cleaned")["created"]
+
+        self.assertIn("verdict accepted recorded for verdict-active", self.cli("verdict", "verdict-active", "accepted"))
+        self.assertNotIn("no lead verdict", self.cli("clean", "verdict-active"))
+        cleaned = self.cli("clean", "verdict-cleaned")
+        self.assertIn("no lead verdict for verdict-cleaned; record it: verdict verdict-cleaned "
+                      "accepted|revised|redone|dropped [--note TEXT]", cleaned)
+        self.cli("verdict", "verdict-cleaned", "accepted")
+        self.cli("verdict", "verdict-cleaned", "redone", "--note", "rewritten by hand")
+        verdicts = [row for row in self.telemetry_journal() if row.get("kind") == "verdict"]
+        self.assertEqual([(row["slug"], row["repo"], row["verdict"], row["note"]) for row in verdicts],
+                         [("verdict-active", "repo", "accepted", None),
+                          ("verdict-cleaned", "repo", "accepted", None),
+                          ("verdict-cleaned", "repo", "redone", "rewritten by hand")])
+        self.assertEqual(verdicts[-1]["created"], created)
+
+        for args, code, message in ((("verdict-active", "great"), 2, "invalid choice: 'great'"),
+                                    (("verdict-missing", "accepted"), 1, "no task 'verdict-missing'")):
+            result = subprocess.run([PYTHON, "-I", str(SCRIPT), "verdict", *args], cwd=self.repo,
+                                    env=self.env, text=True, capture_output=True, timeout=15)
+            self.assertEqual(result.returncode, code, result.stdout + result.stderr)
+            self.assertIn(message, result.stderr)
+
+        report = json.loads(self.cli("report", "--by", "executor", "--json"))
+        self.assertEqual({task["slug"]: (task["lead_verdict"], task["lead_note"]) for task in report["tasks"]},
+                         {"verdict-active": ("accepted", None), "verdict-cleaned": ("redone", "rewritten by hand")})
+        self.assertEqual(report["groups"][0]["accepted_fraction"], 0.5)
+        text = self.cli("report")
+        header, *lines = text.split("Tasks by cost:\n", 1)[1].splitlines()
+        column = header.split("  ").index("lead verdict")
+        self.assertEqual(sorted(line.split("  ")[column] for line in lines), ["accepted", "redone"])
 
     def test_report_uses_merged_turn_result_after_an_angle_wrapup_is_refused(self):
         # Allow process startup under parallel load before the second angle's cap.
