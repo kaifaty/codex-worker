@@ -65,7 +65,7 @@ The grouped table has these columns (JSON group keys in brackets):
 | `median minutes` [`median_active_minutes`] | Median active minutes. |
 | `median weekly %` [`median_weekly_used_percent`] | Median weekly percentage points of the account plan that ran each phase. |
 | `accepted %` [`accepted_fraction`] | Fraction of tasks with the lead verdict `accepted` among tasks with a verdict. |
-| `findings` [`average_first_review_findings`] | Mean number of P1 and P2 findings in the task's first review round, summed over its completed angles. Tasks without a first review, or with journal rows older than the severity count, are left out. |
+| `findings` [`average_first_review_findings`] | Mean number of P1 and P2 findings in the task's first review round, merged across its completed angles: a defect found by several angles counts once, at its strongest severity. Tasks without a first review, or with journal rows older than the severity count, are left out. |
 | `checks %` [`check_pass_fraction`] | Passed `--check` runs among all of the group's `--check` runs; base checks are not counted. |
 | `ci %` [`ci_pass_fraction`] | Passed CI results among the group's recorded CI results, counted like `CI passed` in the summary. |
 | `follow-ups` [`median_follow_ups`] | Median number of `say` turns the lead sent after the task's first `done` result; tasks that never reached `done` are left out. Fix rounds and CI repairs are not follow-ups. |
@@ -122,7 +122,7 @@ Creation time identifies each task, so reusing a slug after `clean` produces a s
   verdict. The final turn journal row and report record `auto_fix_stop`, including `escalate`;
   escalated turns do not count as rounds to clean.
 - Final turn rows record the CI outcome. `report` prints `CI passed: N/M`.
-- Review rows record `findings` and `severe_findings`, the number of P1 and P2 findings.
+- Review rows record `findings` and `severe_findings`, the number of P1 and P2 findings the angle adds to the round's merged review.
 
 ## Weekly usage accounting
 

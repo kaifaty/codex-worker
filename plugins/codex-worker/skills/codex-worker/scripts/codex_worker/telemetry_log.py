@@ -141,6 +141,29 @@ def record_turn_result(st, stopped):
         telemetry_error(st, exc)
 
 
+def new_severe_findings(merged, result):
+    """Count P1/P2 findings this angle adds to the angles merged so far.
+
+    Mirrors review_cycle.merge_reviews: one defect found by several angles counts
+    once, at its strongest severity, so the angle rows of a round sum to the merged count.
+    """
+    severities = {}
+
+    def add(findings):
+        for item in findings or []:
+            if isinstance(item, dict) and isinstance(item.get("title"), str) and item.get("severity") in ("P1", "P2", "P3"):
+                key = (item.get("file"), item.get("line"), item["title"].casefold())
+                severities[key] = min(severities.get(key, "P3"), item["severity"])
+
+    def severe():
+        return sum(severity in ("P1", "P2") for severity in severities.values())
+
+    add((merged or {}).get("findings"))
+    before = severe()
+    add(result.get("findings"))
+    return severe() - before
+
+
 class PhaseTelemetry:
     """Supervisor-only, best-effort accounting. Never persist prompts or output."""
 
@@ -262,8 +285,7 @@ class PhaseTelemetry:
             if self.phase == "review":
                 row["reviewer"] = self.reviewer
                 if "findings" in result:
-                    row["severe_findings"] = sum(isinstance(item, dict) and item.get("severity") in ("P1", "P2")
-                                                 for item in result["findings"])
+                    row["severe_findings"] = new_severe_findings(st.get("review_result"), result)
                 if self.reviewer == "claude":
                     row.update(thread=None, weekly_spent=0, cost_usd=self.cost_usd)
             if self.provider == "claude":

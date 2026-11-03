@@ -977,6 +977,10 @@ class ReviewFixTests(RotationTestCase):
         event = self.notification("angles-merge", "review_done")
         self.assertEqual(event["angles"], ["correctness", "concurrency"])
         self.assertEqual((event["verdict"], event["findings"]), ("defects", 3))
+        severe = sum(finding["severity"] in ("P1", "P2") for finding in result["findings"])
+        self.until(lambda: any(row["phase"] == "turn" for row in self.telemetry_journal()))
+        task, = json.loads(self.cli("report", "--slug", "angles-merge", "--json"))["tasks"]
+        self.assertEqual(task["first_review_findings"], severe)
 
     def test_review_angles_auto_counts_committed_and_dirty_lines_at_default_and_configured_threshold(self):
         cases = (("below", 399, None, 1), ("threshold", 400, None, 3),

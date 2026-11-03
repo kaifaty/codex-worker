@@ -802,6 +802,12 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.assertEqual([(row["created"], row["turns"], row["tokens"]["total"], row["last_verdict"])
                           for row in report["tasks"]],
                          [(None, 6, 66, "clean"), (None, 2, 22, "defects")])
+        with (self.home / "codex-worker-log.jsonl").open("a") as stream:
+            stream.write(json.dumps({"v": 1, "kind": "verdict", "at": now - 1, "repo": "repo",
+                                     "slug": "legacy-reuse", "created": None, "verdict": "accepted"}) + "\n")
+        report = json.loads(self.cli("report", "--slug", "legacy-reuse", "--json"))
+        self.assertEqual([(row["turns"], row["lead_verdict"]) for row in report["tasks"]],
+                         [(6, None), (2, "accepted")])
         no_turn = json.loads(self.cli("report", "--slug", "legacy-no-turn", "--json"))
         self.assertEqual((no_turn["summary"]["tasks"], no_turn["summary"]["turns"]), (1, 4))
 

@@ -458,15 +458,17 @@ def _attach_lead_verdicts(tasks, verdicts):
     """Give each task its latest lead verdict, matched by repository, slug, and birth."""
     by_pair = {}
     for key, task in tasks.items():
-        by_pair.setdefault(key[:2], []).append(task)
+        # Legacy tasks without a birth keep their generation, so the newest one sorts last.
+        generation = key[2][1] if isinstance(key[2], tuple) else 0
+        by_pair.setdefault(key[:2], []).append(((task["created"] or 0, generation), task))
     for row in verdicts:
         candidates = by_pair.get((row["repo"], row["slug"]), [])
         created = _number(row.get("created"))
-        task = next((task for task in candidates if created is not None and task["created"] == created), None)
+        task = next((task for _, task in candidates if created is not None and task["created"] == created), None)
         if task is None and created is None:
             # Without a birth, the verdict belongs to the newest task born before it.
-            earlier = [task for task in candidates if (task["created"] or 0) <= row["at"]]
-            task = max(earlier, key=lambda task: task["created"] or 0, default=None)
+            earlier = [(order, task) for order, task in candidates if order[0] <= row["at"]]
+            task = max(earlier, key=lambda item: item[0], default=(None, None))[1]
         if task is not None:
             task["lead_verdict"] = row["verdict"]
             task["lead_note"] = row.get("note") if isinstance(row.get("note"), str) else None
