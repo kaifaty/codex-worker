@@ -105,8 +105,9 @@ precedence over `claude.model` and `claude.effort`; supported work efforts are `
 `high`, `xhigh` and `max`. Claude work supports only `--sandbox off`; `workspace` is rejected
 before launch. A task effort of `max` leaves Codex reviews at their configured effort, since
 `max` is specific to Claude. The selected account and session are kept across work turns while
-that account is available. If no pool account can be selected when a turn starts, including when the
-task's account is already marked unavailable, the turn ends with `no available Claude account`.
+that account is available. If it is unavailable for work when a turn starts, the turn moves to
+another pool account with the handoff below (`wait` prints the reason `unavailable for work`), or
+sleeps when the whole pool is unavailable.
 
 When a work attempt ends with `usage limit`, `authentication failed` or `token unavailable`, the
 account is marked unavailable and the attempt is repeated on another pool account not yet tried in
@@ -122,7 +123,8 @@ auto-continue at ...` line, `wait --through-sleep`, `stop` and `say` behavior an
 Codex, and `wait_for_reset: false` pauses with `exhausted` instead. After waking it prefers the
 task's account and resumes its session with a short note followed by the turn's message; otherwise it
 switches to another available account with the handoff. Claude rotation uses no credits or reset
-credits. Reset waits are excluded from `--max-minutes`, which counts active time across attempts.
+credits. Reset waits and the limit probes made while choosing an account are excluded from
+`--max-minutes`, which counts active time across attempts.
 
 Claude work reserves the top of each account's week for reviews: `claude.work_switch_at` (a finite
 number from `0` to `100`, default `85`) makes an account eligible for work only while both windows

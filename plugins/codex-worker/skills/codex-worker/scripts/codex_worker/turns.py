@@ -1,7 +1,7 @@
 """Work turns, wrap-up turns and turn execution."""
 import json
 
-from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_review, claude_runner, clock, config, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
+from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_runner, clock, config, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
 
 
 LIMIT_REASONS = ("usage limit", "authentication failed", "token unavailable")
@@ -101,43 +101,22 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False, de
 
 
 def run_claude_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
-    """Start on the task's account; at its limit rotate to another one or sleep until a reset."""
-    pinned = st.get("claude_account")
-    excluded = [account["name"] for account in claude_accounts.accounts(cfg)
-                if pinned and account["name"] != pinned]
-    account = claude_review.select_account(cfg, "work", exclude=excluded, stopped=stopped)
-    if stopped():
-        st["outcome"] = task_state.stop_outcome(st, stopped)
-        return
-    if account is None:
-        st.update(outcome="unavailable", result=None,
-                  error="No available Claude account" + (f": {pinned}" if pinned else " in the pool"))
-        task_state.save(st)
-        return
-    st["claude_account"] = account["name"]
-    st.pop("error", None)
-    task_state.save(st)
+    """Prefer the task's account and session; otherwise rotate with a handoff or sleep until a reset."""
     minutes = st.get("max_turn_minutes", cfg.get("max_turn_minutes"))
     deadline = None if minutes is None else clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
-    tried, attempt_prompt, rotation = set(), prompt, None
+    tried, rotation, account, reason = set(), None, None, None
     while True:
-        tried.add(account["name"])
-        outcome, reason = claude_work_turn(st, cfg, attempt_prompt, effort, stopped, account, deadline=deadline)
-        if rotation is not None and not rotation["thread"] and st.get("session_id"):
-            rotation["thread"] = st["session_id"]
-            task_state.save(st)
-        if outcome != "limit":
-            break
-        chosen = claude_review.select_account(cfg, "work", exclude=tried, stopped=stopped)
+        # Limit probes and reset waits are not part of the turn's time budget.
+        choice_started = clock.CLOCK.monotonic()
+        chosen = account_rotation.claude_choice(st, cfg, stopped, exclude=tried)
         if chosen is None and not stopped():
             st.pop("error", None)
-            sleep_started = clock.CLOCK.monotonic()
             chosen = account_rotation.wait_for_claude_account(
-                st, cfg, f"all Claude accounts unavailable; {account['name']}: {reason}", stopped, sleep)
-            if deadline is not None:
-                # Reset waits are not part of the turn's time budget.
-                deadline += clock.CLOCK.monotonic() - sleep_started
+                st, cfg, "all Claude accounts unavailable" + (f"; {account['name']}: {reason}" if account else ""),
+                stopped, sleep)
             tried = set()
+        if deadline is not None:
+            deadline += clock.CLOCK.monotonic() - choice_started
         if stopped():
             st["outcome"] = task_state.stop_outcome(st, stopped)
             task_state.save(st)
@@ -145,20 +124,30 @@ def run_claude_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
         if chosen is None:
             return
         st.pop("error", None)
-        if chosen["name"] == account["name"]:
+        previous = st.get("claude_account")
+        if account is not None and chosen["name"] == account["name"]:
             attempt_prompt = (prompts.reset_resume_prompt(cfg) + "\n\n" + prompt
                               if st.get("session_id") else prompt)
-        else:
+        elif previous and chosen["name"] != previous:
             attempt_prompt = threads.handoff(st, current_message=current_message, cfg=cfg)
-            st["rotations"].append({"at": clock.CLOCK.time(), "from": account["name"], "to": chosen["name"],
-                                    "reason": reason, "thread": ""})
+            st["rotations"].append({"at": clock.CLOCK.time(), "from": previous, "to": chosen["name"],
+                                    "reason": reason or "unavailable for work", "thread": ""})
             rotation = st["rotations"][-1]
             st.update(claude_account=chosen["name"], session_id="")
             notifications.notify(st, cfg, "rotated", f"rotated from {rotation['from']} to {rotation['to']}",
                                  **{"from": rotation["from"], "to": rotation["to"], "account": chosen["name"]})
+        else:
+            attempt_prompt = prompt
         account = chosen
-        st["outcome"] = "running"
+        st.update(claude_account=account["name"], outcome="running")
         task_state.save(st)
+        tried.add(account["name"])
+        outcome, reason = claude_work_turn(st, cfg, attempt_prompt, effort, stopped, account, deadline=deadline)
+        if rotation is not None and not rotation["thread"] and st.get("session_id"):
+            rotation["thread"] = st["session_id"]
+            task_state.save(st)
+        if outcome != "limit":
+            break
     if outcome == "budget_exhausted" and not stopped():
         phase = telemetry_log.telemetry_phase(st)
         if phase is not None:

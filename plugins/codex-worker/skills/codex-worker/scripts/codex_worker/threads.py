@@ -256,7 +256,8 @@ def handoff(st, current_message=False, cfg=None):
     d = config.TASKS / st["slug"]
     prompt = (d / "brief.md").read_text().rstrip() + ("\n\n## Продолжение\n\n" if ru else "\n\n## Continuation\n\n")
     claude = st.get("executor") == "claude" and st.get("kind") not in ("review", "scout")
-    has_threads = bool(st.get("threads") or st.get("thread") or claude and st.get("session_id"))
+    has_threads = bool(st.get("threads") or st.get("thread")
+                       or claude and (st.get("session_id") or claude_messages(st)))
     if has_threads and scouting:
         prompt += (("Предыдущий разведчик остановился из-за лимита подписки. "
                     "Продолжи изучение вопроса с учётом его сообщений ниже.\n\n") if ru else
