@@ -10,7 +10,11 @@ from . import config
 def claude_system_prompt(worktree, task_dir):
     """Save this turn's workspace instructions outside the worktree."""
     text = ("You are the task executor in a git worktree. "
-            "Make changes only inside this worktree.\n")
+            "Make changes only inside this worktree.\n"
+            "This turn runs headless: background commands and waiting for a notification end the turn "
+            "and kill whatever runs in the background. Run long jobs in the foreground; if one outlasts "
+            "a single command's timeout, start it with `nohup … > LOG 2>&1 &` and poll it in a blocking "
+            "loop of at most 10 minutes per call until it ends.\n")
     agents = Path(worktree) / "AGENTS.md"
     if agents.is_file():
         with agents.open("rb") as stream:

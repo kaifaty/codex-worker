@@ -535,6 +535,7 @@ def _group_tasks(tasks, by):
                    median_weekly_used_percent=statistics.median(task["weekly_used_percent"] for task in members),
                    accepted_fraction=_fraction(sum(task["lead_verdict"] == "accepted" for task in judged),
                                                len(judged)),
+                   verdicts=len(judged),
                    average_first_review_findings=_mean(task["first_review_findings"] for task in members),
                    check_pass_fraction=_pooled(members, "_checks"),
                    ci_pass_fraction=_pooled(members, "_ci"),
@@ -627,7 +628,7 @@ def render_report(report):
         dimensions = report["by"]
         lines = [f"Task report: {report['since']} to {report['until']}",
                  "  ".join(dimensions + ["tasks", "done", "median rounds", "median minutes", "median weekly %",
-                                         "accepted %", "findings", "checks %", "ci %", "follow-ups"])]
+                                         "accepted %", "verdicts", "findings", "checks %", "ci %", "follow-ups"])]
         for row in report["groups"]:
             labels = [row[key.replace("-", "_")] for key in dimensions]
             findings = row["average_first_review_findings"]
@@ -636,6 +637,7 @@ def render_report(report):
                                             f"{row['median_rounds']:g}", f"{row['median_active_minutes']:.1f}",
                                             f"{row['median_weekly_used_percent']:.2f}",
                                             _percent(row["accepted_fraction"]),
+                                            str(row["verdicts"]),
                                             "n/a" if findings is None else f"{findings:.2f}",
                                             _percent(row["check_pass_fraction"]), _percent(row["ci_pass_fraction"]),
                                             "n/a" if follow_ups is None else f"{follow_ups:g}"]))

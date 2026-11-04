@@ -445,16 +445,16 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.assertEqual(report["groups"], [
             {"effort": "high", "task_type": "feature", "tasks": 2, "done_fraction": 0.5,
              "median_rounds": 2, "median_active_minutes": 4, "median_weekly_used_percent": 7,
-             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
+             "accepted_fraction": None, "verdicts": 0, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
             {"effort": "high", "task_type": "fix", "tasks": 1, "done_fraction": 1,
              "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3,
-             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
+             "accepted_fraction": None, "verdicts": 0, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
             {"effort": "low", "task_type": "fix", "tasks": 1, "done_fraction": 1,
              "median_rounds": 1, "median_active_minutes": 2, "median_weekly_used_percent": 3,
-             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
+             "accepted_fraction": None, "verdicts": 0, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": 0},
             {"effort": "unknown", "task_type": "unknown", "tasks": 1, "done_fraction": 0,
              "median_rounds": 0, "median_active_minutes": 4, "median_weekly_used_percent": 9,
-             "accepted_fraction": None, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": None}])
+             "accepted_fraction": None, "verdicts": 0, "average_first_review_findings": None, "check_pass_fraction": None, "ci_pass_fraction": None, "median_follow_ups": None}])
         tasks = {task["slug"]: task for task in report["tasks"]}
         self.assertEqual((tasks["gamma"]["models"], tasks["gamma"]["reasoning_efforts"]),
                          (["model-b", "model-c"], ["low", "high"]))
@@ -462,9 +462,9 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
                           tasks["legacy"]["reasoning_efforts"]), (None, [None], [None]))
         text = self.cli("report", "--repo", "repo", "--by", "effort,task-type")
         self.assertIn("effort  task-type  tasks  done  median rounds  median minutes  median weekly %"
-                      "  accepted %  findings  checks %  ci %  follow-ups", text)
-        self.assertIn("high  feature  2  50.0%  2  4.0  7.00  n/a  n/a  n/a  n/a  0", text)
-        self.assertIn("unknown  unknown  1  0.0%  0  4.0  9.00  n/a  n/a  n/a  n/a  n/a", text)
+                      "  accepted %  verdicts  findings  checks %  ci %  follow-ups", text)
+        self.assertIn("high  feature  2  50.0%  2  4.0  7.00  n/a  0  n/a  n/a  n/a  0", text)
+        self.assertIn("unknown  unknown  1  0.0%  0  4.0  9.00  n/a  0  n/a  n/a  n/a  n/a", text)
         models = json.loads(self.cli("report", "--repo", "repo", "--by", "model,effort", "--json"))
         self.assertEqual([(group["model"], group["effort"], group["tasks"]) for group in models["groups"]],
                          [("model-a", "high", 2), ("model-b", "low", 1),
@@ -539,6 +539,9 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         add("second", "turn", turn=2, result_status="done", ci={"outcome": "failed"})
         # No done result and no review: excluded from findings and follow-ups.
         add("third", "work", result_status="blocked")
+        for slug, verdict in (("first", "accepted"), ("second", "revised")):
+            rows.append(dict(v=1, at=now - 100, repo="repo", slug=slug, created=now - 1000,
+                             kind="verdict", verdict=verdict))
         self.write_journal(rows)
 
         group, = json.loads(self.cli("report", "--by", "executor", "--json"))["groups"]
@@ -547,9 +550,12 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         self.assertAlmostEqual(group["check_pass_fraction"], 2 / 3)
         self.assertEqual(group["ci_pass_fraction"], 0.5)
         self.assertEqual(group["median_follow_ups"], 1)
-        self.assertIsNone(group["accepted_fraction"])
+        self.assertEqual(group["verdicts"], 2)
+        self.assertIsInstance(group["verdicts"], int)
+        self.assertEqual(group["accepted_fraction"], 0.5)
         text = self.cli("report", "--by", "executor")
-        self.assertIn("  2.00  66.7%  50.0%  1", text)
+        self.assertIn("  accepted %  verdicts  findings  ", text)
+        self.assertIn("  50.0%  2  2.00  66.7%  50.0%  1", text)
 
     def test_verdict_records_latest_lead_verdict_for_active_and_cleaned_tasks(self):
         self.configure(language="en")

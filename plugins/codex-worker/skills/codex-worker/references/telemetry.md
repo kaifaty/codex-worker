@@ -70,11 +70,13 @@ The grouped table has these columns (JSON group keys in brackets):
 | `median minutes` [`median_active_minutes`] | Median active minutes. |
 | `median weekly %` [`median_weekly_used_percent`] | Median weekly percentage points of the account plan that ran each phase. |
 | `accepted %` [`accepted_fraction`] | Fraction of tasks with the lead verdict `accepted` among tasks with a verdict. |
+| `verdicts` [`verdicts`] | Tasks in the group with a lead verdict. |
 | `findings` [`average_first_review_findings`] | Mean number of P1 and P2 findings in the task's first review round, merged across its completed angles: a defect found by several angles counts once, at its strongest severity. Tasks without a first review, or with journal rows older than the severity count, are left out. |
 | `checks %` [`check_pass_fraction`] | Passed `--check` runs among all of the group's `--check` runs; base checks are not counted. |
 | `ci %` [`ci_pass_fraction`] | Passed CI results among the group's recorded CI results, counted like `CI passed` in the summary. |
 | `follow-ups` [`median_follow_ups`] | Median number of `say` turns the lead sent after the task's first `done` result; tasks that never reached `done` are left out. Fix rounds and CI repairs are not follow-ups. |
 
+Compare `accepted %` only when each group has at least 5 lead verdicts.
 `n/a` means the group has no samples. Weekly percentages stay percentages of each account's own plan: a
 Claude percentage and a Codex percentage, or percentages of accounts with plans of different size, measure
 different amounts of work and are not comparable. Compare executors by quality columns and minutes, and

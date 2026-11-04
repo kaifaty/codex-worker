@@ -220,11 +220,13 @@ class AccountAuthTests(RotationTestCase):
                 "row = {'command': " + repr(command) + ", 'argv': sys.argv[1:]}\n" +
                 "row['cwd'] = os.getcwd()\n" +
                 "row['config_dir'] = os.environ.get('CLAUDE_CONFIG_DIR')\n" +
+                "row['disable_background_tasks'] = os.environ.get('CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')\n" +
                 "row['token_matches'] = os.environ.get('CLAUDE_CODE_OAUTH_TOKEN') == token\n" +
                 "row['stdin_null'] = os.fstat(0).st_rdev == os.stat(os.devnull).st_rdev\n" +
                 "row['stderr_null'] = os.fstat(2).st_rdev == os.stat(os.devnull).st_rdev\n" +
                 "row['host_settings'] = [key for key in os.environ if key.startswith(('CLAUDE', 'ANTHROPIC')) " +
-                "and key not in ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN')]\n" +
+                "and key not in ('CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN', " +
+                "'CLAUDE_CODE_DISABLE_BACKGROUND_TASKS')]\n" +
                 "settings = Path(" + repr(str(settings)) + ")\n" +
                 "row['saved'] = settings.exists() and any(account['name'] == 'probe' for account in " +
                 "json.loads(settings.read_text()).get('claude', {}).get('accounts', []))\n" +
@@ -311,6 +313,7 @@ class AccountAuthTests(RotationTestCase):
                                  ["security"] if label == "missing" else ["security", "claude"])
                 for row in rows:
                     self.assertEqual(row["config_dir"], account["config_dir"])
+                    self.assertEqual(row["disable_background_tasks"], "1")
                     self.assertEqual(row["host_settings"], [])
                 if label != "missing":
                     invocation = rows[1]
