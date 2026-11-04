@@ -65,7 +65,7 @@ def wait_turn_lines(st, slug):
     if st.get("task_model"):
         yield f"== model {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("capacity_retries", 0):
-        yield "== retried: model at capacity"
+        yield f"== retried: model at capacity ×{st['capacity_retries']}"
     if st.get("turn_stop"):
         yield "== turn stopped: " + turn_monitor.turn_stop_message(st["turn_stop"])
     if st.get("outcome") == "interrupted":
@@ -114,11 +114,14 @@ def wait_check_lines(st):
                 continue
             if name == "base tests" and item["outcome"] == "skipped":
                 yield f"== base tests: skipped ({item['reason']})"
+            elif item["outcome"] == "unavailable":
+                yield (f"== {name}: unavailable (exit {item['exit']}) after {item['seconds']:.0f} s; "
+                       "the check did not run, run it yourself before merging")
             else:
                 label = item["outcome"] if item["outcome"] in ("passed", "stopped", "interrupted") else "FAILED"
                 reason = "timeout, " if item["outcome"] == "timeout" else ""
                 yield f"== {name}: {label} ({reason}exit {item['exit']}, {item['seconds']:.0f} s)"
-            if name != "base tests" and item["outcome"] in ("failed", "timeout"):
+            if name != "base tests" and item["outcome"] in ("failed", "timeout", "unavailable"):
                 yield item.get("tail", checking.check_tail(st))
             elif name == "base tests" and item.get("tail"):
                 yield item["tail"]

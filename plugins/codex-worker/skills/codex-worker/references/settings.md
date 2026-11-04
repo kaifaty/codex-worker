@@ -11,6 +11,7 @@ that file is absent.
 | `reviewer` | `"codex"` | default review provider: `"codex"` or `"claude"`; saved per task and overridden by `--reviewer` |
 | `max_task_weekly_percent` | none | task weekly budget in percentage points (0 < P ≤ 100); `start --max-weekly P` overrides it, and `say` and `review` inherit or replace the saved task budget |
 | `repeat_limit` | `3` | identical failures before a `stuck` stop ([results.md](results.md)) |
+| `capacity_retry_minutes` | `[1, 5, 15, 30]` | pauses in minutes (positive numbers) before each continuation after a model `at capacity` error in one turn; an error after the last pause fails the turn ([accounts.md](accounts.md#sign-in-errors)) |
 | `review_angles_min_lines` | `400` | changed lines from which `--review-angles auto` runs angles |
 | `ci` | `false` | initial task CI setting; see [Task CI options](#task-ci-options) |
 | `ci_timeout_minutes` | `30` | maximum wait for CI checks or a CI command per attempt |

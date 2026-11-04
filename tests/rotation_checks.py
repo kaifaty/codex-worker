@@ -954,6 +954,53 @@ class CheckGuardTests(RotationTestCase):
         self.assertFalse(self.review_invocations())
         self.assertNotIn("== review by", output)
 
+    def test_check_and_base_check_receive_their_deadline_and_base_exit_75_is_unavailable(self):
+        self.configure(language="en")
+        deadlines = self.root / "deadlines"
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "create_files": ["done.txt"]},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        command = (f"printf '%s\\n' \"$CODEX_TASK_CHECK_DEADLINE\" >> {shlex.quote(str(deadlines))}; "
+                   "test -f done.txt || { echo 'base queue busy'; exit 75; }")
+        self.start("check-deadline", "--review", "--check", command, "--base-check", "--check-timeout", "600")
+        output = self.wait("check-deadline")
+        check = self.state("check-deadline")["checks"][-1]
+        values = [int(value) for value in deadlines.read_text().split()]
+        self.assertEqual(len(values), 2)
+        self.assertLessEqual(abs(values[0] - (check["at"] - check["seconds"] + 600)), 2)
+        self.assertLessEqual(abs(values[1] - (check["at"] + 600)), 2)
+        self.assertEqual(check["outcome"], "passed")
+        base = check["base_check"]
+        self.assertEqual((base["outcome"], base["exit"]), ("unavailable", 75))
+        self.assertIn("== base tests: unavailable (exit 75)", output)
+        self.assertIn("base queue busy", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+
+    def test_check_exit_75_is_unavailable_and_reviews_without_fix_round_or_notification(self):
+        self.configure(language="en")
+        self.configure_notify()
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        command = "echo 'remote queue starts after the deadline'; exit 75"
+        self.start("check-unavailable", "--review", "--fix-rounds", "1", "--check", command)
+        output = self.wait("check-unavailable")
+        self.notification("check-unavailable", "turn_finished")
+        state = self.state("check-unavailable")
+        check = state["checks"][-1]
+        self.assertEqual((check["outcome"], check["exit"]), ("unavailable", 75))
+        self.assertIn("remote queue starts after the deadline", check["tail"])
+        self.assertIn("== check `" + command + "`: unavailable (exit 75)", output)
+        self.assertIn("remote queue starts after the deadline", output)
+        self.assertNotIn("== review skipped", output)
+        self.assertEqual(len(self.review_invocations()), 1)
+        self.assertEqual(len(state["checks"]), 1)
+        self.assertFalse(state.get("rounds"))
+        self.assertFalse([event for event in self.notifications("check-unavailable")
+                          if event.get("event") == "check_failed"])
+        report = json.loads(self.cli("report", "--slug", "check-unavailable", "--json"))
+        self.assertEqual(report["summary"]["checks"]["total"], 0)
+
     def test_check_timeout_kills_the_shell_process_group_and_child(self):
         self.configure()
         command = 'sleep 60 & child=$!; echo "$child" > check-child.pid; wait "$child"'

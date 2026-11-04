@@ -359,7 +359,7 @@ def auto_fix(st, cfg, review, effort, stopped, sleep, base_merge=None):
         task_state.save(st)
         if stopped():
             return
-        if check is not None and check["outcome"] != "passed":
+        if check is not None and check["outcome"] not in checking.CHECK_NOT_FAILED:
             failed_check = check
             continue
         failed_check = None

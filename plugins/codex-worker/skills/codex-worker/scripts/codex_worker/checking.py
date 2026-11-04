@@ -232,6 +232,12 @@ def check_tail(st, filename="check.log"):
         return "".join(deque(output, maxlen=40)).rstrip()
 
 
+# EX_TEMPFAIL: the check's environment is unavailable, so it did not run.
+UNAVAILABLE_EXIT = 75
+# Outcomes after which the work counts as checked or not refuted.
+CHECK_NOT_FAILED = ("passed", "unavailable")
+
+
 def execute_check(st, stopped, cwd, filename):
     """Run the saved check after work, owning and reaping its process group."""
     if stopped():
@@ -244,10 +250,12 @@ def execute_check(st, stopped, cwd, filename):
     with (config.TASKS / st["slug"] / filename).open("wb") as log:
         try:
             args = ["/bin/sh", "-c", st["check"]]
-            env = None
+            env = dict(os.environ)
             if st.get("sandbox") == "workspace":
                 args = [config.codex_binary(), "sandbox"] + sandboxing.sandbox_args(st) + ["--"] + args
                 env = accounts.account_env({"home": str(config.CODEX_HOME)})
+            # The wall-clock second at which the supervisor kills the check.
+            env["CODEX_TASK_CHECK_DEADLINE"] = str(int(time.time() + st.get("check_timeout", 1800)))
             proc = subprocess.Popen(args, cwd=cwd, env=env,
                                     stdin=subprocess.DEVNULL, stdout=log, stderr=log, start_new_session=True)
             st["check_pid"] = proc.pid
@@ -263,7 +271,8 @@ def execute_check(st, stopped, cwd, filename):
                     break
                 time.sleep(min(0.1, remaining))
             else:
-                outcome = "passed" if proc.returncode == 0 else "failed"
+                outcome = ("passed" if proc.returncode == 0 else
+                           "unavailable" if proc.returncode == UNAVAILABLE_EXIT else "failed")
         except OSError as exc:
             log.write(f"check launch failed: {exc}\n".encode("utf-8", errors="replace"))
         finally:
@@ -276,7 +285,7 @@ def execute_check(st, stopped, cwd, filename):
         st["outcome"] = outcome
     result = {"cmd": st["check"], "exit": code, "seconds": round(clock.CLOCK.monotonic() - measured_started, 3),
               "at": clock.CLOCK.time(), "outcome": outcome}
-    if outcome in ("failed", "timeout"):
+    if outcome in ("failed", "timeout", "unavailable"):
         result["tail"] = check_tail(st, filename)
     return result
 
