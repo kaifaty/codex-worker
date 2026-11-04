@@ -66,7 +66,9 @@ STATE_FIELDS = {
     "outcome": StateField("turn", spawn_reset=lambda st, turn: "running"),
     # Waiting budget is also restarted at automatic phase boundaries.
     "reset_wait_seconds": StateField("turn", spawn_reset=lambda st, turn: 0),
-    "capacity_retries": StateField("turn", spawn_reset=lambda st, turn: 0),
+    # Task total; capacity_start marks where the current turn began.
+    "capacity_retries": StateField("history"),
+    "capacity_start": StateField("turn", spawn_reset=lambda st, turn: st.get("capacity_retries", 0)),
     "fix_rounds": StateField("turn", load_default=lambda st: 0,
                              spawn_reset=lambda st, turn: turn["fix_rounds"]),
     "rounds": StateField("turn", load_default=lambda st: [], spawn_reset=lambda st, turn: []),

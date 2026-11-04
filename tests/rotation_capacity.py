@@ -252,22 +252,27 @@ class CapacityRetryTests(RotationTestCase):
         self.assertEqual(report["tasks"][0]["capacity_retries"], 4)
         self.assertIn("Capacity retries: 4", self.cli("report", "--slug", "capacity-phases"))
 
-    def test_capacity_retry_counter_resets_for_the_next_spawn(self):
+    def test_capacity_retry_counter_accumulates_across_spawns(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "capacity_error"}, {"mode": "complete", "reply": self.work_result()},
-            {"mode": "complete", "reply": self.work_result(summary="Next turn completed")}])
+            {"mode": "complete", "reply": self.work_result(summary="Next turn completed")},
+            {"mode": "capacity_error"}, {"mode": "complete", "reply": self.work_result()}])
         self.start("capacity-next-turn")
-        self.wait("capacity-next-turn")
-        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 1)
+        self.assertIn("== retried: model at capacity ×1", self.wait("capacity-next-turn"))
         self.cli("say", "capacity-next-turn", "Continue the same task")
         output = self.wait("capacity-next-turn")
-        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 0)
-        self.assertEqual(len(self.invocations()), 3)
+        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 1)
         self.assertNotIn("== retried: model at capacity", output)
+        self.cli("say", "capacity-next-turn", "Finish the task")
+        self.assertIn("== retried: model at capacity ×2", self.wait("capacity-next-turn"))
+        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 2)
+        self.assertEqual(len(self.invocations()), 5)
         turns = [row for row in self.telemetry_journal() if row["phase"] == "turn"]
-        self.assertEqual([row["capacity_retries"] for row in turns], [1, 0])
+        self.assertEqual([row["capacity_retries"] for row in turns], [1, 0, 1])
+        report = json.loads(self.cli("report", "--slug", "capacity-next-turn", "--json"))
+        self.assertEqual(report["summary"]["capacity_retries"], 2)
 
     def test_capacity_pause_is_excluded_from_active_time_and_the_time_budget(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "3"

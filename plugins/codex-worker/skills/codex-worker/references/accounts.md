@@ -263,6 +263,7 @@ a new exec with the original prompt if no thread was created.
 This also works without configured accounts, and each review or fix turn gets its own schedule.
 `stop` and signals interrupt a pause at once. Active time and weekly budgets span all attempts; the
 pauses do not count as active exec time or toward `--max-minutes`. `wait` shows
-`== retried: model at capacity ×N` with the number of continuations in the turn; state, telemetry and
-`report` record them as `capacity_retries` (0 for older rows).
+`== retried: model at capacity ×N` after a turn with a continuation, where N counts the task's
+continuations so far; state keeps that task total in `capacity_retries`, while telemetry rows and
+`report` record each turn's and phase's own count (0 for older rows).
 `CODEX_TASK_CAPACITY_RETRY_SECONDS`, when set, gives every pause that length, for tests.
