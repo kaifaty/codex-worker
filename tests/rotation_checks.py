@@ -1001,6 +1001,21 @@ class CheckGuardTests(RotationTestCase):
         report = json.loads(self.cli("report", "--slug", "check-unavailable", "--json"))
         self.assertEqual(report["summary"]["checks"]["total"], 0)
 
+    def test_report_leaves_unavailable_checks_out_of_the_check_pass_rate(self):
+        self.configure(language="en")
+        self.start("check-rate", "--check", "true")
+        self.wait("check-rate")
+        self.cli("say", "check-rate", "Run the unavailable check", "--check", "exit 75")
+        self.wait("check-rate")
+        self.assertEqual([check["outcome"] for check in self.state("check-rate")["checks"]],
+                         ["passed", "unavailable"])
+        report = json.loads(self.cli("report", "--slug", "check-rate", "--by", "task-type", "--json"))
+        self.assertEqual(report["summary"]["checks"], {"total": 1, "passed": 1, "pass_fraction": 1})
+        self.assertEqual([group["check_pass_fraction"] for group in report["groups"]], [1])
+        self.assertIn("unknown  1  0.0%  0  0.0  0.00  n/a  0  n/a  100.0%  n/a  n/a",
+                      self.cli("report", "--slug", "check-rate", "--by", "task-type"))
+        self.assertIn("Checks passed: 1/1 (100.0%)", self.cli("report", "--slug", "check-rate"))
+
     def test_check_timeout_kills_the_shell_process_group_and_child(self):
         self.configure()
         command = 'sleep 60 & child=$!; echo "$child" > check-child.pid; wait "$child"'
