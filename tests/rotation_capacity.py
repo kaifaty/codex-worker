@@ -82,6 +82,20 @@ class CapacityRetryTests(RotationTestCase):
         self.assertEqual([entry["thread"] for entry in state["threads"]], [executions[1]["thread"]])
         self.assertIn("== retried: model at capacity ×1", output)
 
+    def test_review_capacity_before_resumed_thread_started_keeps_the_review_thread(self):
+        self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "complete", "reply": self.work_result()}, {"mode": "capacity_error"},
+            {"mode": "capacity_error", "before_thread": True},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("capacity-review-thread", "--review")
+        self.wait("capacity-review-thread")
+        reviews = self.invocations()[1:]
+        self.assertEqual([execution["resume"] for execution in reviews], [False, True, True])
+        self.assertEqual(len({execution["thread"] for execution in reviews}), 1)
+        self.assertEqual(self.state("capacity-review-thread")["capacity_retries"], 2)
+
     def capacity_pauses(self):
         """Pause before each continuation: capacity error to the next exec, in logical seconds."""
         errors = [event["monotonic"] for event in self.trace() if event.get("command") == "capacity-error"]

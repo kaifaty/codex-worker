@@ -365,7 +365,8 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         result, decision = turn_monitor.monitor(st, cfg, account, attempt_prompt, effort, stopped, on_limit, control=control,
                                    quota_snapshot=quota_snapshot, resume_thread=resume_thread)
         quota_snapshot = None
-        resume_thread = None
+        # A resumed exec can fail before thread.started; keep the known thread for the next retry.
+        previous_thread, resume_thread = resume_thread, None
         phase = telemetry_log.telemetry_phase(st)
         weekly_exhausted = (result in ("auth", "limit", "capacity", "failed", "completed")
                             and control.weekly_exhausted(st.get("weekly_used_percent", 0)))
@@ -425,7 +426,8 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                 st["outcome"] = task_state.stop_outcome(st, stopped)
                 break
             reviews = st.get("reviews", [])[review_start:]
-            thread = (reviews[-1]["thread"] if reviews else None) if reviewing else st.get("thread")
+            thread = ((reviews[-1]["thread"] if reviews else None) if reviewing
+                      else st.get("thread")) or previous_thread
             if thread:
                 resume_thread = thread
             capacity_resumed_at = control.elapsed
