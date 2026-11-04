@@ -32,7 +32,11 @@ CI_POLL_SECONDS = float(os.environ.get("CODEX_TASK_CI_POLL_SECONDS", "30"))
 ACCOUNT_TIMEOUT = 20
 CLAUDE_PROBE_TIMEOUT = 120
 ACCOUNT_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_ACCOUNT_RETRY_SECONDS", "300"))
-CAPACITY_RETRY_SECONDS = float(os.environ.get("CODEX_TASK_CAPACITY_RETRY_SECONDS", "60"))
+# When set, every capacity pause has this length instead of capacity_retry_minutes.
+CAPACITY_RETRY_SECONDS = (float(os.environ["CODEX_TASK_CAPACITY_RETRY_SECONDS"])
+                          if os.environ.get("CODEX_TASK_CAPACITY_RETRY_SECONDS") else None)
+# Active minutes without a capacity error after a resume that restart the pause schedule.
+CAPACITY_RESET_MINUTES = 10
 MAX_ACCOUNT_RETRIES = 6
 SLEEP_STEP = float(os.environ.get("CODEX_TASK_SLEEP_STEP", "60"))
 RESET_MARGIN = float(os.environ.get("CODEX_TASK_RESET_MARGIN", "120"))
@@ -137,6 +141,7 @@ def accounts_config():
     cfg.setdefault("ci_timeout_minutes", 30)
     cfg.setdefault("review_angles_min_lines", 400)
     cfg.setdefault("repeat_limit", 3)
+    cfg.setdefault("capacity_retry_minutes", [1, 5, 15, 30])
     cfg.setdefault("sandbox", "off")
     cfg.setdefault("writable_dirs", [])
     if cfg["executor"] not in ("codex", "claude"):
@@ -197,6 +202,10 @@ def accounts_config():
             procs.die(key + " must be a positive finite number")
     if type(cfg["repeat_limit"]) is not int or cfg["repeat_limit"] < 1:
         procs.die("repeat_limit must be a positive integer")
+    pauses = cfg["capacity_retry_minutes"]
+    if not isinstance(pauses, list) or not all(
+            result_schema.is_finite_number(value) and value > 0 for value in pauses):
+        procs.die("capacity_retry_minutes must be a list of positive finite numbers")
     weekly = cfg["max_task_weekly_percent"]
     if weekly is not None and (not result_schema.is_finite_number(weekly) or not 0 < weekly <= 100):
         procs.die("max_task_weekly_percent must be a finite number in (0, 100]")

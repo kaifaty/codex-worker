@@ -58,8 +58,8 @@ class CapacityRetryTests(RotationTestCase):
                 self.assertEqual(state["checks"][-1]["outcome"], "passed")
                 self.assertEqual((Path(state["worktree"]) / "capacity-check").read_text(), "checked\n")
                 self.assertFalse(state["rotations"])
-                self.assertIn("== retried: model at capacity", output)
-                self.assertLess(output.index("== retried: model at capacity"), output.index(summary))
+                self.assertIn("== retried: model at capacity ×1", output)
+                self.assertLess(output.index("== retried: model at capacity ×1"), output.index(summary))
 
     def test_capacity_before_thread_started_uses_a_new_exec_with_the_original_prompt(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
@@ -80,30 +80,84 @@ class CapacityRetryTests(RotationTestCase):
         self.assertEqual(state["outcome"], "completed")
         self.assertEqual(state["capacity_retries"], 1)
         self.assertEqual([entry["thread"] for entry in state["threads"]], [executions[1]["thread"]])
-        self.assertIn("== retried: model at capacity", output)
+        self.assertIn("== retried: model at capacity ×1", output)
 
-    def test_second_capacity_failure_finishes_without_a_third_exec_or_checks(self):
+    def test_review_capacity_before_resumed_thread_started_keeps_the_review_thread(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[
-            {"mode": "capacity_error"}, {"mode": "capacity_error", "event": "error"},
-            {"mode": "complete", "reply": "Unexpected third execution"}])
-        self.start("capacity-twice", "--review", "--check", "touch unexpected-check")
-        output = self.cli("wait", "capacity-twice", "--timeout", "10")
-        state = self.state("capacity-twice")
+            {"mode": "complete", "reply": self.work_result()}, {"mode": "capacity_error"},
+            {"mode": "capacity_error", "before_thread": True},
+            {"mode": "complete", "reply": self.review_result(False)}])
+        self.start("capacity-review-thread", "--review")
+        self.wait("capacity-review-thread")
+        reviews = self.invocations()[1:]
+        self.assertEqual([execution["resume"] for execution in reviews], [False, True, True])
+        self.assertEqual(len({execution["thread"] for execution in reviews}), 1)
+        self.assertEqual(self.state("capacity-review-thread")["capacity_retries"], 2)
+
+    def capacity_pauses(self):
+        """Pause before each continuation: capacity error to the next exec, in logical seconds."""
+        errors = [event["monotonic"] for event in self.trace() if event.get("command") == "capacity-error"]
+        starts = [event["monotonic"] for event in self.invocations()][1:]
+        return [start - error for error, start in zip(errors, starts)]
+
+    def test_capacity_pauses_follow_the_schedule_outside_the_time_budget(self):
+        self.enable_fake_clock()
+        self.env["CODEX_TASK_SLEEP_STEP"] = "60"
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "capacity_error"}] * 4 + [
+            {"mode": "complete", "reply": self.work_result()}])
+        self.start("capacity-schedule", "--max-minutes", "10", "--check", "true")
+        output = self.wait("capacity-schedule")
+        state = self.state("capacity-schedule")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["capacity_retries"], 4)
+        self.assertEqual([round(pause / 60) for pause in self.capacity_pauses()], [1, 5, 15, 30])
+        self.assertTrue(all(pause < minutes * 60 + 5
+                            for pause, minutes in zip(self.capacity_pauses(), (1, 5, 15, 30))))
+        self.assertEqual(len(self.invocations()), 5)
+        self.assertFalse(state["rotations"])
+        self.assertFalse(state.get("turn_stop"))
+        self.assertEqual(state["checks"][-1]["outcome"], "passed")
+        self.assertIn("== retried: model at capacity ×4", output)
+
+    def test_capacity_schedule_restarts_after_ten_active_minutes_without_an_error(self):
+        self.enable_fake_clock()
+        self.env["CODEX_TASK_MINUTE_SECONDS"] = "0.1"
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[
+            {"mode": "capacity_error"}, {"mode": "capacity_error", "delay": 1.1},
+            {"mode": "capacity_error"}, {"mode": "complete", "reply": self.work_result()}])
+        self.start("capacity-restart")
+        output = self.wait("capacity-restart")
+        state = self.state("capacity-restart")
+        self.assertEqual(state["outcome"], "completed")
+        self.assertEqual(state["capacity_retries"], 3)
+        self.assertEqual([round(pause / 0.1) for pause in self.capacity_pauses()], [1, 1, 5])
+        self.assertIn("== retried: model at capacity ×3", output)
+
+    def test_capacity_error_after_the_last_pause_fails_without_another_exec_or_checks(self):
+        self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
+        self.configure(language="en")
+        self.account(self.home, "A", self.reset, runs=[{"mode": "capacity_error"}] * 4 + [
+            {"mode": "capacity_error", "event": "error"},
+            {"mode": "complete", "reply": "Unexpected sixth execution"}])
+        self.start("capacity-five", "--review", "--check", "touch unexpected-check")
+        output = self.cli("wait", "capacity-five", "--timeout", "10")
+        state = self.state("capacity-five")
         self.assertEqual(state["outcome"], "failed")
         self.assertFalse(state.get("pid"))
-        self.assertEqual(state["capacity_retries"], 1)
-        self.assertEqual(len(self.invocations()), 2)
-        self.assert_resumed_same_thread(*self.invocations(), self.home)
+        self.assertEqual(state["capacity_retries"], 4)
+        self.assertEqual(len(self.invocations()), 5)
+        self.assertEqual(len({execution["thread"] for execution in self.invocations()}), 1)
         self.assertFalse(state.get("checks"))
         self.assertFalse(state.get("reviews"))
         self.assertFalse((Path(state["worktree"]) / "unexpected-check").exists())
-        self.assertIn("== retried: model at capacity", output)
-        self.assertNotIn("Unexpected third execution", output)
+        self.assertIn("== retried: model at capacity ×4", output)
+        self.assertNotIn("Unexpected sixth execution", output)
 
     def test_stop_during_capacity_pause_prevents_a_retry_exec(self):
-        self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "30"
         self.env["CODEX_TASK_SLEEP_STEP"] = "60"
         self.configure()
         self.account(self.home, "A", self.reset, runs=[
@@ -153,7 +207,7 @@ class CapacityRetryTests(RotationTestCase):
         state = self.state("capacity-no-accounts")
         self.assertEqual((state["outcome"], state["capacity_retries"]), ("completed", 1))
         self.assertEqual(state["checks"][-1]["outcome"], "passed")
-        self.assertIn("== retried: model at capacity", output)
+        self.assertIn("== retried: model at capacity ×1", output)
 
     def test_work_review_fix_and_final_review_each_receive_one_capacity_retry(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
@@ -186,7 +240,7 @@ class CapacityRetryTests(RotationTestCase):
         self.assertEqual(state["auto_fix_stop"], "clean")
         self.assertEqual(len(state["rounds"]), 1)
         self.assertEqual(len(state["checks"]), 2)
-        self.assertIn("== retried: model at capacity", output)
+        self.assertIn("== retried: model at capacity ×4", output)
         turn = next(row for row in self.telemetry_journal() if row["phase"] == "turn")
         self.assertEqual(turn["capacity_retries"], 4)
         phases = self.phase_telemetry_journal()
@@ -198,22 +252,27 @@ class CapacityRetryTests(RotationTestCase):
         self.assertEqual(report["tasks"][0]["capacity_retries"], 4)
         self.assertIn("Capacity retries: 4", self.cli("report", "--slug", "capacity-phases"))
 
-    def test_capacity_retry_counter_resets_for_the_next_spawn(self):
+    def test_capacity_retry_counter_accumulates_across_spawns(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "0.05"
         self.configure(language="en")
         self.account(self.home, "A", self.reset, runs=[
             {"mode": "capacity_error"}, {"mode": "complete", "reply": self.work_result()},
-            {"mode": "complete", "reply": self.work_result(summary="Next turn completed")}])
+            {"mode": "complete", "reply": self.work_result(summary="Next turn completed")},
+            {"mode": "capacity_error"}, {"mode": "complete", "reply": self.work_result()}])
         self.start("capacity-next-turn")
-        self.wait("capacity-next-turn")
-        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 1)
+        self.assertIn("== retried: model at capacity ×1", self.wait("capacity-next-turn"))
         self.cli("say", "capacity-next-turn", "Continue the same task")
         output = self.wait("capacity-next-turn")
-        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 0)
-        self.assertEqual(len(self.invocations()), 3)
+        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 1)
         self.assertNotIn("== retried: model at capacity", output)
+        self.cli("say", "capacity-next-turn", "Finish the task")
+        self.assertIn("== retried: model at capacity ×2", self.wait("capacity-next-turn"))
+        self.assertEqual(self.state("capacity-next-turn")["capacity_retries"], 2)
+        self.assertEqual(len(self.invocations()), 5)
         turns = [row for row in self.telemetry_journal() if row["phase"] == "turn"]
-        self.assertEqual([row["capacity_retries"] for row in turns], [1, 0])
+        self.assertEqual([row["capacity_retries"] for row in turns], [1, 0, 1])
+        report = json.loads(self.cli("report", "--slug", "capacity-next-turn", "--json"))
+        self.assertEqual(report["summary"]["capacity_retries"], 2)
 
     def test_capacity_pause_is_excluded_from_active_time_and_the_time_budget(self):
         self.env["CODEX_TASK_CAPACITY_RETRY_SECONDS"] = "3"

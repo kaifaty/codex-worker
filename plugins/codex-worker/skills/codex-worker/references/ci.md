@@ -2,8 +2,8 @@
 
 Enable and change the task's CI options as described in [settings.md](settings.md#task-ci-options).
 
-CI starts after work, review and automatic fixes, only for a completed turn with a passing or absent
-local check and a published GitHub PR whose head SHA equals local HEAD. Otherwise state records CI as
+CI starts after work, review and automatic fixes, only for a completed turn with a passing, `unavailable`
+(exit 75) or absent local check and a published GitHub PR whose head SHA equals local HEAD. Otherwise state records CI as
 `skipped` with a reason. The supervisor polls every 30 seconds, allows three minutes for checks to
 appear (`none` if none appear), and waits for pending checks up to `ci_timeout_minutes` (`timeout`).
 Waiting spends no task weekly budget and does not count toward `--max-minutes`; `stop` or an external

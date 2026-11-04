@@ -1089,6 +1089,24 @@ class WorkspaceTests(RotationTestCase):
         self.assertEqual(len(self.invocations()), 1)
         self.assertFalse(self.ci_polls())
 
+    def test_ci_command_runs_after_an_unavailable_check_and_skips_after_a_failed_one(self):
+        self.configure(language="en", sandbox="workspace")
+        command = "printf 'ci-command-ran\\n'"
+        for slug, check, expected in (("ci-after-unavailable", "exit 75", "passed"),
+                                      ("ci-after-failed", "exit 1", "skipped")):
+            with self.subTest(check=check):
+                self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+                self.start(slug, "--check", check, "--ci-command", command)
+                output = self.wait(slug)
+                ci = self.state(slug)["ci"]
+                self.assertEqual(ci["outcome"], expected)
+                if expected == "passed":
+                    self.assertEqual(ci["checks"][0]["tail"], "ci-command-ran")
+                    self.assertIn("== CI " + ci["sha"][:7] + ": passed", output)
+                else:
+                    self.assertEqual(ci["reason"], "local check did not pass")
+                    self.assertFalse(ci.get("checks"))
+
     def test_ci_command_say_inherits_replaces_and_removes_command(self):
         self.configure(language="en", sandbox="workspace")
         self.configure_ci([[self.ci_check()]])

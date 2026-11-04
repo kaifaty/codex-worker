@@ -253,11 +253,17 @@ and show the RPC response and refreshed limits.
 Authentication errors get one retry, then rotation. When `wait` says `needs login`, have the user run
 `login <account>`.
 
-When a `turn.failed` or `error` event contains `at capacity` (case-insensitive), the supervisor waits
-60 seconds and retries once on the same account. It resumes the existing thread with a short
-continuation prompt, or starts a new exec with the original prompt if no thread was created.
-This also works without configured accounts, and each review or fix turn gets its own retry.
-`stop` and signals interrupt the pause. Active time and weekly budgets span both attempts; the pause
-does not count as active exec time. A second capacity error fails the turn. `wait` shows
-`== retried: model at capacity`; telemetry and `report` record `capacity_retries` (0 for older rows).
-`CODEX_TASK_CAPACITY_RETRY_SECONDS` overrides the pause for tests.
+When a `turn.failed` or `error` event contains `at capacity` (case-insensitive), the supervisor pauses
+and then continues on the same account: the model is overloaded, not the account. The pauses before
+successive continuations in one turn follow `capacity_retry_minutes` (default `[1, 5, 15, 30]`
+minutes); a capacity error after the last pause fails the turn. When a continuation runs for at least
+10 minutes of active time without a capacity error, the next error starts the schedule again from its
+first pause. Each continuation resumes the existing thread with a short continuation prompt, or starts
+a new exec with the original prompt if no thread was created.
+This also works without configured accounts, and each review or fix turn gets its own schedule.
+`stop` and signals interrupt a pause at once. Active time and weekly budgets span all attempts; the
+pauses do not count as active exec time or toward `--max-minutes`. `wait` shows
+`== retried: model at capacity ×N` after a turn with a continuation, where N counts the task's
+continuations so far; state keeps that task total in `capacity_retries`, while telemetry rows and
+`report` record each turn's and phase's own count (0 for older rows).
+`CODEX_TASK_CAPACITY_RETRY_SECONDS`, when set, gives every pause that length, for tests.

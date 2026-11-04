@@ -240,7 +240,7 @@ def wait_ci(st, stopped, sleep):
     if st.get("outcome") != "completed":
         return finish("skipped", "outcome " + st.get("outcome", "unknown"))
     checks = st.get("checks", [])[st.get("check_start", 0):]
-    if st.get("check") and (not checks or checks[-1]["outcome"] != "passed"):
+    if st.get("check") and (not checks or checks[-1]["outcome"] not in checking.CHECK_NOT_FAILED):
         return finish("skipped", "local check did not pass")
     if st.get("ci_command"):
         return finish(*wait_ci_command(st, stopped, deadline))

@@ -138,7 +138,7 @@ def record_turn_result(st, stopped):
                "result_status": result.get("status"), "verdict": review.get("verdict"),
                "auto_fix_stop": st.get("auto_fix_stop"),
                "ci": st.get("ci"),
-               "capacity_retries": st.get("capacity_retries", 0),
+               "capacity_retries": st.get("capacity_retries", 0) - st.get("capacity_start", 0),
                "max_task_weekly_percent": st.get("max_task_weekly_percent"),
                "budget_stop": budgets.budget_stop(st), "turn_stops": st.get("turn_stops", [])}
         if st.get("executor") == "claude" and st.get("kind", "work") == "work":

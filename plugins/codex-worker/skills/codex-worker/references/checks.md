@@ -13,6 +13,21 @@ or timeout skips the review, and `wait` shows the last 40 lines of `check.log`.
   review and fix rounds.
 - Inside an automatic fix cycle, other incomplete results stop the cycle at once, before checks.
 
+## Check deadline and an unavailable environment
+
+Every run of the saved check and of the base check gets `CODEX_TASK_CHECK_DEADLINE` in its
+environment, also under `--sandbox workspace`: the whole Unix time in seconds at which the supervisor
+kills it (the start time plus `--check-timeout`). The rest of the environment is unchanged. A check
+that waits for a remote machine or a queue can compare an expected start with this deadline and give up
+early.
+
+Exit code 75 (`EX_TEMPFAIL`) means "the environment is unavailable, the check did not run". Its
+outcome is `unavailable` and the record keeps the `check.log` tail. It does not skip the review, start
+a fix round or send `check_failed`; `wait` prints `unavailable (exit 75)` with the tail, and `report`
+leaves it out of `checks %`, neither passed nor failed. Task CI still runs after an `unavailable`
+check, as after a passed one; a failed check or a timeout skips it with `local check did not pass`. A base check that exits 75 is `unavailable`
+the same way. When a task's check is `unavailable`, the lead runs it before merging.
+
 ## Guarded files
 
 The supervisor guards:
