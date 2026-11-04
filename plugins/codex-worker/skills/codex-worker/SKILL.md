@@ -68,6 +68,8 @@ Do not touch: <what is outside the task>.
 `start` appends the [standing rules](references/settings.md#standing-rules); don't repeat them in the
 brief. PR fields and publication receipts are described in [results.md](references/results.md).
 
+Done when lists only what the worker can do: no PR, publication or CI step, because the supervisor does them.
+
 Codex must not wait for remote CI inside a turn: push and finish the turn; the supervisor waits with `--ci` for GitHub or `--ci-command CMD` for other hosts.
 
 One task per brief; split independent parts into several tasks (stacked branches with `--base` when one
