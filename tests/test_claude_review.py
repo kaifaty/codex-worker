@@ -73,9 +73,11 @@ trace({"command": "review", "argv": sys.argv[1:], "cwd": os.getcwd(),
        "session_id": session_id, "system_prompt": system_prompt,
        "token_matches": os.environ.get("CLAUDE_CODE_OAUTH_TOKEN") == "fixture-claude-reviewer-oauth-secret",
        "config_dir": os.environ.get("CLAUDE_CONFIG_DIR"),
+       "disable_background_tasks": os.environ.get("CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"),
        "inherited_provider_keys": sorted(key for key in os.environ
            if (key.startswith("CLAUDE") or key.startswith("ANTHROPIC"))
-           and key not in ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR")),
+           and key not in ("CLAUDE_CODE_OAUTH_TOKEN", "CLAUDE_CONFIG_DIR",
+                          "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS")),
        "stdin": sys.stdin.read()})
 stopped = [False]
 
@@ -194,6 +196,7 @@ class ClaudeReviewTests(RotationTestCase):
                 entry = self.claude_invocations()[-1]
                 self.assertTrue(entry["token_matches"])
                 self.assertEqual(entry["config_dir"], str(self.claude_config_dir))
+                self.assertEqual(entry["disable_background_tasks"], "1")
                 self.assertEqual(entry["inherited_provider_keys"], [])
                 self.assertEqual(entry["cwd"], str(self.repo))
                 self.assertEqual(entry["pid"], entry["pgid"])
@@ -219,6 +222,11 @@ class ClaudeReviewTests(RotationTestCase):
                 self.assertEqual(path.parent, task_dir)
                 prompts.append(path)
                 text = entry["system_prompt"]
+                self.assertIn(
+                    "This turn runs headless: background commands and waiting for a notification end the turn "
+                    "and kill whatever runs in the background. Run long jobs in the foreground; if one outlasts "
+                    "a single command's timeout, start it with `nohup … > LOG 2>&1 &` and poll it in a blocking "
+                    "loop of at most 10 minutes per call until it ends.", text)
                 self.assertIn("git worktree", text)
                 self.assertIn("Root task instructions.\n", text)
                 self.assertIn("nested AGENTS.md", text)
@@ -381,6 +389,7 @@ class ClaudeReviewTests(RotationTestCase):
                         CODEX_FAKE_SECURITY_TRACE=str(self.security_trace_path),
                         ANTHROPIC_BASE_URL="https://host-account.example.test",
                         ANTHROPIC_API_KEY="host-account-secret", CLAUDECODE="1",
+                        CLAUDE_CODE_DISABLE_BACKGROUND_TASKS="0",
                         CLAUDE_CODE_ENTRYPOINT="desktop", CLAUDE_OTHER="host-setting")
         self.claude_limits = {"status": "allowed_warning", "rateLimitType": "seven_day",
                               "utilization": 0.5, "resetsAt": self.reset,
@@ -457,6 +466,7 @@ class ClaudeReviewTests(RotationTestCase):
         for entry in invocations:
             self.assertTrue(entry["token_matches"])
             self.assertEqual(entry["config_dir"], str(self.claude_config_dir))
+            self.assertEqual(entry["disable_background_tasks"], "1")
             self.assertEqual(entry["inherited_provider_keys"], [])
             self.assertEqual(entry["stdin"], "")
             self.assertEqual(entry["cwd"], state["worktree"])

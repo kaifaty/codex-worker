@@ -669,6 +669,18 @@ class WorkspaceTests(RotationTestCase):
         self.assertIn("Generated with", attribution)
         self.assertIn("pr_body", attribution)
         self.assertNotIn("gh", rules)
+        for filename, first, publication, status in (
+                ("rules.md", "- Finish with JSON matching the supplied output schema. ",
+                 "Opening the PR, publishing it and waiting for CI are the supervisor's: "
+                 'when they are the only unmet "Done when" items, report `done` and leave them out of `remaining`. ',
+                 'Set `status` to `done` only when every "Done when" condition is met,'),
+                ("rules.ru.md", "- В конце ответь JSON по переданной схеме. ",
+                 "Открыть PR, опубликовать его и дождаться CI — дело надзирателя: "
+                 "если из «Готово, когда» не выполнены только такие пункты, ставь `done` и не пиши их в `remaining`. ",
+                 "`status`: `done` — все пункты «Готово, когда» выполнены;")):
+            with self.subTest(rules=filename):
+                text = (SKILL / "references" / filename).read_text()
+                self.assertIn(first + publication + status, text)
 
     def test_pr_standalone_review_preserves_receipt_without_replaying_publication(self):
         for sandbox in ("off", "workspace"):
