@@ -1779,7 +1779,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.wait("duty-claude-new")
 
         self.cli("duty", "clear")
-        self.start("duty-claude-own", "--executor", "claude")
+        self.start("duty-claude-own", "--executor", "claude", "--parallel")
         self.wait("duty-claude-own")
         session = self.state("duty-claude-own")["session_id"]
         self.assertEqual(self.state("duty-claude-own")["claude_account"], "first")
