@@ -2,6 +2,7 @@
 import fcntl
 import json
 import os
+import plistlib
 import re
 import runpy
 import shutil
@@ -12,7 +13,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import accounts, budgets, claude_accounts, claude_review, claude_runner, clock, config, credit_resets, procs, prompts, result_schema, sandboxing, supervisor, task_state, telemetry_log, threads
+from . import accounts, budgets, claude_accounts, claude_review, claude_runner, clock, config, credit_resets, duty, procs, prompts, result_schema, sandboxing, supervisor, task_state, telemetry_log, threads
 
 
 def main_repo(path):
@@ -433,8 +434,10 @@ def cmd_accounts(a):
     if getattr(a, "json", False):
         print(json.dumps(accounts_json(infos, cfg), ensure_ascii=False))
         return
-    print_accounts(infos, cfg)
-    print("\n".join(accounts.claude_account_lines(cfg)))
+    record = duty.read_duty()
+    print_accounts(infos, cfg, record)
+    print("\n".join(accounts.claude_account_lines(
+        cfg, record["account"] if record and record["family"] == "claude" else None)))
 
 
 def accounts_json(infos, cfg):
@@ -495,10 +498,11 @@ def accounts_json(infos, cfg):
     return {"codex": codex, "claude": claude,
             "thresholds": {"soft_switch_at": cfg.get("soft_switch_at", cfg["switch_at"]),
                            "switch_at": cfg["switch_at"]},
-            "credits_floor": accounts.credits_floor(cfg), "credits_floor_until": cfg.get("credits_floor_until")}
+            "credits_floor": accounts.credits_floor(cfg), "credits_floor_until": cfg.get("credits_floor_until"),
+            "duty": duty.read_duty()}
 
 
-def print_accounts(infos, cfg):
+def print_accounts(infos, cfg, duty_record=None):
     if cfg.get("soft_switch_at", cfg["switch_at"]) != cfg["switch_at"]:
         print(f"soft_switch_at: {cfg['soft_switch_at']:g}% (switch_at: {cfg['switch_at']:g}%)")
     floor = accounts.credits_floor(cfg)
@@ -520,6 +524,8 @@ def print_accounts(infos, cfg):
             status = "exhausted until " + config.local_time(accounts.reset_time(info, cfg))
         else:
             status = "available"
+        if duty_record and duty_record["family"] == "codex" and duty_record["account"] == info["name"]:
+            status += " (on duty)"
         account = info.get("account", {})
         resets = credit_resets.reset_credits(info)
         count = info.get("reset_credits", {}).get("availableCount", len(resets))
@@ -532,6 +538,110 @@ def print_accounts(infos, cfg):
                           else "0") +
                          (" (at floor)" if accounts.at_credit_floor(info, cfg) else ""),
                          reset_label, status)))
+
+
+DUTY_LAUNCHD_LABEL = "codex-worker.duty"
+# Runs the newest installed plugin version at every start, so the job survives updates.
+DUTY_LAUNCHER = r"""import os, re, sys
+parent, relative, fallback = sys.argv[1:4]
+newest, script = None, fallback
+try:
+    names = os.listdir(parent)
+except OSError:
+    names = []
+for name in names:
+    candidate = os.path.join(parent, name, relative)
+    if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", name) and os.path.isfile(candidate):
+        version = tuple(int(part) for part in name.split("."))
+        if newest is None or version > newest:
+            newest, script = version, candidate
+os.execv(sys.executable, [sys.executable, "-I", script, "duty", "tick"])
+"""
+
+
+def duty_launchd_plist(minutes):
+    """A launchd job for duty tick; printing it never installs or loads anything."""
+    environment = {"PATH": os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
+                                            "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
+                   "CODEX_TASK_HOME": str(config.CODEX_HOME)}
+    for key in ("CODEX_TASK_CODEX", "CODEX_TASK_CLAUDE"):
+        if os.environ.get(key):
+            environment[key] = os.environ[key]
+    log = str(config.CODEX_HOME / "duty-launchd.log")
+    return {"Label": DUTY_LAUNCHD_LABEL,
+            "ProgramArguments": ["/usr/bin/env", "python3", "-I", "-c", DUTY_LAUNCHER, str(config.PLUGIN.parent),
+                                 str(config.SCRIPT_RESOLVED.relative_to(config.PLUGIN)), str(config.SCRIPT_RESOLVED)],
+            "StartInterval": minutes * 60, "RunAtLoad": True, "EnvironmentVariables": environment,
+            "StandardOutPath": log, "StandardErrorPath": log}
+
+
+def duty_rooms_text(record):
+    families = ["%s %s" % (family, ", ".join(f"{name} {room:g}" for name, room in sorted(entries.items())))
+                for family, entries in sorted(record["rooms"].items()) if entries]
+    return "; ".join(families) or "none"
+
+
+def duty_summary(record):
+    label = duty.duty_label(record)
+    return ((f"{label} since " if label else "no duty account since ")
+            + config.local_time(record["since"]) + ": " + record["reason"])
+
+
+def cmd_duty_tick(a):
+    cfg = config.accounts_config()
+    refreshed_at = clock.CLOCK.time()
+    try:
+        claude_review.refresh_limits(cfg)
+    except Exception as exc:
+        # Stale or unknown snapshots simply stay out of the election.
+        print(f"duty tick: Claude limit refresh failed: {exc}", file=sys.stderr)
+    try:
+        config.CODEX["path"] = config.resolve_codex()
+    except SystemExit as exc:
+        # procs.die reports a missing Codex CLI; Claude accounts can still be elected.
+        print(f"duty tick: Codex accounts skipped: {exc}", file=sys.stderr)
+        infos = [dict(account, logged_in=None) for account in cfg["accounts"]]
+    else:
+        infos = accounts.snapshots(cfg)
+    record, changed = duty.run_duty_tick(cfg, infos, refreshed_at)
+    print(("duty changed to " if changed else "duty ") + duty_summary(record))
+
+
+def cmd_duty_status(a):
+    record = duty.read_duty(warn=False)
+    unreadable = record is None and duty.duty_path().exists()
+    age = (clock.CLOCK.time() - record["checked_at"]) / 60 if record else None
+    stale = age is not None and age > duty.DUTY_STALE_MINUTES
+    if a.json:
+        print(json.dumps({"duty": record, "checked_minutes_ago": round(age, 1) if age is not None else None,
+                          "stale": stale, "unreadable": unreadable}, ensure_ascii=False))
+        return
+    if record is None:
+        print(f"duty.json is unreadable; account selection ignores it until the next duty tick: {duty.duty_path()}"
+              if unreadable else "no duty account: duty.json is absent")
+        return
+    print("duty " + duty_summary(record))
+    print("rooms: " + duty_rooms_text(record))
+    print(f"checked {config.local_time(record['checked_at'])} ({age:.0f} min ago)")
+    if stale:
+        print(f"warning: no duty check for {age:.0f} minutes; re-election is not running "
+              "(run duty tick, or install the duty plist job)")
+
+
+def cmd_duty_clear(a):
+    if duty.clear_duty():
+        print(f"duty cleared; the change log stays in {duty.duty_log_path()}")
+    else:
+        print("no duty account: duty.json is absent")
+
+
+def cmd_duty_plist(a):
+    sys.stdout.write(plistlib.dumps(duty_launchd_plist(a.minutes)).decode("utf-8"))
+
+
+def cmd_duty(a):
+    {"tick": cmd_duty_tick, "status": cmd_duty_status, "clear": cmd_duty_clear,
+     "plist": cmd_duty_plist}[a.duty_command](a)
 
 
 def cmd_reset_credit(a):

@@ -3,7 +3,7 @@ import json
 import re
 import time
 
-from . import accounts, claude_accounts, claude_review, clock, config, credit_resets, notifications, result_schema, task_state, telemetry_log
+from . import accounts, claude_accounts, claude_review, clock, config, credit_resets, duty, notifications, result_schema, task_state, telemetry_log
 
 
 def limit_reason(info, cfg, soft=False):
@@ -196,6 +196,20 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
     def update_waited():
         st["reset_wait_seconds"] = already_waited + max(0, clock.CLOCK.time() - wait_started)
 
+    def choose(infos):
+        current = next((i for i in infos if i["name"] == st["account"]), {})
+        own = st.get("kind") != "review" and st.get("thread")
+        if own and current.get("logged_in") and not accounts.exhausted(current, cfg):
+            return current
+        # New work skips the duty account; the task's own thread may spend its credits.
+        reserved = duty.codex_reserved(infos, cfg)
+        chosen = accounts.available(infos, cfg, reserved)
+        if not chosen and cfg.get("credits"):
+            chosen = (current if current.get("logged_in") and accounts.has_credits(current, cfg)
+                      and (own or current.get("name") not in reserved)
+                      else accounts.credit_account(infos, cfg, reserved))
+        return chosen
+
     while not stopped():
         update_waited()
         remaining = deadline - clock.CLOCK.time()
@@ -226,13 +240,7 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
                 record_exhausted(st, infos, cfg, reason + "; reset wait exceeded 8 days")
             return None
         if refreshed is not None:
-            current = next((i for i in infos if i["name"] == st["account"]), {})
-            if st.get("kind") != "review" and st.get("thread") and current.get("logged_in") and not accounts.exhausted(current, cfg):
-                return current
-            chosen = accounts.available(infos, cfg)
-            if not chosen and cfg.get("credits"):
-                chosen = (current if current.get("logged_in") and accounts.has_credits(current, cfg)
-                          else accounts.credit_account(infos, cfg))
+            chosen = choose(infos)
             if chosen:
                 return chosen
             unknown = [i for i in infos if i.get("logged_in") is None]
@@ -298,22 +306,18 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
             return None
         if no_logged_in_accounts(st, infos):
             return None
-        current = next((i for i in infos if i["name"] == st["account"]), {})
-        if st.get("kind") != "review" and st.get("thread") and current.get("logged_in") and not accounts.exhausted(current, cfg):
-            return current
-        chosen = accounts.available(infos, cfg)
-        if not chosen and cfg.get("credits"):
-            chosen = (current if current.get("logged_in") and accounts.has_credits(current, cfg)
-                      else accounts.credit_account(infos, cfg))
+        chosen = choose(infos)
         if chosen:
             return chosen
     return None
 
 
-def claude_reset(cfg):
-    """Earliest future limit end or window reset in the Claude pool."""
+def claude_reset(cfg, skip=()):
+    """Earliest future limit end or window reset in the Claude pool, without the accounts in skip."""
     limits, now, resets = claude_accounts.read_limits(), clock.CLOCK.time(), []
     for account in claude_accounts.accounts(cfg):
+        if account["name"] in skip:
+            continue
         info = limits.get(account["name"], {})
         windows = info.get("unifiedWindows") or {}
         # A limited account returns at its known limit end, whatever its windows say.
@@ -331,10 +335,12 @@ def claude_choice(st, cfg, stopped, exclude=()):
     current = st.get("claude_account")
     others = [account["name"] for account in claude_accounts.accounts(cfg) if account["name"] != current]
     if current and current not in exclude:
-        chosen = claude_review.select_account(cfg, "work", exclude=others, stopped=stopped)
+        # A duty account finishes the work it has already started.
+        chosen = claude_review.select_account(cfg, "work", exclude=others, stopped=stopped, keep_duty=True)
         if chosen is not None or stopped():
             return chosen
-    return claude_review.select_account(cfg, "work", exclude=set(exclude) | {current}, stopped=stopped)
+    return claude_review.select_account(cfg, "work", exclude=set(exclude) | {current}, stopped=stopped,
+                                        task_type=st.get("task_type"))
 
 
 def wait_for_claude_account(st, cfg, reason, stopped, sleep=None):
@@ -347,8 +353,13 @@ def wait_for_claude_account(st, cfg, reason, stopped, sleep=None):
     def update_waited():
         st["reset_wait_seconds"] = already_waited + max(0, clock.CLOCK.time() - wait_started)
 
+    def reserved():
+        # Do not wake for a duty account that this task may not take.
+        current = st.get("claude_account")
+        return duty.claude_reserved(cfg, "work", {current} if current else (), st.get("task_type"))
+
     def exhausted(why):
-        stamp, name = claude_reset(cfg)
+        stamp, name = claude_reset(cfg, reserved())
         st.pop("sleeping", None)
         st.update(outcome="exhausted", exhausted={"at": clock.CLOCK.time(), "reset": stamp,
                                                   "account": name, "reason": why})
@@ -364,7 +375,7 @@ def wait_for_claude_account(st, cfg, reason, stopped, sleep=None):
         if not cfg["wait_for_reset"]:
             exhausted(reason)
             return None
-        stamp, name = claude_reset(cfg)
+        stamp, name = claude_reset(cfg, reserved())
         # A delayed reset may still have its old timestamp. Avoid a tight probe loop.
         until = stamp + config.RESET_MARGIN if stamp is not None else started + config.RESET_RETRY_SECONDS
         if until <= started:

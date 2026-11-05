@@ -115,7 +115,7 @@ def token_available(name):
             info.pop("limited_at", None)
 
 
-def _window_used(window, now):
+def window_used(window, now):
     reset = window.get("resetsAt")
     if result_schema.is_finite_number(reset) and reset <= now:
         return 0
@@ -183,7 +183,7 @@ def mark_limited(name, token_unavailable=False):
             return until
         windows = info.get("unifiedWindows") or {}
         depleted = [window.get("resetsAt") for window in windows.values()
-                    if isinstance(window, dict) and _window_used(window, now) >= 100]
+                    if isinstance(window, dict) and window_used(window, now) >= 100]
         depleted = [reset for reset in depleted if result_schema.is_finite_number(reset) and reset > now]
         resets = [window.get("resetsAt") for window in windows.values() if isinstance(window, dict)]
         resets = [reset for reset in resets if result_schema.is_finite_number(reset) and reset > now]
@@ -210,7 +210,7 @@ def select(cfg, role, exclude=(), prefer_unused=()):
         thresholds = (min(work, thresholds[0]), work)
     for threshold in thresholds:
         available = [account for account in choices if all(
-            _window_used((limits.get(account["name"], {}).get("unifiedWindows") or {}).get(window) or {}, now)
+            window_used((limits.get(account["name"], {}).get("unifiedWindows") or {}).get(window) or {}, now)
             < threshold for window in ("five_hour", "seven_day"))]
         if available:
             available = [account for account in available if account["name"] not in prefer_unused] or available
@@ -220,8 +220,8 @@ def select(cfg, role, exclude=(), prefer_unused=()):
                 weekly = windows.get("seven_day") or {}
                 reset = weekly.get("resetsAt")
                 hours = (reset - now) / 3600 if result_schema.is_finite_number(reset) and reset > now else 168
-                score = (100 - _window_used(weekly, now)) * account.get("weight", 1) / max(hours, 1)
-                return -score, _window_used(windows.get("five_hour") or {}, now)
+                score = (100 - window_used(weekly, now)) * account.get("weight", 1) / max(hours, 1)
+                return -score, window_used(windows.get("five_hour") or {}, now)
 
             return min(available, key=priority)
     return None

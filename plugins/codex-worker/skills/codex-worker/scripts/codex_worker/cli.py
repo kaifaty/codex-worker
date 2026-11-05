@@ -18,6 +18,7 @@
   codex_task.py claude-probe <name>                  check a Claude token and cache usage limits
   codex_task.py claude-rename <old> <new>            rename a Claude account without moving credentials
   codex_task.py claude-remove <name>                 remove a Claude account from the pool
+  codex_task.py duty tick | status [--json] | clear | plist [--minutes N]  elect, show, clear or schedule the duty account
 
 All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
@@ -95,6 +96,16 @@ def max_weekly(value):
     if not math.isfinite(weekly) or not 0 < weekly <= 100:
         raise argparse.ArgumentTypeError("max weekly must be a finite number in (0, 100]")
     return weekly
+
+
+def plist_minutes(value):
+    try:
+        minutes = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("minutes must be a positive integer")
+    if minutes < 1:
+        raise argparse.ArgumentTypeError("minutes must be a positive integer")
+    return minutes
 
 
 def review_angles(value):
@@ -267,6 +278,7 @@ COMMAND_HANDLERS = {
     "claude-probe": commands.cmd_claude_probe,
     "claude-rename": commands.cmd_claude_rename,
     "claude-remove": commands.cmd_claude_remove,
+    "duty": commands.cmd_duty,
     "_run": supervisor.cmd__run,
 }
 
@@ -334,6 +346,14 @@ def main():
     s.add_argument("new")
     s = sub.add_parser("claude-remove", help="remove a Claude account without deleting credentials")
     s.add_argument("name")
+    s = sub.add_parser("duty", help="elect, show, clear or schedule the duty account")
+    duty_commands = s.add_subparsers(dest="duty_command", required=True)
+    duty_commands.add_parser("tick", help="refresh stale limits and re-elect the duty account")
+    s = duty_commands.add_parser("status", help="show the duty account, its reason, rooms and check age")
+    s.add_argument("--json", action="store_true", help="print the duty record as JSON")
+    duty_commands.add_parser("clear", help="remove duty.json; selection works as without a duty account")
+    s = duty_commands.add_parser("plist", help="print a launchd job that runs duty tick (installs nothing)")
+    s.add_argument("--minutes", type=plist_minutes, default=30, help="interval between ticks (default: 30)")
     if sys.argv[1:2] == ["scout"]:
         # Intermixed parsing is supported on the scout parser, not on subparsers as a group.
         a = scout_parser.parse_intermixed_args(sys.argv[2:])
