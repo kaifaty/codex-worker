@@ -1,0 +1,56 @@
+{
+  "board-web-frontend": {
+    "timeline": [
+      {
+        "at": 1793994600,
+        "text": "задача создана"
+      },
+      {
+        "at": 1793994610,
+        "text": "ход 1 на claude-pool-2 (claude-opus-5-5, high)"
+      },
+      {
+        "at": 1793998500,
+        "text": "проверка: npm run build — упала (vue-tsc: 3 ошибки)"
+      },
+      {
+        "at": 1793998520,
+        "text": "ревью codex: 2 находки"
+      },
+      {
+        "at": 1793999240,
+        "text": "ход 2: исправление ревью"
+      }
+    ],
+    "files": {
+      "brief": "# Доска задач: фронтенд\n\nСделай **живую** канбан-доску по контракту `board/CONTRACT.md`.\n\n## Готово, когда\n\n- колонки «Работает», «Спит до сброса», «Ждёт ревью», «Нужно внимание», «Закрыто»;\n- карточка показывает исполнителя, аккаунт, фазу и активность;\n- `npm run build` и `npm test -- --run` проходят.\n\n```sh\ncd board/web && npm ci && npm run build && npm test -- --run\n```\n\nHTML не исполняется: <script>alert(1)</script> <b>жирный</b>.\n\nОчень длинная строка без пробелов: /very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path/very/long/path\n\nСсылка: https://github.com/kaifaty/codex-worker\n",
+      "last": "## Итог хода 1\n\nСобрал каркас приложения, редьюсер и тесты.\n\n| проверка | итог |\n|---|---|\n| build | passed |\n| test | 3 failed |\n",
+      "review": "### Находки\n\n1. `reduce.ts`: `task_removed` для неизвестного slug возвращает новый объект.\n2. Нет видимого фокуса у карточек.\n",
+      "check": "$ npm run build\n> vue-tsc --noEmit && vite build\n\nsrc/components/TaskCard.vue:42:7 - error TS2322: Type 'string | null' is not assignable to type 'string'.\nvite v8.3.6 building for production... transforming (0) src/deep/deep/deep/deep/deep/deep/module-0.ts\nvite v8.3.6 building for production... transforming (7) src/deep/deep/deep/deep/deep/deep/module-1.ts\nvite v8.3.6 building for production... transforming (14) src/deep/deep/deep/deep/deep/deep/module-2.ts\nvite v8.3.6 building for production... transforming (21) src/deep/deep/deep/deep/deep/deep/module-3.ts\nvite v8.3.6 building for production... transforming (28) src/deep/deep/deep/deep/deep/deep/module-4.ts\nvite v8.3.6 building for production... transforming (35) src/deep/deep/deep/deep/deep/deep/module-5.ts\nvite v8.3.6 building for production... transforming (42) src/deep/deep/deep/deep/deep/deep/module-6.ts\nvite v8.3.6 building for production... transforming (49) src/deep/deep/deep/deep/deep/deep/module-7.ts\nvite v8.3.6 building for production... transforming (56) src/deep/deep/deep/deep/deep/deep/module-8.ts\nvite v8.3.6 building for production... transforming (63) src/deep/deep/deep/deep/deep/deep/module-9.ts\nvite v8.3.6 building for production... transforming (70) src/deep/deep/deep/deep/deep/deep/module-10.ts\nvite v8.3.6 building for production... transforming (77) src/deep/deep/deep/deep/deep/deep/module-11.ts\nvite v8.3.6 building for production... transforming (84) src/deep/deep/deep/deep/deep/deep/module-12.ts\nvite v8.3.6 building for production... transforming (91) src/deep/deep/deep/deep/deep/deep/module-13.ts\nvite v8.3.6 building for production... transforming (98) src/deep/deep/deep/deep/deep/deep/module-14.ts\nvite v8.3.6 building for production... transforming (105) src/deep/deep/deep/deep/deep/deep/module-15.ts\nvite v8.3.6 building for production... transforming (112) src/deep/deep/deep/deep/deep/deep/module-16.ts\nvite v8.3.6 building for production... transforming (119) src/deep/deep/deep/deep/deep/deep/module-17.ts\nvite v8.3.6 building for production... transforming (126) src/deep/deep/deep/deep/deep/deep/module-18.ts\nvite v8.3.6 building for production... transforming (133) src/deep/deep/deep/deep/deep/deep/module-19.ts\nvite v8.3.6 building for production... transforming (140) src/deep/deep/deep/deep/deep/deep/module-20.ts\nvite v8.3.6 building for production... transforming (147) src/deep/deep/deep/deep/deep/deep/module-21.ts\nvite v8.3.6 building for production... transforming (154) src/deep/deep/deep/deep/deep/deep/module-22.ts\nvite v8.3.6 building for production... transforming (161) src/deep/deep/deep/deep/deep/deep/module-23.ts\nvite v8.3.6 building for production... transforming (168) src/deep/deep/deep/deep/deep/deep/module-24.ts\nvite v8.3.6 building for production... transforming (175) src/deep/deep/deep/deep/deep/deep/module-25.ts\nvite v8.3.6 building for production... transforming (182) src/deep/deep/deep/deep/deep/deep/module-26.ts\nvite v8.3.6 building for production... transforming (189) src/deep/deep/deep/deep/deep/deep/module-27.ts\nvite v8.3.6 building for production... transforming (196) src/deep/deep/deep/deep/deep/deep/module-28.ts\nvite v8.3.6 building for production... transforming (203) src/deep/deep/deep/deep/deep/deep/module-29.ts\nvite v8.3.6 building for production... transforming (210) src/deep/deep/deep/deep/deep/deep/module-30.ts\nvite v8.3.6 building for production... transforming (217) src/deep/deep/deep/deep/deep/deep/module-31.ts\nvite v8.3.6 building for production... transforming (224) src/deep/deep/deep/deep/deep/deep/module-32.ts\nvite v8.3.6 building for production... transforming (231) src/deep/deep/deep/deep/deep/deep/module-33.ts\nvite v8.3.6 building for production... transforming (238) src/deep/deep/deep/deep/deep/deep/module-34.ts\nvite v8.3.6 building for production... transforming (245) src/deep/deep/deep/deep/deep/deep/module-35.ts\nvite v8.3.6 building for production... transforming (252) src/deep/deep/deep/deep/deep/deep/module-36.ts\nvite v8.3.6 building for production... transforming (259) src/deep/deep/deep/deep/deep/deep/module-37.ts\nvite v8.3.6 building for production... transforming (266) src/deep/deep/deep/deep/deep/deep/module-38.ts\nvite v8.3.6 building for production... transforming (273) src/deep/deep/deep/deep/deep/deep/module-39.ts\n✓ built in 1.24s\n"
+    }
+  },
+  "budget-overrun": {
+    "timeline": [
+      {
+        "at": 1793930000,
+        "text": "задача создана"
+      },
+      {
+        "at": 1793940000,
+        "text": "ротация: claude-pool-1 → claude-pool-3 (лимит 5 ч)"
+      },
+      {
+        "at": 1793997000,
+        "text": "CI: failed (train-smoke)"
+      },
+      {
+        "at": 1793998700,
+        "text": "бюджет ходов исчерпан"
+      }
+    ],
+    "files": {
+      "brief": "Перепиши цикл обучения на новый загрузчик.",
+      "check": "FAILED tests/test_train.py::test_smoke - AssertionError: loss is nan\n1 failed, 41 passed in 12.3s\n"
+    }
+  }
+}
