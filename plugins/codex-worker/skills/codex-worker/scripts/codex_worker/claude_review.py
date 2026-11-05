@@ -10,7 +10,7 @@ import tempfile
 import time
 from pathlib import Path
 
-from . import claude_accounts, claude_runner, clock, config, procs, task_state
+from . import claude_accounts, claude_runner, clock, config, duty, procs, task_state
 
 
 def worktree_snapshot(st):
@@ -76,8 +76,10 @@ def refresh_limits(cfg, stopped=None):
             probe(cfg, account, stale_only=True, stopped=stopped)
 
 
-def select_account(cfg, role, exclude=(), prefer_unused=(), stopped=None):
+def select_account(cfg, role, exclude=(), prefer_unused=(), stopped=None, task_type=None):
+    """Choose for new work after a refresh, skipping the duty account (duty.claude_reserved)."""
     refresh_limits(cfg, stopped)
+    exclude = set(exclude) | duty.claude_reserved(cfg, role, exclude, task_type, stopped)
     return claude_accounts.select(cfg, role, exclude, prefer_unused)
 
 

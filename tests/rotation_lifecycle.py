@@ -1538,7 +1538,7 @@ worker.notifications.reap_notifications = reap
                         "five_hour": None, "seven_day": None,
                         "limited_until": None, "token_unavailable": None}],
             "thresholds": {"soft_switch_at": 80, "switch_at": 99},
-            "credits_floor": 0, "credits_floor_until": None})
+            "credits_floor": 0, "credits_floor_until": None, "duty": None})
         for private in (token, str(self.home), str(self.other), str(claude_home)):
             self.assertNotIn(private, encoded)
         self.assertFalse(self.invocations())
