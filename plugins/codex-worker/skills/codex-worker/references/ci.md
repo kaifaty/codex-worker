@@ -18,7 +18,21 @@ before and after the command: an unpushed or mismatched head is `skipped`, as is
 waiting. The same `ci_timeout_minutes`, budget exclusions, `stop` handling and repair rounds apply.
 The result contains one check named after the command, with output selected by the excerpt rules below.
 
-Passing or skipped checks give `passed`; failed or cancelled checks give `failed`. A remaining CI
+GitHub checks also skip repair when all failed or cancelled checks are unrelated to the branch.
+An Actions job did not start if its annotation begins with `The job was not started because` or its
+steps list is empty. If every failed check is such a job, CI records `skipped` with reason
+`CI unavailable: jobs not started: <names>`. Otherwise, a check is red on the base when a check with
+the same name completed with `failure` on the current head of the PR's base branch. If every failure
+is either red on the base or a job that did not start, CI records `skipped` with a reason beginning
+`base red: <names> also fail on <base> <short sha>`, also naming jobs that did not start.
+`wait` keeps the failed-check links and log excerpts for comparison with the base.
+
+Request errors or timeouts, checks without an Actions job, and missing or unfinished checks on the
+base retain the normal branch-failure behavior. If any branch failure remains, repair proceeds;
+the prompt names checks red on the base and jobs that did not start separately and says they need
+no fix in this branch.
+
+Passing or skipped checks give `passed`; other failed or cancelled checks give `failed`. A remaining CI
 round sends failed-check names and selected log lines to the same implementation thread. GitHub
 Actions excerpts select failure blocks around unittest `FAIL:` / `ERROR:`, Python tracebacks and
 `AssertionError`, `Error:`, pytest `E   ` / `FAILED`, and Actions `##[error]` annotations. They include

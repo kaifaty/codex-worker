@@ -20,9 +20,10 @@ class WorkspaceTests(RotationTestCase):
         return [event for event in self.gh_invocations()
                 if event["argv"][:2] in (["pr", "create"], ["pr", "edit"])]
 
-    def configure_ci(self, snapshots, jobs=None, head_sha=None):
+    def configure_ci(self, snapshots, jobs=None, head_sha=None, **scenario):
         path = self.root / "fake-gh-ci.json"
         value = {"checks": snapshots, "jobs": jobs or {}}
+        value.update(scenario)
         if head_sha is not None:
             value["head_sha"] = head_sha
         path.write_text(json.dumps(value))
@@ -1220,6 +1221,130 @@ class WorkspaceTests(RotationTestCase):
             ci = worker.ci_runs.wait_ci(st, lambda: False, lambda _: None)
             self.assertEqual((ci["outcome"], ci["reason"]), ("skipped", "head changed while waiting"))
 
+    def test_ci_jobs_not_started_skip_without_an_extra_codex_turn(self):
+        self.configure(language="en", sandbox="workspace")
+        checks = [self.ci_check("fail", name="billing", job="123"),
+                  self.ci_check("cancel", name="empty job", job="124")]
+        self.configure_ci([checks], job_steps={"124": []}, annotation_pages={"123": [[], [{
+            "message": "The job was not started because your spending limit needs to be increased."}]]})
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-not-started", "--ci")
+        output = self.wait("ci-not-started")
+        ci = self.state("ci-not-started")["ci"]
+        reason = "CI unavailable: jobs not started: billing, empty job"
+        self.assertEqual((ci["outcome"], ci["reason"], ci["rounds"]), ("skipped", reason, 0))
+        self.assertEqual([check["failure_kind"] for check in ci["checks"]], ["not_started"] * 2)
+        self.assertIn("== CI " + ci["sha"][:7] + ": skipped: " + reason, output)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertEqual(len(self.ci_polls()), 1)
+
+    def test_ci_base_red_skips_repair_and_wait_keeps_failed_check_evidence(self):
+        self.configure(language="en", sandbox="workspace")
+        self.env["GH_REPO"] = "unrelated/repository"
+        checks = [self.ci_check("fail", name="unit tests", job="123"),
+                  self.ci_check("fail", name="localization", job="124")]
+        logs = {"123": "AssertionError: unchanged test is red on main",
+                "124": "Error: translations temporarily unavailable"}
+        self.configure_ci([checks], jobs=logs, base_sha="c" * 40, base_check_pages=[
+            {"check_runs": [{"name": check["name"], "status": "completed", "conclusion": "failure"}]}
+            for check in checks])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work()])
+        self.start("ci-base-red", "--ci")
+        output = self.wait("ci-base-red")
+        ci = self.state("ci-base-red")["ci"]
+        self.assertEqual((ci["outcome"], ci["rounds"]), ("skipped", 0))
+        self.assertTrue(ci["reason"].startswith("base red: unit tests, localization also fail on main ccccccc"))
+        self.assertEqual([check["failure_kind"] for check in ci["checks"]], ["base_red"] * 2)
+        for check in ci["checks"]:
+            self.assertIn(check["link"], output)
+            self.assertIn(check["tail"], output)
+        for log in logs.values():
+            self.assertIn(log, output)
+        self.assertIn(ci["reason"], output)
+        self.assertEqual(len(self.invocations()), 1)
+        self.assertEqual(len(self.ci_polls()), 1)
+        base_request, = [event["argv"] for event in self.gh_invocations()
+                         if event["argv"][:1] == ["api"] and "/commits/" in " ".join(event["argv"])]
+        self.assertIn("repos/fixture/repo/commits/" + "c" * 40 + "/check-runs?per_page=100", base_request)
+        self.assertIn("--paginate", base_request)
+        self.assertIn("--slurp", base_request)
+
+    def test_ci_mixed_failures_repair_only_branch_checks_and_label_exclusions(self):
+        self.configure(language="en", sandbox="workspace")
+        checks = [self.ci_check("fail", name="branch regression", job="123"),
+                  self.ci_check("fail", name="base localization", job="124"),
+                  self.ci_check("cancel", name="runner unavailable", job="125")]
+        self.configure_ci([checks, [self.ci_check()]], job_steps={"125": []}, base_checks=[
+            {"name": "base localization", "status": "completed", "conclusion": "failure"}])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed branch\n")])
+        self.start("ci-mixed", "--ci")
+        self.wait("ci-mixed")
+        ci = self.state("ci-mixed")["ci"]
+        self.assertEqual((ci["outcome"], ci["rounds"]), ("passed", 1))
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.ci_polls()), 2)
+        prompt = self.invocations()[1]["prompt"]
+        self.assertIn("branch regression", prompt)
+        self.assertIn("\nAlso fail on the base branch; do not fix in this branch: base localization\n", prompt)
+        self.assertIn("\nJobs not started; do not fix in this branch: runner unavailable\n", prompt)
+
+    def test_ci_base_request_error_keeps_the_repair_round_even_with_json_stdout(self):
+        self.configure(language="en", sandbox="workspace")
+        failed = self.ci_check("fail")
+        self.configure_ci([[failed], [self.ci_check()]], base_error=True, base_checks=[
+            {"name": failed["name"], "status": "completed", "conclusion": "failure"}])
+        self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("fixed branch\n")])
+        self.start("ci-base-error", "--ci")
+        self.wait("ci-base-error")
+        ci = self.state("ci-base-error")["ci"]
+        self.assertEqual((ci["outcome"], ci["rounds"]), ("passed", 1))
+        self.assertEqual(len(self.invocations()), 2)
+        self.assertEqual(len(self.ci_polls()), 2)
+        prompt = self.invocations()[1]["prompt"]
+        self.assertIn(failed["name"], prompt)
+        self.assertNotIn("Also fail on the base branch;", prompt)
+
+    def test_ci_failure_classification_mixed_skip_and_uncertain_evidence(self):
+        worker = self.worker()
+        for case in ("base_red", "pending", "missing", "external", "job_error", "annotation_timeout", "base_timeout"):
+            with self.subTest(case=case):
+                check = self.ci_check("fail", name="unit tests")
+                if case == "external":
+                    check["link"] = "https://external.test/check/123"
+                not_started = self.ci_check("cancel", name="empty job", job="124")
+                st = {"ci": {"checks": [check, not_started]}}
+
+                def request(state, args, stopped, timeout=60):
+                    self.assertIs(state, st)
+                    if args[1:3] == ["pr", "view"]:
+                        return {"baseRefName": "main", "baseRefOid": "b" * 40,
+                                "url": "https://github.com/fixture/repo/pull/1"}
+                    endpoint = next(arg for arg in args if arg.startswith("repos/"))
+                    if "/actions/jobs/" in endpoint:
+                        if case == "job_error" and endpoint.endswith("/123"):
+                            raise ValueError("job request failed")
+                        return {"steps": [] if endpoint.endswith("/124") else [{"name": "Run tests"}]}
+                    if "/annotations?" in endpoint:
+                        if case == "annotation_timeout" and "/123/" in endpoint:
+                            raise subprocess.TimeoutExpired(args, timeout)
+                        return [[]]
+                    self.assertIn("/commits/", endpoint)
+                    if case == "base_timeout":
+                        raise subprocess.TimeoutExpired(args, timeout)
+                    runs = [] if case == "missing" else [{"name": "unit tests", "conclusion": "failure",
+                                                         "status": "in_progress" if case == "pending" else "completed"}]
+                    return [{"check_runs": runs}]
+
+                with mock.patch.object(worker.ci_runs, "ci_json", side_effect=request):
+                    reason = worker.ci_runs.ci_classify_failures(
+                        st, "gh", "https://github.com/fixture/repo/pull/1", lambda: False,
+                        worker.clock.CLOCK.monotonic() + 60)
+                expected = ("base red: unit tests also fail on main bbbbbbb; jobs not started: empty job"
+                            if case == "base_red" else "")
+                self.assertEqual(reason, expected)
+                self.assertEqual(check["failure_kind"], "base_red" if case == "base_red" else "branch")
+                self.assertEqual(not_started["failure_kind"], "not_started")
+
     def test_ci_pending_then_passed_is_reported_without_an_extra_codex_turn(self):
         self.configure(language="en", sandbox="workspace")
         self.configure_notify()
@@ -1391,7 +1516,10 @@ class WorkspaceTests(RotationTestCase):
         worker = self.worker()
         check = self.ci_check("fail")
         check["tail"] = "fixture failed job evidence\nAssertionError: Python 3.9\n"
-        ci = {"sha": "a" * 40, "outcome": "failed", "checks": [check]}
+        base_red = dict(self.ci_check("fail", name="base localization", job="124"), failure_kind="base_red")
+        not_started = dict(self.ci_check("cancel", name="runner unavailable", job="125"),
+                           failure_kind="not_started")
+        ci = {"sha": "a" * 40, "outcome": "failed", "checks": [check, base_red, not_started]}
         for language in ("en", "ru"):
             self.configure(language=language)
             for sandbox in ("off", "workspace"):
@@ -1400,6 +1528,12 @@ class WorkspaceTests(RotationTestCase):
                     for text in (check["name"], check["link"], "fixture failed job evidence",
                                  "Python 3.9"):
                         self.assertIn(text, prompt)
+                    excluded = (("Also fail on the base branch; do not fix in this branch: ",
+                                 "Jobs not started; do not fix in this branch: ") if language == "en" else
+                                ("Падают и на базовой ветке; не исправляй в этой ветке: ",
+                                 "Задания не запускались; не исправляй в этой ветке: "))
+                    for prefix, failure in zip(excluded, (base_red, not_started)):
+                        self.assertIn("\n" + prefix + failure["name"] + "\n", prompt)
                     self.assertEqual(prompt, worker.ci_runs.ci_fix_prompt({"sandbox": sandbox}, ci,
                                                                  worker.config.accounts_config()))
                     if sandbox == "workspace":
@@ -1670,7 +1804,9 @@ class WorkspaceTests(RotationTestCase):
                 args = args[1:]
             calls.append(args)
             if args[:2] == ["pr", "view"]:
-                return subprocess.CompletedProcess(args, 0, json.dumps({"headRefOid": head}), "")
+                value = {"headRefOid": head, "baseRefName": "main", "baseRefOid": "b" * 40,
+                         "url": "https://github.com/fixture/repo/pull/1"}
+                return subprocess.CompletedProcess(args, 0, json.dumps(value), "")
             if args[:2] == ["pr", "checks"]:
                 checks = snapshots[min(polls[0], len(snapshots) - 1)]
                 polls[0] += 1
@@ -1680,6 +1816,16 @@ class WorkspaceTests(RotationTestCase):
                 if any(check["bucket"] in ("fail", "cancel") for check in checks):
                     code = 1
                 return subprocess.CompletedProcess(args, code, json.dumps(checks), "")
+            if args[:1] == ["api"]:
+                endpoint = next(arg for arg in args if arg.startswith("repos/"))
+                if "/actions/jobs/" in endpoint:
+                    value = {"steps": [{"name": "Run tests"}]}
+                elif "/annotations?" in endpoint:
+                    value = [[]]
+                else:
+                    self.assertIn("/commits/", endpoint)
+                    value = [{"check_runs": []}]
+                return subprocess.CompletedProcess(args, 0, json.dumps(value), "")
             self.assertEqual(args[:2], ["run", "view"])
             return subprocess.CompletedProcess(args, 0, (jobs or {})[args[args.index("--job") + 1]], "")
 
