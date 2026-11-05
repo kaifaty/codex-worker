@@ -555,13 +555,17 @@ elif args[:2] == ["pr", "edit"]:
     if os.environ.get("CODEX_FAKE_GH_EDIT_ERROR"):
         print("fixture PR edit failed", file=sys.stderr)
         sys.exit(1)
-elif args[:2] in (["pr", "view"], ["pr", "checks"], ["run", "view"]):
+elif args[:2] in (["pr", "view"], ["pr", "checks"], ["run", "view"]) or args[:1] == ["api"]:
     scenario_path = Path(os.environ["CODEX_FAKE_GH_CI"])
     scenario = json.loads(scenario_path.read_text())
     if args[:2] == ["pr", "view"]:
         sha = scenario.get("head_sha") or subprocess.check_output(
             ["git", "rev-parse", "HEAD"], text=True).strip()
-        print(json.dumps({"headRefOid": sha}))
+        fields = args[args.index("--json") + 1].split(",")
+        value = {"headRefOid": sha, "baseRefName": "main",
+                 "baseRefOid": scenario.get("base_sha", "b" * 40),
+                 "url": "https://github.com/fixture/repo/pull/1"}
+        print(json.dumps({key: value[key] for key in fields}))
     elif args[:2] == ["pr", "checks"]:
         snapshots = scenario.get("checks", [[]])
         index = scenario.get("polls", 0)
@@ -573,6 +577,25 @@ elif args[:2] in (["pr", "view"], ["pr", "checks"], ["run", "view"]):
             sys.exit(8)
         if any(check["bucket"] in ("fail", "cancel") for check in checks):
             sys.exit(1)
+    elif args[:1] == ["api"]:
+        endpoint = next(arg for arg in args if arg.startswith("repos/"))
+        if args[args.index("--hostname") + 1] != "github.com" or not endpoint.startswith("repos/fixture/repo/"):
+            print("HTTP 404: fixture API repository not found", file=sys.stderr)
+            sys.exit(1)
+        if "/actions/jobs/" in endpoint:
+            job = endpoint.rsplit("/", 1)[1]
+            print(json.dumps({"steps": scenario.get("job_steps", {}).get(job, [{"name": "Run tests"}])}))
+        elif "/annotations?" in endpoint:
+            job = endpoint.split("/check-runs/", 1)[1].split("/", 1)[0]
+            print(json.dumps(scenario.get("annotation_pages", {}).get(
+                job, [scenario.get("annotations", {}).get(job, [])])))
+        elif "/commits/" in endpoint and endpoint.endswith("/check-runs?per_page=100"):
+            print(json.dumps(scenario.get("base_check_pages", [{"check_runs": scenario.get("base_checks", [])}])))
+            if scenario.get("base_error"):
+                print("HTTP 503: fixture base checks unavailable", file=sys.stderr)
+                sys.exit(1)
+        else:
+            sys.exit("unsupported fake gh API invocation")
     else:
         job = args[args.index("--job") + 1]
         repository = (args[args.index("--repo") + 1] if "--repo" in args
