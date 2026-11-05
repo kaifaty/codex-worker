@@ -131,7 +131,7 @@ class SessionRecord:
     state: dict
     summary: dict = field(default_factory=dict)
     tail: EventTail | None = None
-    transcript_searched: bool = False
+    transcript_search_at: float | None = None
     activity: dict | None = None
 
 
@@ -384,7 +384,7 @@ class Store:
                             else:
                                 if record.state.get("cliSessionId") != state.get("cliSessionId"):
                                     record.tail = None
-                                    record.transcript_searched = False
+                                    record.transcript_search_at = None
                                     record.activity = None
                                 record.state = state
                             self._session_paths[path] = slug
@@ -473,18 +473,19 @@ class Store:
         projects = root / "projects"
         if root.is_symlink() or projects.is_symlink():
             return
-        if (record.tail is not None and not record.transcript_searched
-                and self._source_file(root, record.tail.path) is None):
+        if record.tail is not None and self._source_file(root, record.tail.path) is None:
             record.tail = None
         if record.tail is None:
             session_id = record.state.get("cliSessionId")
             if not self._safe_slug(session_id):
                 return
             cwd = text(live.get("cwd")) or text(record.state.get("cwd")) or ""
-            encoded = "".join(char if char.isalnum() else "-" for char in cwd)
+            encoded = "".join(char if char.isascii() and char.isalnum() else "-" for char in cwd)
             path = self._source_file(root, projects / encoded / (session_id + ".jsonl"))
-            if path is None and not record.transcript_searched:
-                record.transcript_searched = True
+            now = time.monotonic()
+            if path is None and (record.transcript_search_at is None
+                                 or now - record.transcript_search_at >= 60):
+                record.transcript_search_at = now
                 for directory in self._directories(projects):
                     path = self._source_file(root, directory / (session_id + ".jsonl"))
                     if path is not None:
@@ -549,6 +550,11 @@ class Store:
             live = live_sessions.get(record.state.get("cliSessionId"))
             if live is not None and live["status"] == "busy":
                 self._session_activity(record, live)
+                if (record.activity is not None
+                        and record.activity["at"] < number(live["statusUpdatedAt"]) / 1000):
+                    record.activity = None
+            else:
+                record.activity = None
             summary = self._session_summary(slug, record, live)
             if summary != record.summary:
                 old_activity = record.summary.get("activity")

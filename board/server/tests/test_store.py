@@ -519,6 +519,8 @@ def test_session_metadata_scan_cadence_cache_and_archived_memory(tmp_path, monke
 
 
 def test_session_moved_transcript_search_is_cached_and_only_busy_sessions_read(tmp_path, pids, monkeypatch):
+    clock = [100.0]
+    monkeypatch.setattr("codex_worker_board.store.time.monotonic", lambda: clock[0])
     write_session(tmp_path / "desktop")
     home = tmp_path / "home"
     write_live(home, pids[0], status="idle")
@@ -526,7 +528,6 @@ def test_session_moved_transcript_search_is_cached_and_only_busy_sessions_read(t
     moved.parent.mkdir(parents=True)
     event = {"type": "assistant", "timestamp": "2026-11-05T10:00:00Z",
              "message": {"content": [{"type": "text", "text": "First update"}]}}
-    moved.write_text(json.dumps(event) + "\n")
     directories = Store._directories
     searches = []
 
@@ -543,21 +544,105 @@ def test_session_moved_transcript_search_is_cached_and_only_busy_sessions_read(t
     write_live(home, pids[0])
     store.poll()
     assert len(searches) == 1
+    assert store.detail("local_example")["activity"] is None
+    moved.write_text(json.dumps(event) + "\n")
+    clock[0] = 159.0
+    store.poll()
+    assert len(searches) == 1
+    assert store.detail("local_example")["activity"] is None
+    clock[0] = 160.0
+    store.poll()
+    assert len(searches) == 2
     first = store.detail("local_example")["activity"]
     assert first["text"] == "First update"
     assert first["at"] == 1793872800.0
     event["message"]["content"][0]["text"] = "Second update"
     with moved.open("a") as stream:
         stream.write(json.dumps(event) + "\n")
+    clock[0] = 220.0
     messages = store.poll()
-    assert len(searches) == 1
+    assert len(searches) == 2
     assert any(message["type"] == "activity" and message["activity"]["text"] == "Second update"
                for message in messages)
     store.poll()
-    assert len(searches) == 1
+    assert len(searches) == 2
     write_live(home, pids[0], status="idle")
     store.poll()
     assert store.detail("local_example")["activity"] is None
+
+
+@pytest.mark.parametrize("initially_exists", [True, False])
+def test_session_transcript_direct_path_uses_ascii_and_retries_until_created(tmp_path, pids, monkeypatch,
+                                                                         initially_exists):
+    write_session(tmp_path / "desktop", cwd="/tmp/ЯA2")
+    home = tmp_path / "home"
+    write_live(home, pids[0], cwd="/tmp/ЯA2")
+    transcript = home / "projects" / "-tmp--A2" / "cli-local_example.jsonl"
+    transcript.parent.mkdir(parents=True)
+    event = json.dumps({"type": "assistant", "timestamp": "2026-11-05T10:00:00Z",
+                        "message": {"content": [{"type": "text", "text": "Current update"}]}}) + "\n"
+    if initially_exists:
+        transcript.write_text(event)
+    directories = Store._directories
+    searches = []
+
+    def count_searches(root):
+        if root == home / "projects":
+            searches.append(root)
+        return directories(root)
+
+    monkeypatch.setattr(Store, "_directories", staticmethod(count_searches))
+    store = session_store(tmp_path)
+    store.poll()
+    assert len(searches) == (0 if initially_exists else 1)
+    if not initially_exists:
+        assert store.detail("local_example")["activity"] is None
+        transcript.write_text(event)
+        store.poll()
+        assert len(searches) == 1
+    assert store.detail("local_example")["activity"]["text"] == "Current update"
+
+
+def test_session_activity_cannot_carry_over_between_busy_turns_or_server_start(tmp_path, pids):
+    write_session(tmp_path / "desktop")
+    home = tmp_path / "home"
+    write_live(home, pids[0], statusUpdatedAt=1793872800000)
+    transcript = home / "projects" / "-tmp-project" / "cli-local_example.jsonl"
+    transcript.parent.mkdir(parents=True)
+    event = {"type": "assistant", "timestamp": "2026-11-05T10:00:00Z",
+             "message": {"content": [{"type": "text", "text": "Previous turn"}]}}
+    transcript.write_text(json.dumps(event) + "\n")
+    store = session_store(tmp_path)
+    assert any(message["type"] == "activity" for message in store.poll())
+    assert store.detail("local_example")["activity"]["text"] == "Previous turn"
+    write_live(home, pids[0], status="idle", statusUpdatedAt=1793872801000)
+    store.poll()
+    assert store.session_records["local_example"].activity is None
+    user = {"type": "user", "timestamp": "2026-11-05T10:00:02Z",
+            "message": {"content": "Next request"}}
+    with transcript.open("a") as stream:
+        stream.write(json.dumps(user) + "\n")
+    write_live(home, pids[0], statusUpdatedAt=1793872802000)
+    messages = store.poll()
+    assert store.detail("local_example")["activity"] is None
+    assert not any(message["type"] == "activity" for message in messages)
+    event["timestamp"] = "2026-11-05T10:00:03Z"
+    event["message"]["content"][0]["text"] = "Current turn"
+    with transcript.open("a") as stream:
+        stream.write(json.dumps(event) + "\n")
+    messages = store.poll()
+    assert store.detail("local_example")["activity"]["text"] == "Current turn"
+    assert any(message["type"] == "activity" and message["activity"]["text"] == "Current turn"
+               for message in messages)
+    write_live(home, pids[0], statusUpdatedAt=1793872804000)
+    messages = store.poll()
+    assert store.detail("local_example")["activity"] is None
+    assert not any(message["type"] == "activity" for message in messages)
+    restarted = session_store(tmp_path)
+    messages = restarted.poll()
+    assert restarted.detail("local_example")["alive"] is True
+    assert restarted.detail("local_example")["activity"] is None
+    assert not any(message["type"] == "activity" for message in messages)
 
 
 def test_session_symlinks_and_invalid_slug_are_not_read(tmp_path, pids):

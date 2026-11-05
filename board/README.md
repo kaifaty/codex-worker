@@ -43,7 +43,9 @@ application data, not a public API. Only the metadata fields listed in [CONTRACT
 retained; malformed files preserve their previous valid state, and symbolic links are skipped.
 Archived sessions are omitted. Sessions and tasks share the snapshot limit of 50 newest closed records
 by `updated_at`. Live session transcripts use the same bounded incremental activity reader as tasks;
-if a transcript has moved to another project directory, its fallback lookup is cached for the session.
+only events from the current busy period are shown. Transcript paths use ASCII letters and digits for
+cwd encoding. Until a transcript is found, its direct path is checked on every poll and fallback searches
+across project directories run at most once per 60 seconds; a found path is cached.
 
 Run the server tests with temporary task and Claude directories and fake account scripts:
 

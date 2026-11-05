@@ -23,11 +23,11 @@ stops or changes work, and never writes under either source's home.
   only. The fields used are `pid`, `sessionId` (the metadata's `cliSessionId`), `cwd`, `status`,
   `statusUpdatedAt`, and `entrypoint`. A state is valid only while its PID is alive. Files such as
   `<pid>.<hash>.key` are never opened.
-- Session activity: `$BOARD_CLAUDE_HOME/projects/<encoded-cwd>/<cliSessionId>.jsonl`, where every
-  non-alphanumeric character of the live cwd is replaced by `-`. Only busy, live sessions are tailed
-  through the same bounded incremental reader as task activity. If the file is absent, search
-  `projects/*/` once for the session and cache the result (including a miss). Assistant events may carry
-  ISO `timestamp` values.
+- Session activity: `$BOARD_CLAUDE_HOME/projects/<encoded-cwd>/<cliSessionId>.jsonl`, where every character
+  outside ASCII letters and digits in the live cwd is replaced by `-`. Only busy, live sessions are
+  tailed through the same bounded incremental reader as task activity. Until a transcript is found,
+  check the direct path on each poll and search `projects/*/` at most once per 60 seconds. Cache a found
+  path. Assistant events may carry ISO `timestamp` values.
 - The server reads no other files: never `auth.json`, credentials or account homes.
 
 Missing directories are skipped. Malformed metadata or live-state files preserve their last valid
@@ -124,7 +124,8 @@ Sessions use the same `TaskSummary`, with these values:
   branch, or `null` if there is no own PR.
 - `alive` requires live state matching `cliSessionId`, a running PID, and `status == "busy"`.
   `phase` is `turn` when alive, otherwise `idle`; `phase_started_at` is the live `statusUpdatedAt` when
-  alive, otherwise metadata `lastActivityAt`. `activity` is present only when alive.
+  alive, otherwise metadata `lastActivityAt`. `activity` is shown and emitted only when alive and its
+  `at` is at least the current busy state's `statusUpdatedAt` (in seconds). Leaving busy clears it.
 - `created` and `updated_at` are metadata `createdAt` and `lastActivityAt`. Metadata and live-state
   millisecond timestamps are converted to Unix seconds.
 
