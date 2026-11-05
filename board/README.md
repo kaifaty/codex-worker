@@ -1,7 +1,8 @@
 # codex-worker board
 
-A read-only local view of codex-worker tasks, phases, accounts and live activity. The server reads task
-JSON and event logs from disk without importing the plugin or changing task files. REST and WebSocket
+A read-only local view of codex-worker tasks and Claude Code sessions from the Claude desktop app,
+with phases, accounts and live activity. The server reads JSON and event logs from disk without
+importing the plugin or changing source files. REST and WebSocket
 payloads are defined in [CONTRACT.md](CONTRACT.md).
 
 From the repository root, with Python 3.10+ and uv installed:
@@ -29,13 +30,24 @@ Until that directory exists, `/` returns a short build instruction. The API is a
 | `BOARD_POLL_SECONDS` | `1.0` | Interval between file mtime and size polls, in seconds. |
 | `BOARD_ACCOUNTS_SECONDS` | `300` | Minimum interval between account subprocess calls, in seconds. |
 | `BOARD_STALE_DAYS` | `7` | Close non-alive tasks older than this many days by state mtime. Non-alive scouts are always closed; alive tasks are exempt from the age rule. |
+| `BOARD_CLAUDE_DESKTOP_DIR` | `~/Library/Application Support/Claude` | Read desktop metadata from `claude-code-sessions/*/*/local_*.json`. Missing directories are skipped. |
+| `BOARD_CLAUDE_HOME` | `~/.claude` | Read live state from `sessions/<pid>.json` and activity from `projects/*/<cliSessionId>.jsonl`. Key files are never opened. |
+| `BOARD_SESSIONS_SECONDS` | `5` | Interval between desktop metadata scans, in seconds; unchanged files are not read again. Live state is read on every board poll. |
+| `BOARD_SESSION_STALE_HOURS` | `48` | Close inactive sessions older than this many hours by `lastActivityAt`. Busy sessions and sessions awaiting a person take precedence. |
 | `BOARD_CODEX_TASK` | Repository `plugins/codex-worker/skills/codex-worker/scripts/codex_task.py` | Script called as `python3 -I <script> accounts --json`, without `--refresh`, with a 60-second timeout. |
 
 Account calls run outside the event loop. Errors preserve the previous account data and expose an
 error string. A malformed or partially written state file preserves its last successfully read state.
-The server never reads credentials or account homes directly.
+The server never reads credentials or account homes directly. Desktop session files are internal
+application data, not a public API. Only the metadata fields listed in [CONTRACT.md](CONTRACT.md) are
+retained; malformed files preserve their previous valid state, and symbolic links are skipped.
+Archived sessions are omitted. Sessions and tasks share the snapshot limit of 50 newest closed records
+by `updated_at`. Live session transcripts use the same bounded incremental activity reader as tasks;
+only events from the current busy period are shown. Transcript paths use ASCII letters and digits for
+cwd encoding. Until a transcript is found, its direct path is checked on every poll and fallback searches
+across project directories run at most once per 60 seconds; a found path is cached.
 
-Run the server tests with temporary task homes and fake account scripts:
+Run the server tests with temporary task and Claude directories and fake account scripts:
 
 ```sh
 uv run --project board/server pytest board/server/tests -q

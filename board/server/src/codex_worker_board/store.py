@@ -3,6 +3,7 @@
 import json
 import math
 import os
+import stat
 import threading
 import time
 from dataclasses import dataclass, field
@@ -124,10 +125,30 @@ class Record:
     phase_started_at: float | None = None
 
 
+@dataclass
+class SessionRecord:
+    path: Path
+    state: dict
+    summary: dict = field(default_factory=dict)
+    tail: EventTail | None = None
+    transcript_search_at: float | None = None
+    activity: dict | None = None
+
+
 class Store:
-    def __init__(self, tasks_path, stale_days=7):
+    def __init__(self, tasks_path, stale_days=7, claude_desktop_dir=None, claude_home=None,
+                 sessions_seconds=5, session_stale_hours=48):
         self.tasks_path = Path(tasks_path)
         self.stale_days = stale_days
+        self.claude_desktop_dir = Path(claude_desktop_dir) if claude_desktop_dir is not None else None
+        self.claude_home = Path(claude_home) if claude_home is not None else None
+        self.sessions_seconds = sessions_seconds
+        self.session_stale_hours = session_stale_hours
+        self.session_records = {}
+        self._session_signatures = {}
+        self._session_paths = {}
+        self._live_sessions = {}
+        self._next_sessions_scan = 0.0
         self.records = {}
         self.lock = threading.RLock()
         self._initial_poll = True
@@ -193,6 +214,8 @@ class Store:
         return {
             "slug": slug,
             "kind": state.get("kind", "work"),
+            "title": None,
+            "link": None,
             "repo": Path(state.get("repo") or state.get("worktree") or "").name,
             "branch": text(state.get("branch")),
             "task_type": text(state.get("task_type")),
@@ -293,18 +316,274 @@ class Store:
                 if summary["activity"] is not None and summary["activity"] != old_activity:
                     messages.append({"type": "activity", "slug": slug, "activity": summary["activity"]})
             self.records[slug] = record
+        messages.extend(self._poll_sessions())
         self._initial_poll = False
+        return messages
+
+    @staticmethod
+    def _safe_slug(value):
+        return (isinstance(value, str) and bool(value) and not value.startswith(".")
+                and Path(value).name == value and "\\" not in value and "\0" not in value)
+
+    @staticmethod
+    def _source_file(root, path):
+        # Check every component inside the configured source, including its root.
+        if not path.is_relative_to(root):
+            return None
+        current = path
+        while True:
+            if current.is_symlink():
+                return None
+            if current == root:
+                break
+            current = current.parent
+        try:
+            return path if path.is_file() else None
+        except OSError:
+            return None
+
+    def _scan_sessions(self):
+        root = self.claude_desktop_dir
+        if root is None:
+            return
+        paths = set()
+        if not root.is_symlink():
+            for account in self._directories(root / "claude-code-sessions"):
+                for directory in self._directories(account):
+                    try:
+                        candidates = directory.iterdir()
+                        for path in candidates:
+                            if not (path.name.startswith("local_") and path.suffix == ".json"):
+                                continue
+                            try:
+                                metadata = path.lstat()
+                                if not stat.S_ISREG(metadata.st_mode):
+                                    continue
+                                paths.add(path)
+                                signature = (metadata.st_mtime_ns, metadata.st_size)
+                                if signature == self._session_signatures.get(path):
+                                    continue
+                                self._session_signatures[path] = signature
+                                raw = json.loads(path.read_text(encoding="utf-8"))
+                                state = self._session_metadata(raw)
+                            except (OSError, ValueError):
+                                continue
+                            if state is None:
+                                continue
+                            old_slug = self._session_paths.get(path)
+                            slug = state["sessionId"]
+                            if old_slug and (old_slug != slug or state.get("isArchived")):
+                                self.session_records.pop(old_slug, None)
+                                self._session_paths.pop(path, None)
+                            if state.get("isArchived"):
+                                continue
+                            record = self.session_records.get(slug)
+                            if record is None or record.path != path:
+                                record = SessionRecord(path, state)
+                                self.session_records[slug] = record
+                            else:
+                                if record.state.get("cliSessionId") != state.get("cliSessionId"):
+                                    record.tail = None
+                                    record.transcript_search_at = None
+                                    record.activity = None
+                                record.state = state
+                            self._session_paths[path] = slug
+                    except OSError:
+                        continue
+        for path in set(self._session_signatures) - paths:
+            del self._session_signatures[path]
+            slug = self._session_paths.pop(path, None)
+            if slug:
+                self.session_records.pop(slug, None)
+
+    def _session_metadata(self, raw):
+        if not isinstance(raw, dict):
+            return None
+        slug = raw.get("sessionId")
+        if not self._safe_slug(slug) or not slug.startswith("local_"):
+            return None
+        fields = ("sessionId", "cliSessionId", "title", "cwd", "originCwd", "model", "effort",
+                  "isArchived", "createdAt", "lastActivityAt", "completedTurns",
+                  "interruptedAwaitingPerson")
+        state = {key: raw[key] for key in fields if key in raw}
+        if (number(state.get("createdAt")) is None
+                or number(state.get("lastActivityAt")) is None
+                or not isinstance(raw.get("prs", []), list)
+                or type(state.get("isArchived", False)) is not bool
+                or type(state.get("completedTurns", 0)) is not int):
+            return None
+        if any(state.get(key) is not None and not isinstance(state[key], str)
+               for key in ("cliSessionId", "title", "cwd", "originCwd", "model", "effort")):
+            return None
+        if state.get("cliSessionId") is not None and not self._safe_slug(state["cliSessionId"]):
+            return None
+        if any("\0" in (state.get(key) or "") for key in ("cwd", "originCwd")):
+            return None
+        state["prs"] = [{key: pr[key] for key in ("url", "state", "branch", "own") if key in pr}
+                        for pr in raw.get("prs", []) if isinstance(pr, dict)]
+        return state
+
+    def _read_live_sessions(self):
+        root = self.claude_home
+        if root is None or root.is_symlink():
+            self._live_sessions.clear()
+            return {}
+        present = set()
+        try:
+            directory = root / "sessions"
+            candidates = [] if directory.is_symlink() else directory.iterdir()
+            for path in candidates:
+                if not (path.suffix == ".json" and path.stem.isascii() and path.stem.isdecimal()):
+                    continue
+                if self._source_file(root, path) is None:
+                    continue
+                present.add(path)
+                try:
+                    raw = json.loads(path.read_text(encoding="utf-8"))
+                    cwd = raw.get("cwd") if isinstance(raw, dict) else None
+                    if (isinstance(raw, dict) and type(raw.get("pid")) is int
+                            and raw["pid"] == int(path.stem)
+                            and self._safe_slug(raw.get("sessionId"))
+                            and raw.get("status") in ("busy", "idle")
+                            and number(raw.get("statusUpdatedAt")) is not None
+                            and (cwd is None or (isinstance(cwd, str) and "\0" not in cwd))):
+                        self._live_sessions[path] = {key: raw[key] for key in (
+                            "pid", "sessionId", "cwd", "status", "statusUpdatedAt", "entrypoint")
+                            if key in raw}
+                except (OSError, ValueError):
+                    pass
+        except OSError:
+            pass
+        for path in set(self._live_sessions) - present:
+            del self._live_sessions[path]
+        sessions = {}
+        for state in self._live_sessions.values():
+            if not alive(state["pid"]):
+                continue
+            previous = sessions.get(state["sessionId"])
+            rank = (state["status"] == "busy", state["statusUpdatedAt"])
+            if previous is None or rank > (previous["status"] == "busy", previous["statusUpdatedAt"]):
+                sessions[state["sessionId"]] = state
+        return sessions
+
+    def _session_activity(self, record, live):
+        root = self.claude_home
+        if root is None:
+            return
+        projects = root / "projects"
+        if root.is_symlink() or projects.is_symlink():
+            return
+        if record.tail is not None and self._source_file(root, record.tail.path) is None:
+            record.tail = None
+        if record.tail is None:
+            session_id = record.state.get("cliSessionId")
+            if not self._safe_slug(session_id):
+                return
+            cwd = text(live.get("cwd")) or text(record.state.get("cwd")) or ""
+            encoded = "".join(char if char.isascii() and char.isalnum() else "-" for char in cwd)
+            path = self._source_file(root, projects / encoded / (session_id + ".jsonl"))
+            now = time.monotonic()
+            if path is None and (record.transcript_search_at is None
+                                 or now - record.transcript_search_at >= 60):
+                record.transcript_search_at = now
+                for directory in self._directories(projects):
+                    path = self._source_file(root, directory / (session_id + ".jsonl"))
+                    if path is not None:
+                        break
+            if path is None:
+                return
+            record.tail = EventTail(path)
+        if self._source_file(root, record.tail.path) is not None:
+            activity = record.tail.read()
+            if activity is not None:
+                record.activity = activity
+
+    def _session_summary(self, slug, record, live):
+        state = record.state
+        is_alive = live is not None and live.get("status") == "busy"
+        updated_at = number(state.get("lastActivityAt")) / 1000
+        prs = state.get("prs", [])
+        own = [pr for pr in prs if pr.get("own") is True]
+        pr = (own or prs or [{}])[-1]
+        if is_alive:
+            column = "running"
+        elif state.get("interruptedAwaitingPerson") is not None:
+            column = "attention"
+        elif prs and all(pr.get("state") in ("MERGED", "CLOSED") for pr in prs):
+            column = "closed"
+        elif updated_at < time.time() - self.session_stale_hours * 3600:
+            column = "closed"
+        else:
+            column = "review_me"
+        cwd = text(state.get("originCwd")) or text(state.get("cwd")) or ""
+        if cwd and Path(cwd).is_relative_to(self.claude_desktop_dir):
+            repo = "(no folder)"
+        else:
+            repo = Path(cwd.split("/.claude/worktrees/", 1)[0]).name
+        return {
+            "slug": slug, "kind": "session", "title": text(state.get("title")),
+            "link": "claude://claude.ai/epitaxy/" + slug,
+            "repo": repo, "branch": text(own[-1].get("branch")) if own else None,
+            "task_type": None, "executor": "claude", "account": None, "reviewer": None,
+            "model": text(state.get("model")), "effort": text(state.get("effort")),
+            "column": column, "phase": "turn" if is_alive else "idle",
+            "phase_started_at": number(live.get("statusUpdatedAt")) / 1000 if is_alive else updated_at,
+            "alive": is_alive, "turn": state.get("completedTurns", 0), "fix_round": 0,
+            "outcome": None, "result_status": None, "summary": None,
+            "pr": text(pr.get("url")), "ci": None, "sleeping_until": None,
+            "created": number(state.get("createdAt")) / 1000,
+            "updated_at": updated_at, "activity": record.activity if is_alive else None,
+        }
+
+    def _poll_sessions(self):
+        if self.claude_desktop_dir is None:
+            return []
+        previous = {slug: record.summary for slug, record in self.session_records.items()}
+        now = time.monotonic()
+        if now >= self._next_sessions_scan:
+            self._scan_sessions()
+            self._next_sessions_scan = now + self.sessions_seconds
+        live_sessions = self._read_live_sessions()
+        messages = [{"type": "task_removed", "slug": slug}
+                    for slug in previous if slug not in self.session_records]
+        for slug, record in self.session_records.items():
+            live = live_sessions.get(record.state.get("cliSessionId"))
+            if live is not None and live["status"] == "busy":
+                self._session_activity(record, live)
+                if (record.activity is not None
+                        and record.activity["at"] < number(live["statusUpdatedAt"]) / 1000):
+                    record.activity = None
+            else:
+                record.activity = None
+            summary = self._session_summary(slug, record, live)
+            if summary != record.summary:
+                old_activity = record.summary.get("activity")
+                record.summary = summary
+                messages.append({"type": "task", "task": summary})
+                if summary["activity"] is not None and summary["activity"] != old_activity:
+                    messages.append({"type": "activity", "slug": slug, "activity": summary["activity"]})
         return messages
 
     def summaries(self):
         with self.lock:
             rows = [record.summary.copy() for _, record in sorted(self.records.items())]
+            rows.extend(record.summary.copy() for _, record in sorted(self.session_records.items()))
             closed = sorted((row for row in rows if row["column"] == "closed"),
                             key=lambda row: (row["updated_at"], row["slug"]), reverse=True)[:50]
             return [row for row in rows if row["column"] != "closed"] + closed
 
     def detail(self, slug):
         with self.lock:
+            if not self._safe_slug(slug):
+                return None
+            session = self.session_records.get(slug)
+            if session is not None:
+                entries = [{"at": session.summary[key], "text": label}
+                           for key, label in (("created", "Session created"),
+                                              ("updated_at", "Last activity"))
+                           if session.summary[key] is not None]
+                return dict(session.summary, timeline=sorted(entries, key=lambda item: item["at"]),
+                            files=[])
             record = self._record(slug)
             if record is None:
                 return None
@@ -315,7 +594,8 @@ class Store:
 
     def file_path(self, slug, name):
         with self.lock:
-            if name not in FILES or self.tasks_path.is_symlink():
+            if (name not in FILES or self.tasks_path.is_symlink()
+                    or not self._safe_slug(slug) or slug in self.session_records):
                 return None
             record = self._record(slug)
             if record is None:

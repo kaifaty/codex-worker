@@ -30,6 +30,10 @@ class Settings:
     accounts_seconds: float = 300
     web_dist: Path = REPOSITORY / "board/web/dist"
     stale_days: float = 7
+    claude_desktop_dir: Path | None = None
+    claude_home: Path | None = None
+    sessions_seconds: float = 5
+    session_stale_hours: float = 48
 
     @classmethod
     def from_env(cls):
@@ -42,6 +46,12 @@ class Settings:
             poll_seconds=float(os.environ.get("BOARD_POLL_SECONDS", "1.0")),
             accounts_seconds=float(os.environ.get("BOARD_ACCOUNTS_SECONDS", "300")),
             stale_days=float(os.environ.get("BOARD_STALE_DAYS", "7")),
+            claude_desktop_dir=Path(os.environ.get(
+                "BOARD_CLAUDE_DESKTOP_DIR", "~/Library/Application Support/Claude",
+            )).expanduser(),
+            claude_home=Path(os.environ.get("BOARD_CLAUDE_HOME", "~/.claude")).expanduser(),
+            sessions_seconds=float(os.environ.get("BOARD_SESSIONS_SECONDS", "5")),
+            session_stale_hours=float(os.environ.get("BOARD_SESSION_STALE_HOURS", "48")),
         )
 
 
@@ -79,7 +89,11 @@ class LocalOnly:
 class Board:
     def __init__(self, settings):
         self.settings = settings
-        self.store = Store(settings.task_home / "claude-tasks", stale_days=settings.stale_days)
+        self.store = Store(
+            settings.task_home / "claude-tasks", stale_days=settings.stale_days,
+            claude_desktop_dir=settings.claude_desktop_dir, claude_home=settings.claude_home,
+            sessions_seconds=settings.sessions_seconds, session_stale_hours=settings.session_stale_hours,
+        )
         self.accounts = Accounts(settings.codex_task, settings.accounts_seconds)
         self.lock = asyncio.Lock()
         self.clients = set()
