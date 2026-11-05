@@ -589,24 +589,31 @@ def duty_summary(record):
 
 def cmd_duty_tick(a):
     cfg = config.accounts_config()
-    refreshed_at = clock.CLOCK.time()
-    try:
-        claude_review.refresh_limits(cfg)
-    except Exception as exc:
-        # Stale or unknown snapshots simply stay out of the election.
-        print(f"duty tick: Claude limit refresh failed: {exc}", file=sys.stderr)
-    try:
-        config.CODEX["path"] = config.resolve_codex()
-    except SystemExit as exc:
-        # procs.die reports a missing Codex CLI; Claude accounts can still be elected.
-        print(f"duty tick: Codex accounts skipped: {exc}", file=sys.stderr)
-        infos = [dict(account, logged_in=None) for account in cfg["accounts"]]
-    else:
-        infos = accounts.snapshots(cfg)
-    # A fresh snapshot is not probed; read every token so a missing one is no candidate.
-    tokenless = {account["name"] for account in claude_accounts.accounts(cfg)
-                 if not claude_runner.account_environment(account, config.ACCOUNT_TIMEOUT)[1]}
-    record, changed = duty.run_duty_tick(cfg, infos, refreshed_at, tokenless)
+    with duty.duty_lock(wait=False) as held:
+        if not held:
+            print("duty tick: another duty tick is running; nothing changed")
+            return
+        refreshed_at = clock.CLOCK.time()
+        try:
+            claude_review.refresh_limits(cfg)
+        except Exception as exc:
+            # Stale or unknown snapshots simply stay out of the election.
+            print(f"duty tick: Claude limit refresh failed: {exc}", file=sys.stderr)
+        # A fresh snapshot is not probed; mark a missing token as probes and selection do.
+        for account in claude_accounts.accounts(cfg):
+            if claude_runner.account_environment(account, config.ACCOUNT_TIMEOUT)[1]:
+                claude_accounts.token_available(account["name"])
+            else:
+                claude_accounts.mark_limited(account["name"], token_unavailable=True)
+        try:
+            config.CODEX["path"] = config.resolve_codex()
+        except SystemExit as exc:
+            # procs.die reports a missing Codex CLI; Claude accounts can still be elected.
+            print(f"duty tick: Codex accounts skipped: {exc}", file=sys.stderr)
+            infos = [dict(account, logged_in=None) for account in cfg["accounts"]]
+        else:
+            infos = accounts.snapshots(cfg)
+        record, changed = duty.run_duty_tick(cfg, infos, refreshed_at)
     print(("duty changed to " if changed else "duty ") + duty_summary(record))
 
 

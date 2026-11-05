@@ -75,11 +75,16 @@ def read_duty(warn=True):
 
 
 @contextmanager
-def duty_lock():
+def duty_lock(wait=True):
+    """Hold duty.lock; with wait=False yield False at once while another holder has it."""
     config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
     with (config.CODEX_HOME / "duty.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        yield
+        try:
+            fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
+        except BlockingIOError:
+            yield False
+            return
+        yield True
 
 
 def write_duty(record):
@@ -107,12 +112,13 @@ def duty_window_known(window, now):
             or result_schema.is_finite_number(reset) and reset <= now)
 
 
-def claude_duty_candidate(cfg, account, info, now, refreshed_at, token=True):
+def claude_duty_candidate(cfg, account, info, now, refreshed_at):
     """Room and availability of a Claude account from its cached limits snapshot.
 
     A snapshot is fresh within claude.limits_max_age_minutes, or when it was
-    saved after ``refreshed_at`` (this tick's refresh). ``token`` is False when
-    the tick found no Keychain token.
+    saved after ``refreshed_at`` (this tick's refresh). The seven-day window
+    decides: a snapshot without a five-hour window still counts (as 0% used),
+    so a partial rate-limit event costs at most one interval until the next tick.
     """
     candidate = {"family": "claude", "name": account["name"], "room": 0, "unavailable": None}
     windows = info.get("unifiedWindows") if isinstance(info.get("unifiedWindows"), dict) else {}
@@ -120,7 +126,7 @@ def claude_duty_candidate(cfg, account, info, now, refreshed_at, token=True):
     updated = info.get("updated_at")
     fresh = result_schema.is_finite_number(updated) and (
         now - updated <= cfg["claude"].get("limits_max_age_minutes", 30) * 60 or updated >= refreshed_at)
-    if not token or claude_accounts.token_marked(info, now):
+    if claude_accounts.token_marked(info, now):
         candidate["unavailable"] = "token unavailable"
     elif claude_accounts.limited(info, now):
         candidate["unavailable"] = ("limited until "
@@ -211,39 +217,34 @@ def elect(candidates, current, settings):
                             + ("s" if len(missed) > 1 else ""))
 
 
-def run_duty_tick(cfg, infos, refreshed_at, tokenless=()):
+def run_duty_tick(cfg, infos, refreshed_at):
     """Elect from cached Claude limits and Codex snapshots; record the result.
 
-    The record is rewritten on every tick; the change log gets one line only
-    when the duty account changes, written before the record. A tick that
-    started before the recorded check leaves it alone. Returns (record, changed).
+    The caller holds duty_lock. The record is rewritten on every tick; the
+    change log gets one line only when the duty account changes. Returns
+    (record, changed).
     """
     now = clock.CLOCK.time()
     limits = claude_accounts.read_limits()
-    candidates = ([claude_duty_candidate(cfg, account, limits.get(account["name"], {}), now, refreshed_at,
-                                         token=account["name"] not in tokenless)
+    candidates = ([claude_duty_candidate(cfg, account, limits.get(account["name"], {}), now, refreshed_at)
                    for account in claude_accounts.accounts(cfg)]
                   + [codex_duty_candidate(cfg, info) for info in infos])
     rooms = {family: {candidate["name"]: candidate["room"] for candidate in candidates
                       if candidate["family"] == family and candidate["unavailable"] is None}
              for family in DUTY_FAMILIES}
-    with duty_lock():
-        previous = read_duty(warn=False)
-        if previous and previous["checked_at"] >= refreshed_at:
-            # A concurrent tick with newer limits has already recorded its election.
-            return previous, False
-        current = {"account": previous["account"], "family": previous["family"]} if previous else None
-        decision = elect(candidates, current, cfg["duty"])
-        changed = duty_label(previous) != duty_label(decision)
-        record = {"account": decision["account"], "family": decision["family"],
-                  "since": previous["since"] if previous and not changed else now,
-                  "checked_at": now, "reason": decision["reason"], "rooms": rooms}
-        if changed:
-            # Log first: an interrupted tick repeats the line rather than losing the change.
-            with duty_log_path().open("a", encoding="utf-8") as log:
-                log.write(json.dumps({"at": now, "from": duty_label(previous), "to": duty_label(decision),
-                                      "reason": decision["reason"], "rooms": rooms}, ensure_ascii=False) + "\n")
-        write_duty(record)
+    previous = read_duty(warn=False)
+    current = {"account": previous["account"], "family": previous["family"]} if previous else None
+    decision = elect(candidates, current, cfg["duty"])
+    changed = duty_label(previous) != duty_label(decision)
+    record = {"account": decision["account"], "family": decision["family"],
+              "since": previous["since"] if previous and not changed else now,
+              "checked_at": now, "reason": decision["reason"], "rooms": rooms}
+    write_duty(record)
+    if changed:
+        # An interruption here loses this line, never invents a change.
+        with duty_log_path().open("a", encoding="utf-8") as log:
+            log.write(json.dumps({"at": now, "from": duty_label(previous), "to": duty_label(decision),
+                                  "reason": decision["reason"], "rooms": rooms}, ensure_ascii=False) + "\n")
     return record, changed
 
 
@@ -261,9 +262,8 @@ def claude_available(cfg):
 
 
 def codex_available(cfg, stopped=None):
-    """Whether a Codex account is available now by the election rules (fresh snapshots)."""
-    infos = accounts.snapshots(cfg, stopped or (lambda: False))
-    return any(codex_duty_candidate(cfg, info)["unavailable"] is None for info in infos)
+    """Whether a Codex account can take work now (fresh snapshots, executor thresholds)."""
+    return accounts.available(accounts.snapshots(cfg, stopped or (lambda: False)), cfg) is not None
 
 
 def claude_reserved(cfg, role, exclude=(), task_type=None, stopped=None):
@@ -271,14 +271,17 @@ def claude_reserved(cfg, role, exclude=(), task_type=None, stopped=None):
 
     It takes new work only when no other Claude account can, and either the
     task type needs Claude (duty.claude_only_task_types) or no Codex account
-    is available now.
+    can take work now. The slow Codex check runs first, and only while a
+    single Claude account can take the work, so duty.json is read right
+    before the choice.
     """
+    exclude = set(exclude)
+    best = claude_accounts.select(cfg, role, exclude)
+    alone = best is not None and claude_accounts.select(cfg, role, exclude | {best["name"]}) is None
+    codex = (alone and task_type not in cfg["duty"]["claude_only_task_types"]
+             and duty_path().exists() and codex_available(cfg, stopped))
     name = duty_account("claude")
-    if name is None or name in exclude:
-        return set()
-    if claude_accounts.select(cfg, role, set(exclude) | {name}) is not None:
-        return {name}
-    if task_type in cfg["duty"]["claude_only_task_types"] or not codex_available(cfg, stopped):
+    if name is None or name in exclude or (alone and name == best["name"] and not codex):
         return set()
     return {name}
 

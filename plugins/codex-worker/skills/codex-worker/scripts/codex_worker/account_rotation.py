@@ -338,8 +338,9 @@ def claude_choice(st, cfg, stopped, exclude=()):
     current = st.get("claude_account")
     others = [account["name"] for account in claude_accounts.accounts(cfg) if account["name"] != current]
     if current and current not in exclude:
-        # A duty account finishes the work it has already started.
-        chosen = claude_review.select_account(cfg, "work", exclude=others, stopped=stopped, keep_duty=True)
+        # The task's own account is not new work, even on duty.
+        claude_review.refresh_limits(cfg, stopped)
+        chosen = claude_accounts.select(cfg, "work", exclude=others)
         if chosen is not None or stopped():
             return chosen
     return claude_review.select_account(cfg, "work", exclude=set(exclude) | {current}, stopped=stopped,
