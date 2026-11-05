@@ -5,6 +5,7 @@ codex-worker is a Claude Code plugin. The skill lives in `plugins/codex-worker/s
 ## Code
 
 - Python 3.9+, standard library only.
+- `board/` is a separate app with its own dependencies (FastAPI, Vue); the plugin never imports it, and the rule above applies to the plugin only.
 - `scripts/codex_task.py` is only the entry point; the code lives in the package `scripts/codex_worker/`. Follow the module rules in its `__init__.py`; `tests/test_module_layout.py` enforces them.
 - Tests patch a function on the module that owns it, for example `worker.task_state.save`.
 - Every CLI option must be documented in `SKILL.md` or `references/*.md`; `tests/test_options.py` checks this.
