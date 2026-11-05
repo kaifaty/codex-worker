@@ -1689,6 +1689,33 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(st["sleeping"]["account"], "second")
         self.assertAlmostEqual(st["sleeping"]["until"], now + 3600 + worker.config.RESET_MARGIN, delta=1)
 
+        # An automatic reset credit is never spent on a duty account the task may not take.
+        later = now + 30 * 3600
+        credited = [dict(info(name, 99), limits={
+            "primary": {"used": 99, "minutes": 10080, "reset": later},
+            "secondary": {"used": 2, "minutes": 300, "reset": later}}, reset_credits={
+            "availableCount": 1, "credits": [{"id": name + "-credit", "status": "available",
+                                              "resetType": "codexRateLimits", "expiresAt": now + expires}]})
+            for name, expires in (("main", 3600), ("second", 7200))]
+        with mock.patch.object(worker.credit_resets, "reset_credit_action",
+                               return_value={"outcome": "failed", "credit": {"id": "spent"}}) as action:
+            self.assertIsNone(worker.account_rotation.try_reset_credit(
+                st, credited, dict(cfg, use_reset_credits=True), lambda: False))
+        self.assertEqual(action.call_args.args[0]["name"], "second")
+
+        # A Claude sleep waits for the duty account when an exception will let the task take it.
+        self.write_duty("claude", "first")
+        limits_path.write_text(json.dumps({"first": dict(self.duty_snapshot(.1), limited_until=now + 600),
+                                           "second": dict(self.duty_snapshot(.5), limited_until=now + 3600)}))
+        for task_type, codex_used in ((None, 99), ("visual", 10)):
+            with self.subTest(task_type=task_type), mock.patch.dict(os.environ, self.env, clear=True):
+                self.set_codex_used(self.home, codex_used)
+                st, slept = {"slug": "duty-sleep", "task_type": task_type, "rotations": []}, []
+                self.assertIsNone(worker.account_rotation.wait_for_claude_account(
+                    st, cfg, "all Claude accounts unavailable", lambda: bool(slept), slept.append))
+                self.assertEqual(st["sleeping"]["account"], "first")
+                self.assertAlmostEqual(st["sleeping"]["until"], now + 600 + worker.config.RESET_MARGIN, delta=1)
+
     def test_duty_codex_tasks_reviews_and_rotation_skip_the_duty_account(self):
         third = self.root / "third-home"
         third.mkdir()
