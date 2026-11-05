@@ -228,7 +228,8 @@ def run(st, cfg, prompt, stopped, account, deadline=None):
         response = claude_runner.run_claude(
             account, st["worktree"], prompt, stopped, deadline,
             settings.get("model"), settings.get("effort"), settings["max_turns"],
-            reviewing=True, started=started)
+            reviewing=True, started=started,
+            task_dir=config.TASKS / st["slug"] if st.get("slug") else None)
         if response["outcome"] == "stopped":
             response["outcome"] = task_state.stop_outcome(st, stopped)
         elif response["outcome"] == "budget_exhausted":

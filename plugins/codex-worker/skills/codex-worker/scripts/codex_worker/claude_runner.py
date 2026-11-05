@@ -112,13 +112,15 @@ def run_work_turn(account, worktree, task_dir, prompt, stopped, session_id=None,
     system_prompt = sandboxing.claude_system_prompt(worktree, task_dir)
     try:
         return run_claude(account, worktree, prompt, stopped, deadline, model, effort, max_turns,
-                          session_id=session_id, system_prompt=system_prompt, started=started, progress=progress)
+                          session_id=session_id, system_prompt=system_prompt, started=started, progress=progress,
+                          task_dir=task_dir)
     finally:
         system_prompt.unlink(missing_ok=True)
 
 
 def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, effort=None,
-               max_turns=None, *, session_id=None, system_prompt=None, reviewing=False, started=None, progress=None):
+               max_turns=None, *, session_id=None, system_prompt=None, reviewing=False, started=None, progress=None,
+               task_dir=None):
     """Execute and drain one stream; callers own role-specific lifecycle state."""
     response = {"outcome": "unavailable", "result": None, "reason": None, "deadline": deadline,
                 "telemetry": {"usage": {}, "cost_usd": None, "session_id": None,
@@ -179,6 +181,7 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
         return response
     response["telemetry"].update(model=model, reasoning_effort=effort)
     buffer, eof, termination = b"", False, None
+    events_failed = False
     failure = "review failed" if reviewing else "work turn failed"
     try:
         if started is not None:
@@ -216,6 +219,18 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                     while b"\n" in buffer or (eof and buffer):
                         line, separator, remaining = buffer.partition(b"\n")
                         buffer = remaining if separator else b""
+                        if separator and task_dir is not None and not events_failed:
+                            try:
+                                with (Path(task_dir) / "claude-events.jsonl").open("ab") as events:
+                                    events.write(line.replace(token.encode(), b"[REDACTED]") + separator)
+                                    events.flush()
+                            except OSError:
+                                events_failed = True
+                                try:
+                                    with (Path(task_dir) / "stderr.log").open("a", encoding="utf-8") as errors:
+                                        errors.write("Could not append to claude-events.jsonl.\n")
+                                except OSError:
+                                    pass
                         if not line.strip():
                             continue
                         try:
