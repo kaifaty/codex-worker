@@ -185,6 +185,14 @@ The cache
 an older unnamed cache is read as `default`. Every Claude review record and journal row carries its
 account name; `report --json` includes it in each task's `reviews` list. Claude review costs and tokens remain separate from Codex.
 
+## Duty account
+
+`duty tick` elects one duty account, a future orchestrator, by `room` = `(threshold − weekly used %) × weight`: `claude.work_switch_at` and the seven-day window for Claude, `soft_switch_at`, the weekly window and the account's optional `weight` (default `1`) for Codex. An account is no candidate while it is limited, lacks a token or login, has no room, has a five-hour window at `switch_at`, or has unknown limits or limits still stale after the tick's refresh (the same one as `accounts --refresh`).
+Any candidate Claude account outranks Codex, and a returning Claude account takes over at once. Within a family the duty moves to the largest room only when it beats the current one by both `duty.relative_margin` percent and `duty.absolute_margin` units ([settings](settings.md)); an unavailable duty is replaced at once, equal rooms go by name, and with no candidate there is no duty.
+New tasks, rotations to another account and new reviews skip the duty account; tasks already running on it finish there (follow-ups, fixes, CI rounds) until it reaches a limit. It still takes new work when no other account of either family is available, or, as a Claude duty, when no other Claude account is and the task's `--task-type` is in `duty.claude_only_task_types`; otherwise the task waits, sleeps or falls back to a Codex review as with an exhausted pool.
+`duty status [--json]` shows the duty, since when, its reason, the rooms and the check age, with a warning when the last check is over 90 minutes old; `duty clear` removes `~/.codex/duty.json` (no duty, exactly as without this feature; `~/.codex/duty-log.jsonl` keeps one line per change); `accounts` marks the duty account and `accounts --json` adds `duty`. A stale `duty.json` still applies; an unreadable one is ignored with one warning until the next tick rewrites it.
+Run `duty tick` every 30 minutes with launchd: `python3 -I "$T" duty plist [--minutes 30] > ~/Library/LaunchAgents/codex-worker.duty.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.duty.plist`; the job runs the newest installed plugin version and logs to `~/.codex/duty-launchd.log`. The plugin never calls `launchctl` or writes to `~/Library` itself.
+
 ## Rotation
 
 With `accounts` configured, `start` prefers accounts below `soft_switch_at` in both the `primary` and

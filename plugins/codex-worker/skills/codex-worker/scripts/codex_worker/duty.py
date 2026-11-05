@@ -206,7 +206,8 @@ def elect(candidates, current, settings):
     if relative and absolute:
         return decision(best, comparison + " passes both margins")
     missed = [name for name, passed in (("relative", relative), ("absolute", absolute)) if not passed]
-    return decision(holder, f"kept: {comparison} misses the {' and '.join(missed)} margin")
+    return decision(holder, f"kept: {comparison} misses the {' and '.join(missed)} margin"
+                            + ("s" if len(missed) > 1 else ""))
 
 
 def run_duty_tick(cfg, infos, refreshed_at):
