@@ -1,6 +1,7 @@
 """Claude review subprocesses use a separate credential and leave work to Codex."""
 import contextlib
 import datetime
+import fcntl
 import io
 import json
 import os
@@ -1493,6 +1494,9 @@ class ClaudeReviewTests(RotationTestCase):
         first, second = cfg["claude"]["accounts"]
         fresh = duty.claude_duty_candidate(cfg, second, self.duty_snapshot(.5), now, now)
         self.assertEqual(fresh, {"family": "claude", "name": "second", "room": 35, "unavailable": None})
+        partial = self.duty_snapshot(.5)
+        del partial["unifiedWindows"]["five_hour"]
+        self.assertEqual(duty.claude_duty_candidate(cfg, second, partial, now, now), fresh)
         for label, snapshot in (
                 ("limit", dict(self.duty_snapshot(.1), limited_until=now + 600)),
                 ("token", dict(self.duty_snapshot(.1), token_unavailable=True, token_retry_at=now + 600,
@@ -1569,22 +1573,43 @@ class ClaudeReviewTests(RotationTestCase):
         entries = [json.loads(line) for line in log.read_text().splitlines()]
         self.assertEqual([(entry["from"], entry["to"]) for entry in entries],
                          [(None, "claude/first"), ("claude/first", "claude/second")])
-        # A fresh snapshot is not probed, but a missing token still removes the account.
-        fixture = json.loads(self.claude_fixture_path.read_text())
-        fixture["security"] = {"codex-worker-claude-second": {"unavailable": True}}
-        self.claude_fixture_path.write_text(json.dumps(fixture))
-        self.cli("duty", "tick")
-        record = json.loads(duty_path.read_text())
-        self.assertEqual((record["account"], record["reason"]),
-                         ("first", "claude/second unavailable: token unavailable; largest room 75"))
-        self.assertEqual(len(log.read_text().splitlines()), 3)
-        # A tick that started before the recorded check does not replace it.
+        # A tick that fails between the record and the log line never logs one change twice.
         worker = self.worker()
+        cfg = worker.config.accounts_config()
+        limits = json.loads(limits_path.read_text())
+        limits["second"]["limited_until"] = self.reset
+        limits_path.write_text(json.dumps(limits))
+        with mock.patch.object(worker.duty, "duty_log_path", side_effect=OSError("interrupted")), \
+                self.assertRaises(OSError):
+            worker.duty.run_duty_tick(cfg, [], time.time())
+        self.assertEqual(json.loads(duty_path.read_text())["account"], "first")
+        self.cli("duty", "tick")
+        self.assertEqual(json.loads(duty_path.read_text())["account"], "first")
+        self.assertEqual(len(log.read_text().splitlines()), 2)
+        # A second tick while one holds the lock changes nothing.
         before = duty_path.read_text()
-        self.assertEqual(worker.duty.run_duty_tick(worker.config.accounts_config(), [], record["checked_at"] - 1),
-                         (record, False))
+        with (self.home / "duty.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.assertEqual(self.cli("duty", "tick"), "duty tick: another duty tick is running; nothing changed\n")
         self.assertEqual(duty_path.read_text(), before)
+        # A fresh snapshot is not probed, but a missing token is marked as probes do, so the
+        # only working Codex account on duty still takes new work.
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["security"] = {"codex-worker-claude-" + name: {"unavailable": True}
+                               for name in ("first", "second", "unknown")}
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.set_codex_used(self.other, 99)
+        self.cli("duty", "tick")
+        self.assertEqual(json.loads(duty_path.read_text())["account"], "main")
         self.assertEqual(len(log.read_text().splitlines()), 3)
+        self.assertTrue(all(worker.claude_accounts.token_marked(info)
+                            for info in worker.claude_accounts.read_limits().values()))
+        infos = [{"name": name, "logged_in": True, "account_id": name, "limits": {
+            "primary": {"used": used, "minutes": 10080, "reset": self.reset},
+            "secondary": {"used": 2, "minutes": 300, "reset": self.reset}}}
+            for name, used in (("main", 10), ("second", 99))]
+        self.assertEqual(worker.accounts.available(infos, cfg, worker.duty.codex_reserved(infos, cfg))["name"],
+                         "main")
 
     def test_duty_selection_skips_duty_for_new_claude_work_and_reviews_with_exceptions(self):
         self.claude_pool_fixture()
@@ -1616,6 +1641,10 @@ class ClaudeReviewTests(RotationTestCase):
             self.assertEqual(choices(), ("first", "first"))
             self.set_codex_used(self.home, 10)
             self.assertEqual(choices(), (None, None))
+            cfg["soft_switch_at"] = 80
+            self.set_codex_used(self.home, 85)
+            self.assertEqual(choices(), (None, None))
+            cfg["soft_switch_at"] = 99
             del limits["second"]["limited_until"]
             limits_path.write_text(json.dumps(limits))
             self.write_duty("claude", "second", codex={"main": 89})
@@ -1663,10 +1692,9 @@ class ClaudeReviewTests(RotationTestCase):
     def test_duty_codex_tasks_reviews_and_rotation_skip_the_duty_account(self):
         third = self.root / "third-home"
         third.mkdir()
-        self.configure(language="en", soft_switch_at=80,
-                       accounts=[{"name": "main", "home": str(self.home)},
-                                 {"name": "second", "home": str(self.other)},
-                                 {"name": "third", "home": str(third)}])
+        self.configure(language="en", accounts=[{"name": "main", "home": str(self.home)},
+                                                {"name": "second", "home": str(self.other)},
+                                                {"name": "third", "home": str(third)}])
         work = {"mode": "complete", "reply": self.work_result()}
         self.account(self.home, "A", self.reset, runs=[work, work, {"mode": "limit"}])
         self.account(self.other, "B", self.reset + 3600, runs=[
@@ -1677,16 +1705,12 @@ class ClaudeReviewTests(RotationTestCase):
         self.wait("duty-own")
         self.assertEqual(self.state("duty-own")["account"], "main")
         self.write_duty("codex", "main", codex=rooms)
-        # Above soft_switch_at but below switch_at, the duty account keeps its own thread.
-        self.set_codex_used(self.home, 85)
         thread = self.state("duty-own")["thread"]
         self.cli("say", "duty-own", "Continue on the same account.")
         self.wait("duty-own")
         state = self.state("duty-own")
         self.assertEqual((state["account"], state["thread"]), ("main", thread))
         self.assertTrue(self.invocations()[-1]["resume"])
-        self.assertFalse([entry for entry in state["rotations"] if "from" in entry])
-        self.set_codex_used(self.home, 10)
         self.cli("review", "duty-own")
         self.wait("duty-own")
         self.assertEqual(self.state("duty-own")["reviews"][-1]["account"], "second")
