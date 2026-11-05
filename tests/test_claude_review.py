@@ -170,13 +170,16 @@ sys.exit(run.get("exit_code", 0))
 class ClaudeReviewTests(RotationTestCase):
     def test_claude_work_turn_argv_environment_and_result(self):
         result = self.work_result()
-        self.claude_fixture(runs=[{"mode": "modify", "reply": result}, {"reply": result}])
+        raw_line = '\n \t\n{"type" : "fixture", "note" : "café"}\r'
+        self.claude_fixture(runs=[{"mode": "modify", "reply": result, "non_json": raw_line},
+                                  {"reply": result}])
         worker = self.worker()
         account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
         task_dir = self.root / "work-turn-task"
         task_dir.mkdir()
         (self.repo / "AGENTS.md").write_text("Root task instructions.\n")
         prompts = []
+        previous_events = b""
         with mock.patch.dict(os.environ, self.env, clear=True):
             for options in ({"model": "claude-work-model", "effort": "xhigh"},
                             {"session_id": "prior-session", "max_turns": 19, "effort": "max"}):
@@ -193,6 +196,20 @@ class ClaudeReviewTests(RotationTestCase):
                     "cache_creation_input_tokens": 20, "cache_read_input_tokens": 30})
                 self.assertEqual(telemetry["cost_usd"], 0.125)
                 self.assertEqual(telemetry["num_turns"], 3)
+                events = (task_dir / "claude-events.jsonl").read_bytes()
+                self.assertTrue(events.startswith(previous_events))
+                turn_events = events[len(previous_events):]
+                self.assertTrue(turn_events.endswith(b"\n"))
+                if not previous_events:
+                    self.assertIn((raw_line + "\n").encode(), turn_events)
+                decoded = [json.loads(line) for line in turn_events.splitlines() if line.strip()]
+                self.assertEqual([event["type"] for event in decoded],
+                                 ["system", "rate_limit_event"] + (["fixture"] if not previous_events else [])
+                                 + ["assistant", "user", "assistant", "result"])
+                self.assertEqual(decoded[-1]["structured_output"], result)
+                for secret in (TEST_TOKEN, "host-account-secret", str(self.claude_config_dir)):
+                    self.assertNotIn(secret.encode(), events)
+                previous_events = events
                 entry = self.claude_invocations()[-1]
                 self.assertTrue(entry["token_matches"])
                 self.assertEqual(entry["config_dir"], str(self.claude_config_dir))
@@ -280,11 +297,36 @@ class ClaudeReviewTests(RotationTestCase):
             self.assertEqual((task_dir / "stderr.log").read_text(),
                              "Unexpected stream output [REDACTED]\n")
             self.assertFalse(list(task_dir.glob("claude-system-*.md")))
+            events = (task_dir / "claude-events.jsonl").read_bytes()
             response = worker.claude_review.claude_runner.run_claude(
                 account, self.repo, "Review.", lambda: False, reviewing=True)
             self.assertEqual(response["outcome"], "unavailable")
             self.assertEqual(response["reason"], "invalid JSON output")
             self.assertIsNone(response["result"])
+            self.assertEqual((task_dir / "claude-events.jsonl").read_bytes(), events)
+            self.assertFalse((self.repo / "claude-events.jsonl").exists())
+
+    def test_claude_event_log_unwritable_path_preserves_work_and_review_results(self):
+        replies = [self.work_result(), self.review_result(False)]
+        self.claude_fixture(runs=[{"reply": reply} for reply in replies])
+        worker = self.worker()
+        account = worker.claude_accounts.accounts(worker.config.accounts_config())[0]
+        task_dir = self.root / "work-turn-task"
+        (task_dir / "claude-events.jsonl").mkdir(parents=True)
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            for reviewing, reply in enumerate(replies):
+                with self.subTest(reviewing=bool(reviewing)):
+                    if reviewing:
+                        response = worker.claude_review.claude_runner.run_claude(
+                            account, self.repo, "Review.", lambda: False, reviewing=True,
+                            task_dir=task_dir)
+                    else:
+                        response = worker.claude_review.claude_runner.run_work_turn(
+                            account, self.repo, task_dir, "Work.", lambda: False)
+                    self.assertEqual(response["outcome"], "completed")
+                    self.assertEqual(response["result"], reply)
+                    self.assertEqual((task_dir / "stderr.log").read_text().splitlines(),
+                                     ["Could not append to claude-events.jsonl."] * (reviewing + 1))
 
     def test_claude_work_turn_unknown_results_and_unavailable_accounts(self):
         rejected = {"status": "rejected", "utilization": 1, "resetsAt": self.reset,
@@ -489,6 +531,10 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertIn(self.review_result(False)["summary"], status)
         self.assertEqual(json.loads((self.home / "claude-tasks" / "claude-fix" / "review.md").read_text()),
                          state["reviews"][-1]["result"])
+        events = [json.loads(line) for line in
+                  (self.home / "claude-tasks/claude-fix/claude-events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["structured_output"] for event in events if event["type"] == "result"],
+                         [self.review_result(), self.review_result(False)])
         self.assertNotIn(TEST_TOKEN, start_output + output)
         for directory in (self.home, self.other):
             for path in directory.rglob("*"):

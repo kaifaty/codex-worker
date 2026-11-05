@@ -395,6 +395,7 @@ def cmd_clean(a):
     try:
         archive.parent.mkdir(parents=True, exist_ok=True)
         (record / "events.jsonl").unlink(missing_ok=True)
+        (record / "claude-events.jsonl").unlink(missing_ok=True)
         (record / "state.lock").unlink(missing_ok=True)
         record.rename(archive)
     except OSError as exc:

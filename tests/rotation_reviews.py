@@ -24,6 +24,8 @@ class ReviewFixTests(RotationTestCase):
         self.start("claude-executor", "--executor", "claude", "--check", command,
                    "--model", "claude-task-model", "--effort", "high")
         self.wait("claude-executor")
+        task_dir = self.home / "claude-tasks" / "claude-executor"
+        initial_events = (task_dir / "claude-events.jsonl").read_bytes()
         initial = self.state("claude-executor")
         self.assertEqual(initial["executor"], "claude")
         self.assertEqual(initial["claude_account"], accounts[0]["name"])
@@ -47,6 +49,11 @@ class ReviewFixTests(RotationTestCase):
         settings_path.write_text(json.dumps(settings))
         self.cli("say", "claude-executor", "Keep the permanent brief rules and finish the follow-up.")
         self.wait("claude-executor")
+        events = (task_dir / "claude-events.jsonl").read_bytes()
+        self.assertTrue(events.startswith(initial_events))
+        self.assertGreater(len(events), len(initial_events))
+        self.assertEqual([json.loads(line)["structured_output"] for line in events.splitlines()
+                          if json.loads(line)["type"] == "result"], [result, self.work_result()])
         state = self.state("claude-executor")
         first, followup = self.claude_invocations()
         self.assertEqual(state["executor"], "claude")
@@ -79,7 +86,6 @@ class ReviewFixTests(RotationTestCase):
             self.assertEqual(row["tokens"], {"input": 150, "cached_input": 30,
                                              "output": 40, "reasoning": None})
         self.assertEqual(state["threads"], [])
-        task_dir = self.home / "claude-tasks" / "claude-executor"
         messages = json.loads((task_dir / "claude-messages.json").read_text())
         self.assertEqual(len(messages), 2)
         (task_dir / "last.md").unlink()
@@ -87,6 +93,10 @@ class ReviewFixTests(RotationTestCase):
         for message in messages:
             self.assertIn(message, status)
         self.cli("clean", "claude-executor")
+        archive, = (task_dir.parent / ".archive").glob("claude-executor-*")
+        self.assertTrue((archive / "state.json").is_file())
+        self.assertFalse((archive / "claude-events.jsonl").exists())
+        self.assertFalse((archive / "events.jsonl").exists())
         self.assertEqual([event for event in self.trace() if event.get("command") == "archive"], [])
 
     def test_claude_status_messages_text_results_use_process_outcome_and_keep_the_last_message(self):
@@ -205,6 +215,10 @@ class ReviewFixTests(RotationTestCase):
             self.assertEqual(event["argv"][event["argv"].index("--resume") + 1], work["session_id"])
         self.assertIn("F1", fix["argv"][1])
         self.assertIn("repair this Claude CI fixture", ci["argv"][1])
+        events = [json.loads(line) for line in (self.home / "claude-tasks/claude-executor-fixes"
+                                               / "claude-events.jsonl").read_text().splitlines()]
+        self.assertEqual([event["structured_output"] for event in events if event["type"] == "result"],
+                         [result, dict(result, findings=decisions), result])
         self.cli("review", "claude-executor-fixes")
         self.wait("claude-executor-fixes")
         self.assertEqual(len(self.invocations()), 3)
@@ -216,6 +230,10 @@ class ReviewFixTests(RotationTestCase):
         self.claude_pool_fixture(runs=[{"mode": "hold"}, {"reply": self.work_result()}])
         output = self.start("claude-executor-crash", "--executor", "claude")
         self.until(lambda: any(event["command"] == "holding" for event in self.claude_trace()))
+        event_path = self.home / "claude-tasks/claude-executor-crash/claude-events.jsonl"
+        self.until(lambda: event_path.is_file() and b'"rate_limit_event"' in event_path.read_bytes())
+        live_events = [json.loads(line) for line in event_path.read_bytes().splitlines()]
+        self.assertEqual([event["type"] for event in live_events], ["system", "rate_limit_event"])
         initial = self.state("claude-executor-crash")
         first, = self.claude_invocations()
         session_id = first["session_id"]
