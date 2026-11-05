@@ -1,0 +1,22 @@
+name: Board server
+
+on:
+  pull_request:
+    paths:
+      - 'board/server/**'
+      - 'board/CONTRACT.md'
+  push:
+    branches: [main]
+    paths:
+      - 'board/server/**'
+      - 'board/CONTRACT.md'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: '3.10'
+      - run: uv run --project board/server pytest board/server/tests
