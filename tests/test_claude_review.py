@@ -298,6 +298,8 @@ class ClaudeReviewTests(RotationTestCase):
                              "Unexpected stream output [REDACTED]\n")
             self.assertFalse(list(task_dir.glob("claude-system-*.md")))
             events = (task_dir / "claude-events.jsonl").read_bytes()
+            self.assertNotIn(TEST_TOKEN.encode(), events)
+            self.assertIn(b"Unexpected stream output [REDACTED]\n", events)
             response = worker.claude_review.claude_runner.run_claude(
                 account, self.repo, "Review.", lambda: False, reviewing=True)
             self.assertEqual(response["outcome"], "unavailable")

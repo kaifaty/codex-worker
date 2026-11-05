@@ -222,7 +222,7 @@ def run_claude(account, worktree, prompt, stopped, deadline=None, model=None, ef
                         if separator and task_dir is not None and not events_failed:
                             try:
                                 with (Path(task_dir) / "claude-events.jsonl").open("ab") as events:
-                                    events.write(line + separator)
+                                    events.write(line.replace(token.encode(), b"[REDACTED]") + separator)
                                     events.flush()
                             except OSError:
                                 events_failed = True

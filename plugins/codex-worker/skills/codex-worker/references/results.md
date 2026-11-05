@@ -3,7 +3,7 @@
 Implementation and review turns run with `--output-schema` and strict schemas saved in the task
 directory. Scouts keep their plain-text reports.
 
-`claude-events.jsonl` in the task directory appends raw Claude CLI stdout for work, fixes and reviews; `clean` excludes it from the archive.
+`claude-events.jsonl` in the task directory appends Claude CLI stdout with the OAuth token redacted for work, fixes and reviews; `clean` excludes it from the archive.
 
 ## Implementation result
 
