@@ -21,9 +21,10 @@ The result contains one check named after the command, with output selected by t
 GitHub checks also skip repair when all failed or cancelled checks are unrelated to the branch.
 An Actions job did not start if its annotation begins with `The job was not started because` or its
 steps list is empty. If every failed check is such a job, CI records `skipped` with reason
-`CI unavailable: jobs not started: <names>`. Otherwise, a check is red on the base when a check with
-the same name completed with `failure` on the current head of the PR's base branch. If every failure
-is either red on the base or a job that did not start, CI records `skipped` with a reason beginning
+`CI unavailable: jobs not started: <names>`. Otherwise, a check is red on the base when same-name
+runs exist and all completed with `failure` on the PR's base commit (`baseRefOid`, the base its CI ran against).
+A same-name success, neutral, skipped or other non-failure result prevents this classification.
+If every failure is either red on the base or a job that did not start, CI records `skipped` with a reason beginning
 `base red: <names> also fail on <base> <short sha>`, also naming jobs that did not start.
 `wait` keeps the failed-check links and log excerpts for comparison with the base.
 

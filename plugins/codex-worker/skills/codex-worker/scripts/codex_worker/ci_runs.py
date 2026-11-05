@@ -173,7 +173,7 @@ def ci_failure_logs(st, gh, stopped, deadline):
 
 
 def ci_classify_failures(st, gh, pr, stopped, deadline):
-    """Only exclude failures supported by successful job and current-base lookups."""
+    """Only exclude failures supported by successful job and PR base commit lookups."""
     def request(args):
         available = deadline - clock.CLOCK.monotonic()
         if available <= 0:
@@ -226,11 +226,11 @@ def ci_classify_failures(st, gh, pr, stopped, deadline):
                     not isinstance(page, dict) or not isinstance(page.get("check_runs"), list)
                     or any(not isinstance(item, dict) for item in page["check_runs"]) for page in pages):
                 raise ValueError("invalid base check runs response")
-            red = {item.get("name") for page in pages for item in page["check_runs"]
-                   if isinstance(item.get("name"), str)
-                   and item.get("status") == "completed" and item.get("conclusion") == "failure"}
             for check in candidates:
-                if check["name"] in red:
+                runs = [item for page in pages for item in page["check_runs"]
+                        if item.get("name") == check["name"]]
+                if runs and all(item.get("status") == "completed" and item.get("conclusion") == "failure"
+                                for item in runs):
                     check["failure_kind"] = "base_red"
         except (OSError, ValueError, subprocess.TimeoutExpired):
             pass

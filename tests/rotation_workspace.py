@@ -1563,13 +1563,17 @@ class WorkspaceTests(RotationTestCase):
     def test_ci_failed_after_one_round_exhausts_rounds_and_wait_shows_the_log_tail(self):
         self.configure(language="en", sandbox="workspace")
         log = "failure at start\n" + "\n".join("trace line %03d" % index for index in range(200))
-        self.configure_ci([[self.ci_check("fail")]], jobs={"123": log})
+        failed = self.ci_check("fail", name="test")
+        self.configure_ci([[failed]], jobs={"123": log}, base_checks=[
+            {"name": "test", "status": "completed", "conclusion": conclusion}
+            for conclusion in ("failure", "success")])
         self.account(self.home, "A", self.reset, runs=[self.ci_work(), self.ci_work("still broken\n")])
         self.start("ci-exhausted", "--ci")
         output = self.wait("ci-exhausted")
         ci = self.state("ci-exhausted")["ci"]
         self.assertEqual((ci["outcome"], ci["rounds"], ci["reason"]), ("failed", 1, "rounds_exhausted"))
-        self.assertIn("== CI " + ci["sha"][:7] + ": FAILED 1/1: " + self.ci_check()["name"], output)
+        self.assertEqual(ci["checks"][0]["failure_kind"], "branch")
+        self.assertIn("== CI " + ci["sha"][:7] + ": FAILED 1/1: " + failed["name"], output)
         self.assertIn("trace line 199", output)
         self.assertNotIn("failure at start", output)
         self.assertEqual(len(ci["checks"][0]["tail"].splitlines()), 150)
