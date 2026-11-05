@@ -53,7 +53,16 @@ export const OUTCOMES: Record<string, string> = {
   stopped: "остановлена",
   budget_exhausted: "бюджет исчерпан",
   conflict: "конфликт",
+  interrupted: "прервана",
+  stuck: "зависла",
+  refused: "отказ",
+  unavailable: "недоступна",
+  exhausted: "лимиты исчерпаны",
+  error: "ошибка",
 };
+
+/** Outcomes of a task that finished normally. */
+const SUCCESS_OUTCOMES = new Set(["done", "completed"]);
 
 export const FILES: Record<TaskFile, string> = { brief: "Бриф", last: "Ответ", review: "Ревью", check: "Проверка" };
 
@@ -63,10 +72,30 @@ export function prLabel(url: string): string {
   return match ? `PR #${match[1]}` : "PR";
 }
 
-/** Why a task needs attention, in words: the result status, or the outcome when it is a failure. */
+/**
+ * Why a finished task needs attention, in words, or null when nothing went wrong: a failure outcome first,
+ * then a result status other than "done", then an unknown outcome when there is no result status.
+ */
 export function problemLabel(task: TaskSummary): string | null {
   if (task.column !== "attention" && task.column !== "closed") return null;
-  if (task.outcome && task.outcome !== "done" && OUTCOMES[task.outcome]) return OUTCOMES[task.outcome]!;
-  if (task.result_status) return RESULT[task.result_status] ?? task.result_status;
-  return task.outcome;
+  const outcome = task.outcome && !SUCCESS_OUTCOMES.has(task.outcome) ? task.outcome : null;
+  if (outcome && OUTCOMES[outcome]) return OUTCOMES[outcome]!;
+  if (task.result_status) return task.result_status === "done" ? null : (RESULT[task.result_status] ?? task.result_status);
+  return outcome;
+}
+
+/** CI chip of a card. A task whose supervisor is gone can no longer wait for a pending CI. */
+export function ciChip(task: TaskSummary): { label: string; tone: "ok" | "bad" | "warn" | "muted" } | null {
+  if (!task.ci) return null;
+  if (task.ci === "pending" && !task.alive) return { label: "CI не дождались", tone: "muted" };
+  return CI[task.ci] ?? { label: `CI: ${task.ci}`, tone: "muted" };
+}
+
+/** Length of the card highlight animation; `.flash` in TaskCard.vue uses the same value. */
+export const FLASH_MS = 2400;
+
+/** Whether a change at `changedAt` (ms) is still being highlighted at `nowMs`, so a card that comes back
+ * through a filter later does not replay an old highlight. */
+export function isFlashing(changedAt: number | undefined, nowMs: number): boolean {
+  return changedAt !== undefined && nowMs - changedAt < FLASH_MS;
 }

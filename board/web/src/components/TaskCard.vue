@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { TaskSummary } from "../types";
 import { formatAge, formatClock, formatDuration, formatFullTime, formatUntil } from "../lib/format";
-import { ACTIVITY, CI, EXECUTORS, KINDS, PHASES, prLabel, problemLabel } from "../lib/labels";
+import { ACTIVITY, EXECUTORS, KINDS, PHASES, ciChip, isFlashing, prLabel, problemLabel } from "../lib/labels";
 
 const props = defineProps<{
   task: TaskSummary;
@@ -14,7 +14,9 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [slug: string] }>();
 
 const t = computed(() => props.task);
-const ci = computed(() => (t.value.ci ? (CI[t.value.ci] ?? { label: `CI: ${t.value.ci}`, tone: "muted" as const }) : null));
+const ci = computed(() => ciChip(t.value));
+// Checked once when the card is rendered; the key keeps a running animation from restarting.
+const flashing = computed(() => isFlashing(props.changedAt, Date.now()));
 const problem = computed(() => problemLabel(t.value));
 const ticking = computed(() => t.value.alive && t.value.phase_started_at !== null && t.value.phase !== "sleeping");
 const runLine = computed(() => [t.value.account, t.value.model, t.value.effort].filter(Boolean).join(" · "));
@@ -30,7 +32,7 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
 
 <template>
   <article class="card" :class="[t.executor, { selected, dead: !t.alive }]" :data-slug="t.slug">
-    <span v-if="changedAt" :key="changedAt" class="flash" aria-hidden="true"></span>
+    <span v-if="flashing" :key="changedAt" class="flash" aria-hidden="true"></span>
 
     <div class="row head">
       <h3 class="slug">
@@ -139,7 +141,7 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
   border-radius: inherit;
   background: var(--flash);
   pointer-events: none;
-  animation: flash 2.4s ease-out forwards;
+  animation: flash 2.4s ease-out forwards; /* FLASH_MS in lib/labels.ts */
 }
 
 @keyframes flash {
