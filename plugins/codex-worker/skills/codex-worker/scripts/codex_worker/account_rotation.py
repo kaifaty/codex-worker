@@ -75,7 +75,10 @@ def try_reset_credit(st, infos, cfg, stopped):
             or stamp - clock.CLOCK.time() <= cfg.get("reset_credit_min_hours", 12) * 3600
             or accounts.available(infos, cfg)):
         return None
-    eligible = [i for i in infos if i.get("logged_in") and not i.get("duplicate")]
+    # Never spend a reset on a duty account that this task may not take.
+    own = st.get("kind") != "review" and st.get("thread")
+    reserved = duty.codex_reserved(infos, cfg, {st["account"]} if own else ())
+    eligible = [i for i in infos if i.get("logged_in") and not i.get("duplicate") and i["name"] not in reserved]
     with credit_resets.reset_journal(stopped) as (entries, _):
         pending = [(entry.get("credit") or {"id": entry["creditId"]}, info)
                    for info in eligible for entry in credit_resets.pending_resets(entries, info)]

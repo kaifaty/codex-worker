@@ -271,17 +271,17 @@ def claude_reserved(cfg, role, exclude=(), task_type=None, stopped=None):
 
     It takes new work only when no other Claude account can, and either the
     task type needs Claude (duty.claude_only_task_types) or no Codex account
-    can take work now. The slow Codex check runs first, and only while a
-    single Claude account can take the work, so duty.json is read right
-    before the choice.
+    can take work now. The slow Codex check runs first, and only while at
+    most one Claude account can take the work (none: a sleep plans for the
+    duty account's return), so duty.json is read right before the choice.
     """
     exclude = set(exclude)
     best = claude_accounts.select(cfg, role, exclude)
-    alone = best is not None and claude_accounts.select(cfg, role, exclude | {best["name"]}) is None
+    alone = best is None or claude_accounts.select(cfg, role, exclude | {best["name"]}) is None
     codex = (alone and task_type not in cfg["duty"]["claude_only_task_types"]
              and duty_path().exists() and codex_available(cfg, stopped))
     name = duty_account("claude")
-    if name is None or name in exclude or (alone and name == best["name"] and not codex):
+    if name is None or name in exclude or (alone and (best is None or name == best["name"]) and not codex):
         return set()
     return {name}
 
