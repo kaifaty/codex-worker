@@ -33,7 +33,7 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
     <span v-if="changedAt" :key="changedAt" class="flash" aria-hidden="true"></span>
 
     <div class="row head">
-      <h3 class="slug ellipsis">
+      <h3 class="slug">
         <button type="button" class="open" :title="t.slug" @click="emit('open', t.slug)">{{ t.slug }}</button>
       </h3>
       <span class="exec" :class="t.executor" :title="`Исполнитель: ${EXECUTORS[t.executor]}`">
@@ -163,6 +163,7 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
 }
 
 .slug {
+  min-width: 0;
   margin: 0;
   font-size: 13px;
   font-weight: 600;
@@ -171,6 +172,12 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
 
 .open {
   all: unset;
+  display: block;
+  box-sizing: border-box;
+  width: 100%; /* a block button still shrinks to its text */
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   cursor: pointer;
 }
 

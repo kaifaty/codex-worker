@@ -17,7 +17,7 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
     <div class="acc-head">
       <h2 id="accounts-title" class="acc-title">
         <button type="button" class="acc-toggle" :aria-expanded="!collapsed" aria-controls="accounts-body" @click="emit('toggle')">
-          <span class="chevron" aria-hidden="true">{{ collapsed ? "▸" : "▾" }}</span>
+          <span class="chevron" aria-hidden="true">{{ collapsed ? "▶" : "▼" }}</span>
           Аккаунты
           <span v-if="count" class="count num">{{ count }}</span>
         </button>
@@ -28,7 +28,7 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
       <span v-else-if="accounts" class="faint">данных ещё нет</span>
       <p v-if="accounts?.error" class="error" role="status">
         <span aria-hidden="true">⚠</span>
-        <span class="ellipsis" :title="accounts.error">Ошибка: {{ accounts.error }}</span>
+        <span class="error-text" :title="accounts.error">Ошибка: {{ accounts.error }}</span>
       </p>
     </div>
 
@@ -49,8 +49,8 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
               <span :class="level(item.row.weeklyPercent)" :style="{ width: `${Math.min(100, Math.max(0, item.row.weeklyPercent))}%` }"></span>
             </div>
             <div class="line sub">
-              <span v-if="item.row.status" class="status ellipsis" :class="{ bad: item.row.bad }">
-                {{ item.row.status }}<template v-if="item.row.limitedUntil !== null"> {{ formatUntil(item.row.limitedUntil, now) }}</template>
+              <span v-if="item.row.status" class="status" :class="{ bad: item.row.bad }">
+                {{ item.row.status }}<template v-if="item.row.limitedUntil !== null"> · {{ formatUntil(item.row.limitedUntil, now) }}</template>
               </span>
               <span v-if="item.row.weeklyResetsAt !== null" class="ellipsis num" :title="formatFullTime(item.row.weeklyResetsAt)">
                 сброс {{ formatClock(item.row.weeklyResetsAt, now) }}
@@ -107,7 +107,7 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
 
 .chevron {
   width: 10px;
-  font-size: 11px;
+  font-size: 8px;
 }
 
 .count {
@@ -136,6 +136,16 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
   background: var(--bad-soft);
   color: var(--bad);
   font-size: 12px;
+}
+
+.error-text {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  min-width: 0;
 }
 
 .grid {
@@ -213,6 +223,15 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
   justify-content: space-between;
   color: var(--muted);
   font-size: 11.5px;
+}
+
+.status {
+  flex: none;
+  white-space: nowrap;
+}
+
+.sub .num {
+  text-align: right;
 }
 
 .status.bad {

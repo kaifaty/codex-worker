@@ -28,7 +28,7 @@ const emit = defineEmits<{ open: [slug: string]; toggle: [] }>();
           :aria-controls="`col-body-${id}`"
           @click="emit('toggle')"
         >
-          <span class="chevron" aria-hidden="true">{{ collapsed ? "▸" : "▾" }}</span>
+          <span class="chevron" aria-hidden="true">{{ collapsed ? "▶" : "▼" }}</span>
           <span class="title-text">{{ title }}</span>
           <span class="count num">{{ tasks.length }}</span>
         </button>
@@ -132,7 +132,7 @@ const emit = defineEmits<{ open: [slug: string]; toggle: [] }>();
   flex: none;
   width: 10px;
   color: var(--muted);
-  font-size: 11px;
+  font-size: 8px;
 }
 
 .col-body {

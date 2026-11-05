@@ -159,8 +159,9 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
         <dd class="num">
           {{ PHASES[shown.phase] }}
           <template v-if="shown.alive && shown.phase_started_at !== null"> · {{ formatDuration(now - shown.phase_started_at) }}</template>
-          · ход {{ shown.turn }}<template v-if="shown.fix_round > 0"> · раунд {{ shown.fix_round }}</template>
         </dd>
+        <dt>Ходы</dt>
+        <dd class="num">{{ shown.turn }}<template v-if="shown.fix_round > 0"> · раунд исправления {{ shown.fix_round }}</template></dd>
         <dt>Надзиратель</dt>
         <dd>{{ shown.alive ? "работает" : "не запущен" }}<span v-if="shown.outcome" class="muted mono"> · {{ shown.outcome }}</span></dd>
         <template v-if="shown.result_status">

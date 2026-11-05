@@ -100,7 +100,7 @@ function claudeRow(entry: Obj, index: number, now: number): AccountRow | null {
     status = "нет токена";
     bad = true;
   } else if (limitedUntil !== null && limitedUntil > now) {
-    status = "упёрся в лимит";
+    status = "лимит";
     bad = true;
   } else if (entry.stale === true) {
     status = "данные устарели";
