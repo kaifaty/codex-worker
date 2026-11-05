@@ -107,11 +107,12 @@ def duty_window_known(window, now):
             or result_schema.is_finite_number(reset) and reset <= now)
 
 
-def claude_duty_candidate(cfg, account, info, now, refreshed_at):
+def claude_duty_candidate(cfg, account, info, now, refreshed_at, token=True):
     """Room and availability of a Claude account from its cached limits snapshot.
 
     A snapshot is fresh within claude.limits_max_age_minutes, or when it was
-    saved after ``refreshed_at`` (this tick's refresh).
+    saved after ``refreshed_at`` (this tick's refresh). ``token`` is False when
+    the tick found no Keychain token.
     """
     candidate = {"family": "claude", "name": account["name"], "room": 0, "unavailable": None}
     windows = info.get("unifiedWindows") if isinstance(info.get("unifiedWindows"), dict) else {}
@@ -119,7 +120,7 @@ def claude_duty_candidate(cfg, account, info, now, refreshed_at):
     updated = info.get("updated_at")
     fresh = result_schema.is_finite_number(updated) and (
         now - updated <= cfg["claude"].get("limits_max_age_minutes", 30) * 60 or updated >= refreshed_at)
-    if claude_accounts.token_marked(info, now):
+    if not token or claude_accounts.token_marked(info, now):
         candidate["unavailable"] = "token unavailable"
     elif claude_accounts.limited(info, now):
         candidate["unavailable"] = ("limited until "
@@ -210,15 +211,17 @@ def elect(candidates, current, settings):
                             + ("s" if len(missed) > 1 else ""))
 
 
-def run_duty_tick(cfg, infos, refreshed_at):
+def run_duty_tick(cfg, infos, refreshed_at, tokenless=()):
     """Elect from cached Claude limits and Codex snapshots; record the result.
 
     The record is rewritten on every tick; the change log gets one line only
-    when the duty account changes. Returns (record, changed).
+    when the duty account changes, written before the record. A tick that
+    started before the recorded check leaves it alone. Returns (record, changed).
     """
     now = clock.CLOCK.time()
     limits = claude_accounts.read_limits()
-    candidates = ([claude_duty_candidate(cfg, account, limits.get(account["name"], {}), now, refreshed_at)
+    candidates = ([claude_duty_candidate(cfg, account, limits.get(account["name"], {}), now, refreshed_at,
+                                         token=account["name"] not in tokenless)
                    for account in claude_accounts.accounts(cfg)]
                   + [codex_duty_candidate(cfg, info) for info in infos])
     rooms = {family: {candidate["name"]: candidate["room"] for candidate in candidates
@@ -226,39 +229,56 @@ def run_duty_tick(cfg, infos, refreshed_at):
              for family in DUTY_FAMILIES}
     with duty_lock():
         previous = read_duty(warn=False)
+        if previous and previous["checked_at"] >= refreshed_at:
+            # A concurrent tick with newer limits has already recorded its election.
+            return previous, False
         current = {"account": previous["account"], "family": previous["family"]} if previous else None
         decision = elect(candidates, current, cfg["duty"])
         changed = duty_label(previous) != duty_label(decision)
         record = {"account": decision["account"], "family": decision["family"],
                   "since": previous["since"] if previous and not changed else now,
                   "checked_at": now, "reason": decision["reason"], "rooms": rooms}
-        write_duty(record)
         if changed:
+            # Log first: an interrupted tick repeats the line rather than losing the change.
             with duty_log_path().open("a", encoding="utf-8") as log:
                 log.write(json.dumps({"at": now, "from": duty_label(previous), "to": duty_label(decision),
                                       "reason": decision["reason"], "rooms": rooms}, ensure_ascii=False) + "\n")
+        write_duty(record)
     return record, changed
 
 
-def other_family_available(record):
-    """Whether the last tick found a candidate outside the duty account's family."""
-    return any(entries for family, entries in record["rooms"].items() if family != record["family"])
+def duty_account(family):
+    """The duty account's name when it belongs to ``family``, otherwise None."""
+    record = read_duty()
+    return record["account"] if record and record["family"] == family else None
 
 
-def claude_reserved(cfg, role, exclude=(), task_type=None):
+def claude_available(cfg):
+    """Whether a Claude account is available now by the election rules (cached limits)."""
+    limits, now = claude_accounts.read_limits(), clock.CLOCK.time()
+    return any(claude_duty_candidate(cfg, account, limits.get(account["name"], {}), now, now)["unavailable"] is None
+               for account in claude_accounts.accounts(cfg))
+
+
+def codex_available(cfg, stopped=None):
+    """Whether a Codex account is available now by the election rules (fresh snapshots)."""
+    infos = accounts.snapshots(cfg, stopped or (lambda: False))
+    return any(codex_duty_candidate(cfg, info)["unavailable"] is None for info in infos)
+
+
+def claude_reserved(cfg, role, exclude=(), task_type=None, stopped=None):
     """The Claude duty account as a set when new work must skip it, else an empty set.
 
     It takes new work only when no other Claude account can, and either the
-    task type needs Claude (duty.claude_only_task_types) or the last tick found
-    no Codex candidate.
+    task type needs Claude (duty.claude_only_task_types) or no Codex account
+    is available now.
     """
-    record = read_duty()
-    if record is None or record["family"] != "claude" or record["account"] in exclude:
+    name = duty_account("claude")
+    if name is None or name in exclude:
         return set()
-    name = record["account"]
     if claude_accounts.select(cfg, role, set(exclude) | {name}) is not None:
         return {name}
-    if task_type in cfg["duty"]["claude_only_task_types"] or not other_family_available(record):
+    if task_type in cfg["duty"]["claude_only_task_types"] or not codex_available(cfg, stopped):
         return set()
     return {name}
 
@@ -267,13 +287,12 @@ def codex_reserved(infos, cfg, exclude=()):
     """The Codex duty account as a set when new work must skip it, else an empty set.
 
     ``exclude`` names the accounts that cannot take this work; the duty account
-    takes it only when no other Codex account can and the last tick found no
-    Claude candidate.
+    takes it only when no other Codex account can and no Claude account is
+    available now.
     """
-    record = read_duty()
-    if record is None or record["family"] != "codex" or record["account"] in exclude:
+    name = duty_account("codex")
+    if name is None or name in exclude:
         return set()
-    name = record["account"]
-    if accounts.available(infos, cfg, set(exclude) | {name}) is not None or other_family_available(record):
+    if accounts.available(infos, cfg, set(exclude) | {name}) is not None or claude_available(cfg):
         return {name}
     return set()

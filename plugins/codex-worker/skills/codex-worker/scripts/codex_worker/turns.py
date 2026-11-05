@@ -263,8 +263,10 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         reserved = duty.codex_reserved(infos, cfg, () if usable else same_account if resuming else ())
         chosen = accounts.available(infos, cfg, (same_account if resuming else set()) | reserved)
         if usable:
+            # The duty account keeps its own task below the hard limit.
             if (not accounts.exhausted(current, cfg, soft=True) or not chosen
-                    or accounts.exhausted(chosen, cfg, soft=True)):
+                    or accounts.exhausted(chosen, cfg, soft=True)
+                    or current["name"] == duty.duty_account("codex")):
                 chosen = current
             else:
                 soft_rotation = True
@@ -330,6 +332,8 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         used_ids = {i.get("account_id") for i in infos if i["name"] in used and i.get("account_id")}
         excluded = used | {i["name"] for i in infos if i.get("account_id") in used_ids}
         if soft:
+            if account["name"] == duty.duty_account("codex"):
+                return None  # The duty account keeps its own task below the hard limit.
             # The current account still works, so a soft switch never moves to the duty account.
             chosen = accounts.available(infos, cfg, excluded | duty.codex_reserved(infos, cfg))
             if chosen and not accounts.exhausted(chosen, cfg, soft=True):

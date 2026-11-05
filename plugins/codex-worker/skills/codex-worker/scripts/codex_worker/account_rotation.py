@@ -248,7 +248,10 @@ def wait_for_account(st, infos, cfg, reason, stopped, sleep=None):
         if no_logged_in_accounts(st, infos):
             return None
         started = clock.CLOCK.time()
-        stamp, name = earliest_reset(infos, cfg)
+        # Do not wake for a duty account that this task may not take.
+        own = st.get("kind") != "review" and st.get("thread")
+        skipped = duty.codex_reserved(infos, cfg, {st["account"]} if own else ())
+        stamp, name = earliest_reset([i for i in infos if i["name"] not in skipped], cfg)
         # A delayed reset may still have its old timestamp. Avoid a tight RPC loop.
         until = stamp + config.RESET_MARGIN if stamp is not None else started + config.RESET_RETRY_SECONDS
         if until <= started:
@@ -356,7 +359,7 @@ def wait_for_claude_account(st, cfg, reason, stopped, sleep=None):
     def reserved():
         # Do not wake for a duty account that this task may not take.
         current = st.get("claude_account")
-        return duty.claude_reserved(cfg, "work", {current} if current else (), st.get("task_type"))
+        return duty.claude_reserved(cfg, "work", {current} if current else (), st.get("task_type"), stopped)
 
     def exhausted(why):
         stamp, name = claude_reset(cfg, reserved())

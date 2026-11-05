@@ -80,7 +80,7 @@ def select_account(cfg, role, exclude=(), prefer_unused=(), stopped=None, task_t
     """Choose after a refresh; new work skips the duty account unless keep_duty (the task's own account)."""
     refresh_limits(cfg, stopped)
     if not keep_duty:
-        exclude = set(exclude) | duty.claude_reserved(cfg, role, exclude, task_type)
+        exclude = set(exclude) | duty.claude_reserved(cfg, role, exclude, task_type, stopped)
     return claude_accounts.select(cfg, role, exclude, prefer_unused)
 
 

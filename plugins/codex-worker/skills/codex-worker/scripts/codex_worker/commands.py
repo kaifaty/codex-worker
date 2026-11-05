@@ -603,7 +603,10 @@ def cmd_duty_tick(a):
         infos = [dict(account, logged_in=None) for account in cfg["accounts"]]
     else:
         infos = accounts.snapshots(cfg)
-    record, changed = duty.run_duty_tick(cfg, infos, refreshed_at)
+    # A fresh snapshot is not probed; read every token so a missing one is no candidate.
+    tokenless = {account["name"] for account in claude_accounts.accounts(cfg)
+                 if not claude_runner.account_environment(account, config.ACCOUNT_TIMEOUT)[1]}
+    record, changed = duty.run_duty_tick(cfg, infos, refreshed_at, tokenless)
     print(("duty changed to " if changed else "duty ") + duty_summary(record))
 
 
