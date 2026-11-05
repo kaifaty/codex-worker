@@ -60,7 +60,7 @@ export interface IslandScene {
 export class NoWebGLError extends Error {}
 
 const WALK_SPEED = 3.2; // units per second
-const AMBIENT_FRAME_MS = 1000 / 30; // work animations alone draw at 30 fps
+const AMBIENT_FRAME_MS = 1000 / 24; // work animations alone draw at 24 fps
 const FOV = 34;
 const POLAR = 0.72; // default tilt, radians from straight down
 const TARGET = new THREE.Vector3(0, 0, 2.6);
@@ -234,8 +234,21 @@ export function createIslandScene(options: SceneOptions): IslandScene {
     agent.path = steps.filter((step, index) => index === 0 || Math.hypot(step.at.x - steps[index - 1]!.at.x, step.at.z - steps[index - 1]!.at.z) > 1e-6);
   }
 
+  /** What of the entries the scene shows; equal signatures draw the same picture. */
+  const signature = (list: readonly SceneEntry[]) =>
+    list
+      .map(({ task, placement: p, bench }) =>
+        [task.slug, task.executor, task.ci, bench, p.place, p.slot, p.action, p.working, p.placeWorking, p.beacon, p.companion].join(" "),
+      )
+      .join("\n");
+  let shown = "";
+
   function setEntries(next: readonly SceneEntry[]) {
+    // The clock re-sends the same entries every second; only a visible change reaches the scene.
+    const key = signature(next);
     entries = next;
+    if (key === shown) return;
+    shown = key;
     const seen = new Set<string>();
     let changed = false;
     for (const entry of next) {
@@ -285,10 +298,8 @@ export function createIslandScene(options: SceneOptions): IslandScene {
         changed = true;
       } else if (agent.place !== placement.place || agent.slot !== target.slot) {
         walkTo(agent, target.spot, target.attach);
-        agent.attach = agent.path.length ? agent.attach : target.attach;
-      } else if (agent.spot.face !== target.spot.face && !agent.path.length) {
-        agent.yaw = reduced ? target.spot.face : agent.yaw;
       }
+      // A resting agent joins the paths where its new place does; a walking one keeps its waypoint's.
       if (!agent.path.length) agent.attach = target.attach;
       agent.spot = target.spot;
       agent.place = placement.place;
@@ -535,7 +546,8 @@ export function createIslandScene(options: SceneOptions): IslandScene {
   function frame(time: number) {
     raf = 0;
     if (!running()) return;
-    const dt = lastFrame ? Math.min(0.1, (time - lastFrame) / 1000) : 0;
+    // A slow frame still moves the agents by the time that passed, up to a quarter of a second.
+    const dt = lastFrame ? Math.min(0.25, (time - lastFrame) / 1000) : 0;
     lastFrame = time;
     const moved = controls.update(dt);
     const walking = step(dt);
@@ -590,8 +602,10 @@ export function createIslandScene(options: SceneOptions): IslandScene {
     switch (kind) {
       case "bench": {
         const bench = benches.get(key);
-        // Over the head of the agent working there.
-        return bench ? out.set(bench.model.root.position.x + 0.2, 2.05, bench.model.root.position.z - 0.85) : null;
+        if (!bench) return null;
+        const at = bench.model.root.position;
+        // Over the head of the agent working there, or just over the bench while the agent is away.
+        return agents.get(key)?.place === "bench" ? out.set(at.x + 0.2, 2.05, at.z - 0.85) : out.set(at.x, 1.5, at.z + 0.1);
       }
       case "agent": {
         const agent = agents.get(key);
@@ -610,7 +624,7 @@ export function createIslandScene(options: SceneOptions): IslandScene {
           case "review":
             return out.set(TABLES[0]!.x, 1.1, TABLES[0]!.z - 0.7);
           case "gate":
-            return out.set(GATE.x + 0.3, 0, GATE.z + 1.9);
+            return out.set(GATE.x, 3.7, GATE.z);
           case "tent":
             return out.set(TENTS[0]!.x - 0.2, 0, TENTS[0]!.z - 1.0);
           case "dock":
@@ -830,6 +844,12 @@ export function createIslandScene(options: SceneOptions): IslandScene {
     const slug = hit(event);
     if (slug) options.onPick(slug);
   };
+  // Labels sit over the canvas; the wheel over a label still zooms the map.
+  const onOverlayWheel = (event: WheelEvent) => {
+    if (event.target === canvas) return;
+    event.preventDefault();
+    canvas.dispatchEvent(new WheelEvent("wheel", event));
+  };
   const onPointerMove = (event: PointerEvent) => {
     if (event.buttons || event.pointerType !== "mouse") return;
     canvas.style.cursor = hit(event) ? "pointer" : "";
@@ -878,6 +898,7 @@ export function createIslandScene(options: SceneOptions): IslandScene {
   canvas.addEventListener("pointerup", onPointerUp);
   canvas.addEventListener("pointermove", onPointerMove);
   canvas.addEventListener("webglcontextlost", onLost);
+  overlay.addEventListener("wheel", onOverlayWheel, { passive: false });
   controls.addEventListener("start", onStart);
   controls.addEventListener("end", onEnd);
   controls.addEventListener("change", onChange);
@@ -919,6 +940,7 @@ export function createIslandScene(options: SceneOptions): IslandScene {
       canvas.removeEventListener("pointerup", onPointerUp);
       canvas.removeEventListener("pointermove", onPointerMove);
       canvas.removeEventListener("webglcontextlost", onLost);
+      overlay.removeEventListener("wheel", onOverlayWheel);
       controls.removeEventListener("start", onStart);
       controls.removeEventListener("end", onEnd);
       controls.removeEventListener("change", onChange);

@@ -11,7 +11,12 @@ import { NoWebGLError, createIslandScene, type IslandScene, type SceneEntry, typ
 const props = defineProps<{ board: Board; active: boolean }>();
 const emit = defineEmits<{ board: [] }>();
 
-const now = useNow();
+// The clock stops while the map is hidden, so a hidden map does not re-render every second.
+const clock = useNow();
+const now = ref(clock.value);
+watch(clock, (value) => {
+  if (props.active) now.value = value;
+});
 
 // In `dev:fixture` mode a scenario can stand in for the board's source.
 const demo = import.meta.env.MODE === "fixture";
@@ -93,10 +98,11 @@ function activityLine(task: TaskSummary, where: Placement): { icon: string; text
   }
   const activity = task.activity;
   if (!activity) return { icon: "·", text: "нет активности", age: "", stale: true };
+  // The age matters once the activity is stale: the agent stands still, and the label says since when.
   return {
     icon: ACTIVITY[activity.kind].icon,
     text: activity.text,
-    age: activity.at !== null ? formatAge(activity.at, now.value) : "",
+    age: where.stale && activity.at !== null ? formatAge(activity.at, now.value) : "",
     stale: where.stale,
   };
 }
@@ -196,6 +202,7 @@ watch(selected, (slug) => scene?.setSelected(slug));
 watch(
   () => props.active,
   (active) => {
+    if (active) now.value = Date.now() / 1000;
     scene?.setActive(active);
     if (!active) selected.value = null;
   },
@@ -430,11 +437,6 @@ onBeforeUnmount(() => {
 
 .status,
 .fallback {
-  position: absolute;
-  left: 50%;
-  top: 40%;
-  z-index: 2;
-  transform: translate(-50%, -50%);
   max-width: min(440px, calc(100% - 32px));
   margin: 0;
   padding: 10px 14px;
@@ -446,11 +448,15 @@ onBeforeUnmount(() => {
   box-shadow: var(--shadow);
 }
 
+.status {
+  position: absolute;
+  left: 50%;
+  top: 40%;
+  z-index: 2;
+  transform: translate(-50%, -50%);
+}
+
 .fallback {
-  position: relative;
-  left: auto;
-  top: auto;
-  transform: none;
   margin: 72px auto 0;
   color: var(--text);
 }
@@ -643,7 +649,7 @@ onBeforeUnmount(() => {
 .z-far .b-act,
 .z-far .b-who,
 .z-far .agent,
-.z-mid .b-who {
+.z-mid .bench .b-who {
   display: none;
 }
 

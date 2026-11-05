@@ -23,6 +23,13 @@ npm --prefix board/web ci && npm --prefix board/web run build
 
 Until that directory exists, `/` returns a short build instruction. The API is available independently.
 
+The header switches between two views of the same data: «Доска», the columns, and «Карта», a prototype
+that draws one repository as a low-poly island (three.js, loaded only when the tab opens). Each task has a
+workbench there, and its agent walks to the place of its phase: the test stand, the review table, the CI
+gate, a tent while it sleeps, the pier when it waits for review. `board/web/src/map/placement.ts` decides
+the place and the action. `npm --prefix board/web run dev:fixture` adds a «Сценарий» source to the map
+that takes three demo agents through every place.
+
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
 | `CODEX_TASK_HOME` | `~/.codex` | Read tasks from `claude-tasks/` and archives from `claude-tasks/.archive/`. Snapshots include at most 50 closed records together, ranked by state mtime. |

@@ -65,10 +65,6 @@ export class Kit {
     return geometry;
   }
 
-  get colors(): Palette {
-    return this.palette;
-  }
-
   setPalette(palette: Palette): void {
     this.palette = palette;
     for (const [tone, material] of this.solid) material.color.set(palette[tone]);
@@ -325,19 +321,19 @@ function standModel(kit: Kit, group: THREE.Group): Pick<PlaceModels, "standLight
 
 function gateModel(kit: Kit, group: THREE.Group): Pick<PlaceModels, "gateLamp" | "gateLights"> {
   const wood = kit.mat("woodDark");
-  for (const dz of [-1.35, 1.35]) {
-    group.add(mesh(box(kit, 0.32, 2.4, 0.32), wood, GATE.x, 1.2, GATE.z + dz));
-    group.add(blob(kit, 0.4, GATE.x, GATE.z + dz));
+  for (const dx of [-1.35, 1.35]) {
+    group.add(mesh(box(kit, 0.32, 2.4, 0.32), wood, GATE.x + dx, 1.2, GATE.z));
+    group.add(blob(kit, 0.4, GATE.x + dx, GATE.z));
   }
-  group.add(mesh(box(kit, 0.46, 0.34, 3.3), kit.mat("wood"), GATE.x, 2.5, GATE.z));
+  group.add(mesh(box(kit, 3.3, 0.34, 0.46), kit.mat("wood"), GATE.x, 2.5, GATE.z));
   const gateLights: THREE.Mesh[] = [];
   for (let i = 0; i < 5; i++) {
-    const light = mesh(box(kit, 0.05, 0.16, 0.4), kit.glow("screenOff"), GATE.x - 0.25, 2.5, GATE.z - 1.0 + i * 0.5);
+    const light = mesh(box(kit, 0.4, 0.16, 0.05), kit.glow("screenOff"), GATE.x - 1.0 + i * 0.5, 2.5, GATE.z + 0.25);
     gateLights.push(light);
     group.add(light);
   }
   group.add(mesh(cylinder(kit, 0.05, 0.05, 0.3, 5), kit.mat("metalDark"), GATE.x, 2.82, GATE.z));
-  const gateLamp = mesh(sphere(kit, 0.24, 12, 8), kit.glow("lampOff"), GATE.x, 3.1, GATE.z);
+  const gateLamp = mesh(sphere(kit, 0.26, 12, 8), kit.glow("lampOff"), GATE.x, 3.12, GATE.z);
   group.add(gateLamp);
   return { gateLamp, gateLights };
 }
@@ -428,7 +424,6 @@ export function buildWorld(kit: Kit, group: THREE.Group): PlaceModels {
     group.add(strip);
   };
   for (const [a, b] of PATHS) path(a, b, 0.7);
-  path({ x: GATE.x, z: GATE.z }, { x: GATE.x + 2.4, z: GATE.z }, 0.7);
 
   const places = new THREE.Group();
   group.add(places);

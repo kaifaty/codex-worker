@@ -14,6 +14,8 @@ export default defineConfig({
   },
   build: {
     target: "es2022",
+    // The map tab's chunk is mostly three.js (about 630 kB); it loads only when the tab is opened.
+    chunkSizeWarningLimit: 700,
   },
   test: {
     environment: "node",

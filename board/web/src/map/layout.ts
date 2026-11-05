@@ -14,6 +14,7 @@ export interface Spot extends Point {
 }
 
 const SOUTH = 0;
+const NORTH = Math.PI;
 /** The agent stands a little east of its bench's middle, beside the monitor. */
 const BENCH_AGENT_X = 0.2;
 const EAST = Math.PI / 2;
@@ -69,7 +70,7 @@ export const TABLES: readonly Point[] = [
   { x: 10.0, z: -2.4 },
   { x: 10.0, z: -0.2 },
 ];
-export const GATE = { x: 11.9, z: 4.7 }; // the gate, crossed from west to east
+export const GATE = { x: 10.8, z: 2.6 }; // the gate faces south; agents wait in front of it
 export const TENTS: readonly Point[] = [
   { x: -11.6, z: 1.6 },
   { x: -9.75, z: 1.6 },
@@ -104,8 +105,9 @@ export function spotAt(place: Place, slot: number): Spot {
       return { x: 11.75, z: -2.9 + (wait - 7) * SLOT_STEP, face: WEST };
     }
     case "gate": {
-      const column = Math.floor(slot / 4);
-      return { x: 10.3 - column * SLOT_STEP, z: 3.6 + (slot % 4) * 0.9, face: EAST };
+      // Rows of three in front of the gate, the first row nearest.
+      const offsets = [0, -SLOT_STEP, SLOT_STEP] as const;
+      return { x: GATE.x + offsets[slot % 3]!, z: GATE.z + 1.0 + Math.floor(slot / 3) * 0.9, face: NORTH };
     }
     case "tent": {
       // In front of a tent; past six tents, on mats in a row.
@@ -147,7 +149,7 @@ const NODES: readonly Point[] = [
   { x: 0, z: LANES[2]! }, // 6 M2, where the dock path leaves lane 2
   { x: -8.4, z: -0.9 }, // 7 stand
   { x: 7.9, z: 1.0 }, // 8 review
-  { x: 8.2, z: 4.6 }, // 9 gate
+  { x: 8.7, z: 4.3 }, // 9 gate
   { x: -7.2, z: 5.6 }, // 10 tents
   { x: 0, z: 10.6 }, // 11 dock
 ];
