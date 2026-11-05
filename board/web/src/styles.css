@@ -1,0 +1,236 @@
+:root {
+  color-scheme: light dark;
+
+  --bg: #f3f4f6;
+  --surface: #ffffff;
+  --surface-2: #e9ecf0;
+  --surface-3: #f7f8fa;
+  --border: #d9dde3;
+  --border-strong: #b9c0ca;
+  --text: #1b2028;
+  --muted: #59626f;
+  --faint: #868e9a;
+  --focus: #2563d0;
+  --link: #1f59c0;
+
+  --codex: #2459b8;
+  --codex-soft: #e3ecfb;
+  --claude: #a84f2c;
+  --claude-soft: #f8e8e0;
+
+  --ok: #1d7446;
+  --ok-soft: #dff1e7;
+  --warn: #8d5b00;
+  --warn-soft: #f9eed6;
+  --bad: #b02a22;
+  --bad-soft: #f9e3e1;
+
+  --phase-turn: #2f6fe0;
+  --phase-check: #b07a00;
+  --phase-review: #7b4fc9;
+  --phase-fix: #cf5d1a;
+  --phase-ci: #12808a;
+  --phase-sleeping: #7a8494;
+  --phase-idle: #a3aab4;
+
+  --flash: rgba(37, 99, 208, 0.13);
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+  --shadow-panel: -8px 0 24px rgba(16, 24, 40, 0.14);
+  --radius: 6px;
+
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111317;
+    --surface: #1a1d23;
+    --surface-2: #15181d;
+    --surface-3: #20242b;
+    --border: #2b3039;
+    --border-strong: #3d4450;
+    --text: #e2e5ea;
+    --muted: #9aa3b0;
+    --faint: #6f7884;
+    --focus: #6b9bff;
+    --link: #82abff;
+
+    --codex: #7ea6f5;
+    --codex-soft: #1d2a42;
+    --claude: #e59472;
+    --claude-soft: #3a2519;
+
+    --ok: #5fc48c;
+    --ok-soft: #173023;
+    --warn: #e0b04f;
+    --warn-soft: #352a12;
+    --bad: #f07f76;
+    --bad-soft: #3b1d1b;
+
+    --phase-turn: #6b9bff;
+    --phase-check: #e0b04f;
+    --phase-review: #b393f0;
+    --phase-fix: #f0935a;
+    --phase-ci: #4cc3cc;
+    --phase-sleeping: #8a94a3;
+    --phase-idle: #5f6874;
+
+    --flash: rgba(107, 155, 255, 0.14);
+    --shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    --shadow-panel: -8px 0 28px rgba(0, 0, 0, 0.5);
+  }
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 13px/1.4 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  overflow-x: hidden;
+}
+
+button,
+select,
+input {
+  font: inherit;
+  color: inherit;
+}
+
+a {
+  color: var(--link);
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.ellipsis {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-size: 12px;
+}
+
+.muted {
+  color: var(--muted);
+}
+
+.num {
+  font-variant-numeric: tabular-nums;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  max-width: 100%;
+  padding: 0 6px;
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
+  background: var(--surface-2);
+  color: var(--muted);
+}
+
+.chip.ok {
+  background: var(--ok-soft);
+  color: var(--ok);
+}
+
+.chip.warn {
+  background: var(--warn-soft);
+  color: var(--warn);
+}
+
+.chip.bad {
+  background: var(--bad-soft);
+  color: var(--bad);
+}
+
+.exec {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: none;
+  padding: 0 7px 0 5px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 650;
+  line-height: 18px;
+  letter-spacing: 0.01em;
+}
+
+.exec.codex {
+  background: var(--codex-soft);
+  color: var(--codex);
+}
+
+.exec.claude {
+  background: var(--claude-soft);
+  color: var(--claude);
+}
+
+.exec .glyph {
+  font-size: 10px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  cursor: pointer;
+  line-height: 18px;
+}
+
+.btn:hover {
+  border-color: var(--border-strong);
+}
+
+.btn[aria-pressed="true"],
+.btn[aria-selected="true"] {
+  background: var(--text);
+  border-color: var(--text);
+  color: var(--surface);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

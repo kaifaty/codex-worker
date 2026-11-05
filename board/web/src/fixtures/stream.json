@@ -1,0 +1,442 @@
+[
+  {
+    "type": "activity",
+    "slug": "board-web-frontend",
+    "activity": {
+      "at": 1794000001,
+      "kind": "tool",
+      "text": "Read src/store/reduce.ts"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "rotation-capacity-deadline-and-a-very-long-slug-to-check-ellipsis",
+    "activity": {
+      "at": 1794000002,
+      "kind": "command",
+      "text": "python3 -I tests/test_rotation.py -k capacity"
+    }
+  },
+  {
+    "type": "ping",
+    "at": 1794000003
+  },
+  {
+    "type": "activity",
+    "slug": "ml-eval-pipeline",
+    "activity": {
+      "at": 1794000004,
+      "kind": "edit",
+      "text": "Edit eval/metrics.py"
+    }
+  },
+  {
+    "type": "task",
+    "task": {
+      "kind": "work",
+      "branch": "codex/ci-wait-retry",
+      "task_type": "logic",
+      "reviewer": "codex",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "phase_started_at": 1793999690,
+      "alive": true,
+      "turn": 4,
+      "fix_round": 0,
+      "outcome": "running",
+      "result_status": null,
+      "summary": null,
+      "pr": "https://github.com/example/device-assistant/pull/118",
+      "ci": "passed",
+      "sleeping_until": null,
+      "created": 1793980000,
+      "updated_at": 1794000005,
+      "activity": {
+        "at": 1794000005,
+        "kind": "message",
+        "text": "CI прошёл"
+      },
+      "slug": "ci-wait-retry",
+      "repo": "device-assistant",
+      "executor": "claude",
+      "account": "claude-pool-1",
+      "column": "running",
+      "phase": "ci"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "board-web-frontend",
+    "activity": {
+      "at": 1794000006,
+      "kind": "edit",
+      "text": "Edit src/components/TaskCard.vue"
+    }
+  },
+  {
+    "type": "task",
+    "task": {
+      "kind": "work",
+      "branch": "codex/docs-refresh",
+      "task_type": "docs",
+      "reviewer": "codex",
+      "model": "gpt-5.5",
+      "effort": "low",
+      "phase_started_at": 1794000007,
+      "alive": true,
+      "turn": 1,
+      "fix_round": 0,
+      "outcome": "running",
+      "result_status": null,
+      "summary": null,
+      "pr": null,
+      "ci": null,
+      "sleeping_until": null,
+      "created": 1793999991,
+      "updated_at": 1794000007,
+      "activity": {
+        "at": 1794000007,
+        "kind": "thinking",
+        "text": "Читаю SKILL.md"
+      },
+      "slug": "docs-skill-refresh",
+      "repo": "codex-worker-public",
+      "executor": "codex",
+      "account": "personal",
+      "column": "running",
+      "phase": "turn"
+    }
+  },
+  {
+    "type": "accounts",
+    "accounts": {
+      "fetched_at": 1794000008,
+      "error": null,
+      "data": {
+        "codex": [
+          {
+            "name": "personal",
+            "plan": "pro",
+            "primary": {
+              "used_percent": 12,
+              "resets_at": "2026-11-06T23:50:00Z",
+              "window_minutes": 300
+            },
+            "secondary": {
+              "used_percent": 41,
+              "resets_at": "2026-11-09T21:20:00Z",
+              "window_minutes": 10080
+            },
+            "credits": {
+              "balance": null,
+              "unlimited": false,
+              "has_credits": false,
+              "spendable": 0
+            },
+            "reset_credits": {
+              "available_count": 0,
+              "expires_at": []
+            },
+            "status": "available"
+          },
+          {
+            "name": "work",
+            "plan": "team",
+            "primary": {
+              "used_percent": 64,
+              "resets_at": "2026-11-06T22:10:00Z",
+              "window_minutes": 300
+            },
+            "secondary": {
+              "used_percent": 87.5,
+              "resets_at": "2026-11-07T23:20:00Z",
+              "window_minutes": 10080
+            },
+            "credits": {
+              "balance": "25",
+              "unlimited": false,
+              "has_credits": true,
+              "spendable": 25
+            },
+            "reset_credits": {
+              "available_count": 1,
+              "expires_at": [
+                "2026-11-11T21:20:00Z"
+              ]
+            },
+            "status": "available"
+          },
+          {
+            "name": "work-team-account-number-three@example.com",
+            "plan": "team",
+            "primary": {
+              "used_percent": 100,
+              "resets_at": "2026-11-06T21:50:00Z",
+              "window_minutes": 300
+            },
+            "secondary": {
+              "used_percent": 100,
+              "resets_at": "2026-11-10T21:20:00Z",
+              "window_minutes": 10080
+            },
+            "credits": {},
+            "reset_credits": {},
+            "status": "exhausted"
+          },
+          {
+            "name": "spare",
+            "plan": null,
+            "primary": null,
+            "secondary": null,
+            "credits": {},
+            "reset_credits": {},
+            "status": "not_logged_in"
+          }
+        ],
+        "claude": [
+          {
+            "name": "claude-pool-1",
+            "weight": 1,
+            "updated_at": "2026-11-06T21:13:20Z",
+            "stale": false,
+            "five_hour": {
+              "used_percent": 22,
+              "resets_at": "2026-11-06T23:16:40Z"
+            },
+            "seven_day": {
+              "used_percent": 58,
+              "resets_at": "2026-11-08T22:20:00Z"
+            },
+            "limited_until": null,
+            "token_unavailable": null
+          },
+          {
+            "name": "claude-pool-2",
+            "weight": 2,
+            "updated_at": "2026-11-06T21:13:20Z",
+            "stale": false,
+            "five_hour": {
+              "used_percent": 71,
+              "resets_at": "2026-11-06T22:26:40Z"
+            },
+            "seven_day": {
+              "used_percent": 33,
+              "resets_at": "2026-11-11T21:20:00Z"
+            },
+            "limited_until": null,
+            "token_unavailable": null
+          },
+          {
+            "name": "claude-pool-3",
+            "weight": 1,
+            "updated_at": "2026-11-06T07:26:40Z",
+            "stale": true,
+            "five_hour": {
+              "used_percent": 100,
+              "resets_at": "2026-11-06T21:53:20Z"
+            },
+            "seven_day": {
+              "used_percent": 96,
+              "resets_at": "2026-11-07T21:20:00Z"
+            },
+            "limited_until": "2026-11-06T21:53:20Z",
+            "token_unavailable": null
+          },
+          "legacy-entry-without-object-shape"
+        ],
+        "thresholds": {
+          "soft_switch_at": 95,
+          "switch_at": 99
+        },
+        "credits_floor": 0,
+        "credits_floor_until": null
+      }
+    }
+  },
+  {
+    "type": "task",
+    "task": {
+      "kind": "work",
+      "branch": "codex/ci-wait-retry",
+      "task_type": "logic",
+      "reviewer": "codex",
+      "model": "claude-sonnet-5-5",
+      "effort": "medium",
+      "phase_started_at": null,
+      "alive": false,
+      "turn": 4,
+      "fix_round": 0,
+      "outcome": "done",
+      "result_status": "done",
+      "summary": "Повтор ожидания CI с ограничением по времени",
+      "pr": "https://github.com/example/device-assistant/pull/118",
+      "ci": "passed",
+      "sleeping_until": null,
+      "created": 1793980000,
+      "updated_at": 1794000009,
+      "activity": null,
+      "slug": "ci-wait-retry",
+      "repo": "device-assistant",
+      "executor": "claude",
+      "account": "claude-pool-1",
+      "column": "review_me",
+      "phase": "idle"
+    }
+  },
+  {
+    "type": "task",
+    "task": {
+      "kind": "work",
+      "branch": "codex/login-redirect",
+      "task_type": "fix",
+      "reviewer": "codex",
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "phase_started_at": 1794000010,
+      "alive": true,
+      "turn": 1,
+      "fix_round": 0,
+      "outcome": "running",
+      "result_status": null,
+      "summary": null,
+      "pr": null,
+      "ci": null,
+      "sleeping_until": null,
+      "created": 1794000010,
+      "updated_at": 1794000010,
+      "activity": null,
+      "slug": "hotfix-login-redirect",
+      "repo": "mytonwallet-frontend",
+      "executor": "claude",
+      "account": "claude-pool-2",
+      "column": "running",
+      "phase": "turn"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "review-ws-reconnect",
+    "activity": {
+      "at": 1794000011,
+      "kind": "message",
+      "text": "Нашёл гонку при закрытии сокета до onopen"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "hotfix-login-redirect",
+    "activity": {
+      "at": 1794000012,
+      "kind": "command",
+      "text": "git log --oneline -5"
+    }
+  },
+  {
+    "type": "task_removed",
+    "slug": "accounts-json-schema"
+  },
+  {
+    "type": "task",
+    "task": {
+      "kind": "work",
+      "branch": "codex/accounts-json",
+      "task_type": "logic",
+      "reviewer": "codex",
+      "model": "gpt-5.5-codex",
+      "effort": "high",
+      "phase_started_at": null,
+      "alive": false,
+      "turn": 2,
+      "fix_round": 0,
+      "outcome": "done",
+      "result_status": "done",
+      "summary": "Описал схему вывода accounts --json, добавил поля five_hour и seven_day для пула Claude и тесты на пустые окна, устаревшие данные и отсутствующий токен; документация в references/accounts.md",
+      "pr": null,
+      "ci": "skipped",
+      "sleeping_until": null,
+      "created": 1793992000,
+      "updated_at": 1794000014,
+      "activity": null,
+      "slug": "accounts-json-schema-20261107T120013Z",
+      "repo": "codex-worker-public",
+      "executor": "codex",
+      "account": "work",
+      "column": "closed",
+      "phase": "idle"
+    }
+  },
+  {
+    "type": "task",
+    "task": {
+      "kind": "work",
+      "branch": "codex/rotation-capacity-deadline",
+      "task_type": "fix",
+      "reviewer": "claude",
+      "model": "gpt-5.5-codex",
+      "effort": "xhigh",
+      "phase_started_at": 1794000015,
+      "alive": true,
+      "turn": 3,
+      "fix_round": 1,
+      "outcome": "running",
+      "result_status": null,
+      "summary": null,
+      "pr": null,
+      "ci": null,
+      "sleeping_until": null,
+      "created": 1793991000,
+      "updated_at": 1794000015,
+      "activity": {
+        "at": 1794000015,
+        "kind": "thinking",
+        "text": "Ревьюер смотрит дифф"
+      },
+      "slug": "rotation-capacity-deadline-and-a-very-long-slug-to-check-ellipsis",
+      "repo": "mytonwallet-frontend-monorepo-long-name",
+      "executor": "codex",
+      "account": "work-team-account-number-three@example.com",
+      "column": "running",
+      "phase": "review"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "board-web-frontend",
+    "activity": {
+      "at": 1794000016,
+      "kind": "command",
+      "text": "npm test -- --run"
+    }
+  },
+  {
+    "type": "ping",
+    "at": 1794000017
+  },
+  {
+    "type": "activity",
+    "slug": "ml-eval-pipeline",
+    "activity": {
+      "at": 1794000018,
+      "kind": "command",
+      "text": "python -m eval.run --subset smoke"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "hotfix-login-redirect",
+    "activity": {
+      "at": 1794000019,
+      "kind": "edit",
+      "text": "Edit src/auth/redirect.ts"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "board-web-frontend",
+    "activity": {
+      "at": 1794000020,
+      "kind": "message",
+      "text": "Сборка и тесты прошли"
+    }
+  }
+]
