@@ -126,7 +126,8 @@ def test_archive_cap_and_removed_message(tmp_path):
     store.poll()
     assert len(store.summaries()) == 51
     assert store.detail("newest-20261105T120000Z")["column"] == "closed"
-    assert "old-05" not in {task["slug"] for task in store.summaries()}
+    assert "newest-20261105T120000Z" not in {task["slug"] for task in store.summaries()}
+    assert "old-05" in {task["slug"] for task in store.summaries()}
     assert "old-00" not in {task["slug"] for task in store.summaries()}
     old = tmp_path / ".archive" / "old-00"
     (old / "brief.md").write_text("Archived brief")
@@ -168,3 +169,140 @@ def test_details_and_file_allowlist(tmp_path):
     for name in ("../state.json", "state.json", "auth.json", "review", "missing"):
         assert store.file_path("task", name) is None
     assert store.file_path("task", "brief") == directory / "brief.md"
+
+
+def test_finished_scouts_are_closed_for_success_failure_and_abandoned_work(tmp_path, pids):
+    live, dead = pids
+    for outcome in ("completed", "failed", "running", "sleeping"):
+        write_state(tmp_path, outcome, kind="scout", pid=dead, outcome=outcome)
+    write_state(tmp_path, "alive-scout", kind="scout", pid=live)
+    store = Store(tmp_path)
+    store.poll()
+    rows = {task["slug"]: task for task in store.summaries()}
+    assert {slug: row["column"] for slug, row in rows.items()} == {
+        "completed": "closed", "failed": "closed", "running": "closed", "sleeping": "closed",
+        "alive-scout": "running",
+    }
+
+
+def test_stale_tasks_close_by_state_mtime_with_live_exemption_and_configurable_threshold(tmp_path, pids, monkeypatch):
+    now = 20 * 86400.0
+    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now)
+    live, dead = pids
+    for slug, pid, age in (("stale", dead, 7 * 86400 + 1), ("boundary", dead, 7 * 86400),
+                           ("recent", dead, 2 * 86400), ("alive", live, 8 * 86400)):
+        directory = write_state(tmp_path, slug, pid=pid, outcome="completed", result={"status": "done"})
+        os.utime(directory / "state.json", (now - age, now - age))
+    store = Store(tmp_path)
+    store.poll()
+    assert {task["slug"]: task["column"] for task in store.summaries()} == {
+        "stale": "closed", "boundary": "review_me", "recent": "review_me", "alive": "running",
+    }
+    custom = Store(tmp_path, stale_days=1)
+    custom.poll()
+    assert custom.detail("recent")["column"] == "closed"
+    assert custom.detail("alive")["column"] == "running"
+
+
+def test_snapshot_closed_limit_combines_archive_and_live_folders_by_updated_at(tmp_path, pids, monkeypatch):
+    now = 20 * 86400.0
+    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now)
+    live, dead = pids
+    for i in range(30):
+        archived = write_state(tmp_path / ".archive", f"archived-{i:02}", pid=dead)
+        archived_at = now - 1000 + i
+        os.utime(archived / "state.json", (archived_at, archived_at))
+        scout = write_state(tmp_path, f"scout-{i:02}", kind="scout", pid=dead)
+        scout_at = now - 970 + i
+        os.utime(scout / "state.json", (scout_at, scout_at))
+    stale = write_state(tmp_path, "stale-work", pid=dead)
+    os.utime(stale / "state.json", (now - 8 * 86400, now - 8 * 86400))
+    running = write_state(tmp_path, "running", pid=live)
+    os.utime(running / "state.json", (now - 8 * 86400, now - 8 * 86400))
+    attention = write_state(tmp_path, "attention", pid=dead)
+    os.utime(attention / "state.json", (now, now))
+    store = Store(tmp_path)
+    store.poll()
+    rows = store.summaries()
+    closed = [task for task in rows if task["column"] == "closed"]
+    assert len(rows) == 52
+    assert len(closed) == 50
+    assert {task["slug"] for task in closed} == (
+        {f"archived-{i:02}" for i in range(10, 30)} | {f"scout-{i:02}" for i in range(30)}
+    )
+    assert {task["slug"] for task in rows if task["column"] != "closed"} == {"running", "attention"}
+    assert store.detail("stale-work")["column"] == "closed"
+    assert store.detail("archived-00")["column"] == "closed"
+
+
+@pytest.mark.parametrize("executor,task_model,cursor_model,expected", [
+    ("codex", "gpt-6.1-sol", "claude-opus-5-5", "gpt-6.1-sol"),
+    ("codex", None, "claude-opus-5-5", None),
+    ("claude", "claude-opus-5-5", "gpt-6.1-sol", "claude-opus-5-5"),
+    ("claude", None, "claude-opus-5-5", "claude-opus-5-5"),
+])
+def test_model_always_belongs_to_executor_including_during_review(tmp_path, pids, executor, task_model, cursor_model, expected):
+    live, _ = pids
+    for kind in ("work", "review"):
+        write_state(tmp_path, kind, kind=kind, pid=live, executor=executor,
+                    task_model=task_model, model=cursor_model, review_model="reviewer-only-model",
+                    reviews=[{"started": 30, "finished": None}])
+    store = Store(tmp_path)
+    store.poll()
+    assert store.detail("work")["model"] == expected
+    assert store.detail("review")["model"] == expected
+    assert store.detail("review")["phase"] == "review"
+
+
+@pytest.mark.parametrize("fields,expected_phase", [
+    ({"outcome": "completed", "check_pid": 123}, "check"),
+    ({"ci": {"outcome": "pending"}}, "ci"),
+    ({"rounds": [{}]}, "fix"),
+])
+def test_phase_observation_timer_preserves_unknown_start_and_resets_on_phase_change(tmp_path, pids, monkeypatch, fields, expected_phase):
+    now = [1000.0]
+    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now[0])
+    live, _ = pids
+    write_state(tmp_path, pid=live, **fields)
+    store = Store(tmp_path)
+    store.poll()
+    assert store.detail("task")["phase"] == expected_phase
+    assert store.detail("task")["phase_started_at"] is None
+    now[0] = 1010.0
+    store.poll()
+    assert store.detail("task")["phase_started_at"] is None
+
+    write_state(tmp_path, pid=live)
+    store.poll()
+    assert store.detail("task")["phase"] == "turn"
+    assert store.detail("task")["phase_started_at"] == 20.0
+    now[0] = 1020.0
+    write_state(tmp_path, pid=live, **fields)
+    store.poll()
+    assert store.detail("task")["phase_started_at"] == 1020.0
+    now[0] = 1030.0
+    store.poll()
+    assert store.detail("task")["phase_started_at"] == 1020.0
+
+    write_state(tmp_path, pid=live)
+    store.poll()
+    now[0] = 1040.0
+    write_state(tmp_path, pid=live, **fields)
+    store.poll()
+    assert store.detail("task")["phase_started_at"] == 1040.0
+    write_state(tmp_path, pid=live, kind="review", reviews=[{"started": 900.0, "finished": None}])
+    store.poll()
+    assert store.detail("task")["phase_started_at"] == 900.0
+
+
+def test_phase_observation_timer_starts_for_task_appearing_after_first_poll(tmp_path, pids, monkeypatch):
+    now = [1000.0]
+    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now[0])
+    live, _ = pids
+    store = Store(tmp_path)
+    store.poll()
+    now[0] = 1010.0
+    write_state(tmp_path, pid=live, ci={"outcome": "pending"})
+    store.poll()
+    assert store.detail("task")["phase"] == "ci"
+    assert store.detail("task")["phase_started_at"] == 1010.0

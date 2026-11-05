@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 
@@ -39,8 +40,9 @@ def test_incremental_tail_ignores_bad_json_and_defers_partial_line(tmp_path, mon
     first = json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "First"}}).encode() + b"\n"
     second = json.dumps({"type": "item.completed", "item": {"type": "reasoning", "text": "Second"}}).encode() + b"\n"
     path.write_bytes(b"x" * (450 * 1024) + b"\n" + first + b"{broken json}\n" + second[:30])
+    os.utime(path, (100, 100))
     tail = EventTail(path)
-    assert tail.read() == {"at": None, "kind": "message", "text": "First"}
+    assert tail.read() == {"at": 100.0, "kind": "message", "text": "First"}
     old_offset = tail.offset
     assert old_offset == path.stat().st_size
     assert tail.read() is None
@@ -56,7 +58,8 @@ def test_incremental_tail_ignores_bad_json_and_defers_partial_line(tmp_path, mon
     monkeypatch.setattr("codex_worker_board.activity.json.loads", capture_loads)
     with path.open("ab") as stream:
         stream.write(second[30:])
-    assert tail.read() == {"at": None, "kind": "thinking", "text": "Second"}
+    os.utime(path, (200, 200))
+    assert tail.read() == {"at": 200.0, "kind": "thinking", "text": "Second"}
     assert parsed == [second.rstrip(b"\n")]
     assert tail.offset - old_offset == len(second) - 30
     assert tail.read() is None
@@ -100,3 +103,30 @@ def test_tail_bounds_initial_read_and_resets_after_replacement_and_truncation(tm
     assert tail.read()["text"] == "Replaced"
     missing = EventTail(tmp_path / "missing.jsonl")
     assert missing.read() is None
+
+
+@pytest.mark.parametrize("executor", ["codex", "claude"])
+def test_message_summary_and_file_timestamp_fallback(tmp_path, executor):
+    path = tmp_path / ("events.jsonl" if executor == "codex" else "claude-events.jsonl")
+    summary = "Finished\n" + "x" * 250
+    message = json.dumps({"status": "done", "summary": summary})
+    if executor == "codex":
+        event = {"type": "item.completed", "item": {"type": "agent_message", "text": message}}
+    else:
+        event = {"type": "assistant", "message": {"content": [{"type": "text", "text": message}]}}
+    line = json.dumps(event) + "\n"
+    path.write_text(line)
+    os.utime(path, (123, 123))
+    tail = EventTail(path)
+    expected_text = ("Finished " + "x" * 250)[:200]
+    assert tail.read() == {"at": 123.0, "kind": "message", "text": expected_text}
+    assert tail.read() is None
+    with path.open("a") as stream:
+        stream.write(line)
+    os.utime(path, (456, 456))
+    assert tail.read() == {"at": 456.0, "kind": "message", "text": expected_text}
+    event["timestamp"] = 0
+    with path.open("a") as stream:
+        stream.write(json.dumps(event) + "\n")
+    os.utime(path, (789, 789))
+    assert tail.read() == {"at": 0.0, "kind": "message", "text": expected_text}

@@ -25,9 +25,10 @@ Until that directory exists, `/` returns a short build instruction. The API is a
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_TASK_HOME` | `~/.codex` | Read live tasks from `claude-tasks/` and the 50 most recent archives from `claude-tasks/.archive/`. |
+| `CODEX_TASK_HOME` | `~/.codex` | Read tasks from `claude-tasks/` and archives from `claude-tasks/.archive/`. Snapshots include at most 50 closed records together, ranked by state mtime. |
 | `BOARD_POLL_SECONDS` | `1.0` | Interval between file mtime and size polls, in seconds. |
 | `BOARD_ACCOUNTS_SECONDS` | `300` | Minimum interval between account subprocess calls, in seconds. |
+| `BOARD_STALE_DAYS` | `7` | Close non-alive tasks older than this many days by state mtime. Non-alive scouts are always closed; alive tasks are exempt from the age rule. |
 | `BOARD_CODEX_TASK` | Repository `plugins/codex-worker/skills/codex-worker/scripts/codex_task.py` | Script called as `python3 -I <script> accounts --json`, without `--refresh`, with a 60-second timeout. |
 
 Account calls run outside the event loop. Errors preserve the previous account data and expose an

@@ -4,8 +4,8 @@ import json
 import math
 import os
 import threading
+import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
 from pathlib import Path
 
 from .activity import EventTail
@@ -52,8 +52,10 @@ def phase(state, is_alive):
     Otherwise running work/scout is turn; completed work between phases is idle.
 
     turn_started, unfinished review.started, the latest sleep rotation.at and
-    turn_finished provide known start times. The plugin persists no check, CI
-    or fix start timestamp, so those phase_started_at values are null.
+    turn_finished provide known start times. For a missing start (including
+    check, CI and fix), Store retains the time it first observes that phase in
+    Record until the phase changes. A phase present on the server's initial
+    poll keeps a null fallback: its start predates observation and is unknown.
     """
     if not is_alive:
         return "idle", number(state.get("turn_finished"))
@@ -118,13 +120,17 @@ class Record:
     summary: dict = field(default_factory=dict)
     tails: dict = field(default_factory=dict)
     activity: dict | None = None
+    observed_phase: str | None = None
+    phase_started_at: float | None = None
 
 
 class Store:
-    def __init__(self, tasks_path):
+    def __init__(self, tasks_path, stale_days=7):
         self.tasks_path = Path(tasks_path)
+        self.stale_days = stale_days
         self.records = {}
         self.lock = threading.RLock()
+        self._initial_poll = True
 
     @staticmethod
     def _file(directory, name):
@@ -154,31 +160,33 @@ class Store:
                 state = self._file(path, "state.json")
                 if state is not None:
                     try:
-                        stamp = path.name.rsplit("-", 1)[-1]
-                        try:
-                            archived_at = datetime.strptime(stamp, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc).timestamp()
-                        except ValueError:
-                            archived_at = state.stat().st_mtime
-                        archived.append((archived_at, path.name, path))
+                        archived.append((state.stat().st_mtime_ns, path.name, path))
                     except OSError:
                         pass
         paths.extend((path, True) for _, _, path in sorted(archived, reverse=True)[:50])
         return paths
 
-    @staticmethod
-    def _summary(slug, record):
+    def _summary(self, slug, record):
         state = record.state
+        now = time.time()
         is_alive = alive(state.get("pid"))
         result = state.get("result") or {}
         status = text(result.get("status"))
         outcome = text(state.get("outcome"))
-        if record.archived:
+        if record.archived or (not is_alive and (
+                state.get("kind") == "scout"
+                or record.updated_at < now - self.stale_days * 86400)):
             column = "closed"
         elif is_alive:
             column = "sleeping" if outcome == "sleeping" else "running"
         else:
             column = "review_me" if status == "done" and outcome not in FAILURES else "attention"
         current_phase, started_at = phase(state, is_alive)
+        if record.observed_phase != current_phase:
+            record.observed_phase = current_phase
+            record.phase_started_at = None if self._initial_poll else now
+        if started_at is None:
+            started_at = record.phase_started_at
         executor = state.get("executor", "codex")
         summary = text(result.get("summary"))
         ci = state.get("ci") or {}
@@ -191,7 +199,7 @@ class Store:
             "executor": executor,
             "account": text(state.get("claude_account") if executor == "claude" else state.get("account")),
             "reviewer": text(state.get("reviewer")),
-            "model": text(state.get("model") or state.get("review_model" if current_phase == "review" else "task_model")),
+            "model": text(state.get("task_model") or (state.get("model") if executor == "claude" else None)),
             "effort": text(state.get("reasoning_effort") or state.get("effort")),
             "column": column,
             "phase": current_phase,
@@ -274,7 +282,7 @@ class Store:
                     tail = record.tails[filename]
                     activity = tail.read()
                     if activity is not None:
-                        latest.append((activity.get("at") or tail.signature[2] / 1_000_000_000, activity))
+                        latest.append((activity["at"], activity))
             if latest:
                 record.activity = max(latest, key=lambda item: item[0])[1]
             summary = self._summary(slug, record)
@@ -285,11 +293,15 @@ class Store:
                 if summary["activity"] is not None and summary["activity"] != old_activity:
                     messages.append({"type": "activity", "slug": slug, "activity": summary["activity"]})
             self.records[slug] = record
+        self._initial_poll = False
         return messages
 
     def summaries(self):
         with self.lock:
-            return [record.summary.copy() for _, record in sorted(self.records.items())]
+            rows = [record.summary.copy() for _, record in sorted(self.records.items())]
+            closed = sorted((row for row in rows if row["column"] == "closed"),
+                            key=lambda row: (row["updated_at"], row["slug"]), reverse=True)[:50]
+            return [row for row in rows if row["column"] != "closed"] + closed
 
     def detail(self, slug):
         with self.lock:

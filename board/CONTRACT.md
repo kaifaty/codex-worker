@@ -71,7 +71,7 @@ interface Accounts {
 
 interface Snapshot {
   generated_at: number;
-  tasks: TaskSummary[];       // all live tasks, plus the 50 most recent archived ones as column "closed"
+  tasks: TaskSummary[];       // all non-closed tasks, plus at most 50 closed records with the newest updated_at
   accounts: Accounts;
 }
 ```
@@ -83,7 +83,10 @@ interface Snapshot {
 - `review_me`: not `alive`, `result_status == "done"` and the outcome is not a failure — waiting for the lead.
 - `attention`: not `alive` and anything else (`needs_decision`, `blocked`, `partial`, `failed`, `stopped`,
   `budget_exhausted`, `conflict`, a supervisor that died with `outcome == "running"` or `"sleeping"`).
-- `closed`: archived records.
+- `closed`: archived records, non-alive scouts regardless of outcome, and non-alive tasks whose `updated_at`
+  is older than `BOARD_STALE_DAYS` (default 7 days). Age never closes an alive task. `Snapshot.tasks` includes
+  at most 50 closed records across archive and live task folders together, ranked by newest `updated_at`.
+  Closed classification takes precedence over the other columns.
 
 ## REST
 

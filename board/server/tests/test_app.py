@@ -54,6 +54,17 @@ def receive_until(socket, wanted):
     pytest.fail(f"No {wanted} message received")
 
 
+def test_stale_days_environment_reaches_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_TASK_HOME", str(tmp_path))
+    monkeypatch.setenv("BOARD_CODEX_TASK", str(tmp_path / "fake_accounts.py"))
+    monkeypatch.delenv("BOARD_STALE_DAYS", raising=False)
+    assert Settings.from_env().stale_days == 7
+    monkeypatch.setenv("BOARD_STALE_DAYS", "2.5")
+    settings = Settings.from_env()
+    assert settings.stale_days == 2.5
+    assert create_app(settings).state.board.store.stale_days == 2.5
+
+
 def test_rest_contract_files_and_unknown_paths(board):
     client, _, directory, _, _ = board
     snapshot = client.get("/api/snapshot").json()
@@ -122,10 +133,11 @@ def test_websocket_snapshot_then_task_activity_and_archive(board):
         changed = receive_until(socket, "task")
         assert changed["task"]["turn"] == 2
         event = {"type": "item.started", "item": {"type": "command_execution", "command": "git status"}}
-        (directory / "events.jsonl").write_text(json.dumps(event) + "\n")
+        events = directory / "events.jsonl"
+        events.write_text(json.dumps(event) + "\n")
         activity = receive_until(socket, "activity")
         assert activity == {"type": "activity", "slug": "demo",
-                            "activity": {"at": None, "kind": "command", "text": "git status"}}
+                            "activity": {"at": events.stat().st_mtime, "kind": "command", "text": "git status"}}
         snapshot = client.get("/api/snapshot").json()
         assert snapshot["tasks"][0]["activity"] == activity["activity"]
         archived = directory.parent / ".archive" / "demo-20261105"

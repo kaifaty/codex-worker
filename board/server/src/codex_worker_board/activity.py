@@ -77,6 +77,13 @@ def _activity(event):
                 kind, text = "thinking", block.get("thinking", "")
     if kind is None:
         return None
+    if kind == "message" and isinstance(text, str):
+        try:
+            result = json.loads(text)
+        except ValueError:
+            result = None
+        if isinstance(result, dict) and isinstance(result.get("summary"), str):
+            text = result["summary"]
     return {"at": at, "kind": kind, "text": _line(text if isinstance(text, str) else "")}
 
 
@@ -134,5 +141,7 @@ class EventTail:
                 continue
             activity = _activity(event)
             if activity is not None:
+                if activity["at"] is None:
+                    activity["at"] = metadata.st_mtime
                 latest = activity
         return latest

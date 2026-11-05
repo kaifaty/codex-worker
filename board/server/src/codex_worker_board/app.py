@@ -29,6 +29,7 @@ class Settings:
     poll_seconds: float = 1.0
     accounts_seconds: float = 300
     web_dist: Path = REPOSITORY / "board/web/dist"
+    stale_days: float = 7
 
     @classmethod
     def from_env(cls):
@@ -40,6 +41,7 @@ class Settings:
             )).expanduser(),
             poll_seconds=float(os.environ.get("BOARD_POLL_SECONDS", "1.0")),
             accounts_seconds=float(os.environ.get("BOARD_ACCOUNTS_SECONDS", "300")),
+            stale_days=float(os.environ.get("BOARD_STALE_DAYS", "7")),
         )
 
 
@@ -77,7 +79,7 @@ class LocalOnly:
 class Board:
     def __init__(self, settings):
         self.settings = settings
-        self.store = Store(settings.task_home / "claude-tasks")
+        self.store = Store(settings.task_home / "claude-tasks", stale_days=settings.stale_days)
         self.accounts = Accounts(settings.codex_task, settings.accounts_seconds)
         self.lock = asyncio.Lock()
         self.clients = set()
