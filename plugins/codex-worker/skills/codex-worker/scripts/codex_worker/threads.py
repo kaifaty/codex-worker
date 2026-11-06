@@ -4,8 +4,9 @@ import os
 from pathlib import Path
 import re
 import shlex
+import sys
 
-from . import accounts, clock, config, procs, result_schema, sandboxing
+from . import accounts, clock, config, executors, procs, result_schema, sandboxing
 
 try:
     import tomllib
@@ -135,9 +136,15 @@ def thread_messages(st):
 
 
 def last_message(st):
-    if st.get("executor") == "claude":
-        last = config.TASKS / st["slug"] / "last.md"
-        return last.read_text(encoding="utf-8").strip() if last.exists() else ""
+    return executors.from_state(st).call("last_message", st)
+
+
+def claude_last_message(st):
+    last = config.TASKS / st["slug"] / "last.md"
+    return last.read_text(encoding="utf-8").strip() if last.exists() else ""
+
+
+def codex_last_message(st):
     msgs = thread_messages(st)
     return msgs[-1] if msgs else ""
 
@@ -152,7 +159,7 @@ def followup_prompt(st, message, cfg, source="claude"):
     with (config.TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"at": clock.CLOCK.time(), "text": message, "source": source},
                                 ensure_ascii=False) + "\n")
-    if st.get("thread") or st.get("session_id"):
+    if st.get("thread") or executors.from_state(st).cursor(st):
         switch = st.get("base_switch")
         if switch:
             message += (f"\n\nТеперь база задачи — {st['base']}; используй её вместо {switch['from']}."
@@ -255,9 +262,8 @@ def handoff(st, current_message=False, cfg=None):
     scouting = st.get("kind") == "scout"
     d = config.TASKS / st["slug"]
     prompt = (d / "brief.md").read_text().rstrip() + ("\n\n## Продолжение\n\n" if ru else "\n\n## Continuation\n\n")
-    claude = st.get("executor") == "claude" and st.get("kind") not in ("review", "scout")
-    has_threads = bool(st.get("threads") or st.get("thread")
-                       or claude and (st.get("session_id") or claude_messages(st)))
+    executor = executors.for_turn(st)
+    has_threads = executor.has_history(st)
     if has_threads and scouting:
         prompt += (("Предыдущий разведчик остановился из-за лимита подписки. "
                     "Продолжи изучение вопроса с учётом его сообщений ниже.\n\n") if ru else
@@ -293,7 +299,7 @@ def handoff(st, current_message=False, cfg=None):
         label = (("Последние сообщения предыдущего разведчика" if ru else "Latest messages from the previous scout")
                  if scouting else ("Последние сообщения предыдущего исполнителя" if ru else "Latest messages from the previous worker"))
         messages = []
-        for message in (claude_messages(st) if claude else thread_messages(st))[-3:]:
+        for message in executor.call("messages", st)[-3:]:
             result = None if scouting else result_schema.parse_result(message)
             if result is not None:
                 message = result["summary"]
@@ -312,3 +318,15 @@ def handoff(st, current_message=False, cfg=None):
         prompt += (f"\nТеперь база задачи — {st['base']}; используй её вместо {switch['from']}.\n" if ru else
                    f"\nTask base is now {st['base']}; use it instead of {switch['from']}.\n")
     return prompt
+
+
+def codex_pr_messages(st):
+    return [(event.get("item") or {}).get("text", "") for event in events(st)
+            if event.get("type") == "item.completed"
+            and (event.get("item") or {}).get("type") == "agent_message"]
+
+
+executors.get("codex").bind(sys.modules[__name__], last_message="codex_last_message",
+                            messages="thread_messages", pr_messages="codex_pr_messages")
+executors.get("claude").bind(sys.modules[__name__], last_message="claude_last_message",
+                             messages="claude_messages", pr_messages="claude_messages")

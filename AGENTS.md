@@ -10,6 +10,8 @@ codex-worker is a Claude Code plugin. The skill lives in `plugins/codex-worker/s
 - Tests patch a function on the module that owns it, for example `worker.task_state.save`.
 - Every CLI option must be documented in `SKILL.md` or `references/*.md`; `tests/test_options.py` checks this.
 
+- Connect new work executors through `executors.py`.
+
 ## Checks
 
 - The full suite is `python3 -I tests/test_rotation.py`, about 90 s with its default parallelism. Run it at most twice per task.

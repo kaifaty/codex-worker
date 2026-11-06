@@ -40,7 +40,7 @@ import math
 import re
 import sys
 
-from . import commands, config, prompts, supervisor, telemetry_log, wait_view
+from . import commands, config, executors, prompts, supervisor, telemetry_log, wait_view
 
 
 HELP_TEXT = __doc__
@@ -136,7 +136,7 @@ OPTION_REGISTRY = (
      "argparse": {"action": "store_true", "help": "keep commits local; disable branch and PR publication and CI"},
      "synopsis": "[--no-push]", "commands": {"start": {}}},
     {"names": ("--executor",),
-     "argparse": {"choices": ("codex", "claude"), "default": None,
+     "argparse": {"choices": executors.names(), "default": None,
                   "help": "work provider saved for the task (default: executor setting, codex)"},
      "synopsis": "[--executor codex|claude]", "commands": {"start": {}}},
     {"names": ("--file",), "argparse": {},

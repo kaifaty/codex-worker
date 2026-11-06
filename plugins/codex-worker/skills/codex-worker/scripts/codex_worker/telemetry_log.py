@@ -6,7 +6,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import budgets, clock, config, notifications, task_state, threads
+from . import budgets, clock, config, executors, notifications, task_state, threads
 
 
 TELEMETRY_PHASES = []
@@ -141,8 +141,7 @@ def record_turn_result(st, stopped):
                "capacity_retries": st.get("capacity_retries", 0) - st.get("capacity_start", 0),
                "max_task_weekly_percent": st.get("max_task_weekly_percent"),
                "budget_stop": budgets.budget_stop(st), "turn_stops": st.get("turn_stops", [])}
-        if st.get("executor") == "claude" and st.get("kind", "work") == "work":
-            row.update(provider="claude", session_id=st.get("session_id"))
+        row.update(executors.from_state(st).turn_fields(st))
         write_telemetry(st, row, stopped)
     except Exception as exc:
         telemetry_error(st, exc)
@@ -193,8 +192,7 @@ class PhaseTelemetry:
         self.cost_usd = None
         self.model = None
         self.reasoning_effort = None
-        self.provider = ("claude" if st.get("executor") == "claude" and self.kind == "work"
-                         and phase in ("work", "fix", "wrapup") else None)
+        self.provider = executors.from_state(st).telemetry_provider(st, phase)
 
     def add_usage(self, account, thread, before, path, offset, weekly_spent=0,
                   model=None, reasoning_effort=None):
@@ -295,10 +293,8 @@ class PhaseTelemetry:
                     row["severe_findings"] = new_severe_findings(st.get("review_result"), result)
                 if self.reviewer == "claude":
                     row.update(thread=None, weekly_spent=0, cost_usd=self.cost_usd)
-            if self.provider == "claude":
-                row.update(provider="claude", account=last.get("account", st.get("claude_account")),
-                           thread=None, session_id=last.get("session_id", st.get("session_id")),
-                           cost_usd=self.cost_usd)
+            if self.provider is not None:
+                row.update(executors.from_state(st).phase_fields(st, last, self.cost_usd))
             write_telemetry(st, row, self.stopped)
         except Exception as exc:
             telemetry_error(self.st, exc)

@@ -1,7 +1,8 @@
 """Work turns, wrap-up turns and turn execution."""
 import json
+import sys
 
-from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_runner, clock, config, duty, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
+from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_runner, clock, config, duty, executors, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
 
 
 LIMIT_REASONS = ("usage limit", "authentication failed", "token unavailable")
@@ -100,7 +101,7 @@ def claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=False, de
     return outcome, reason
 
 
-def run_claude_turn(st, cfg, prompt, effort, current_message, stopped, sleep):
+def run_claude_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Prefer the task's account and session; otherwise rotate with a handoff or sleep until a reset."""
     minutes = st.get("max_turn_minutes", cfg.get("max_turn_minutes"))
     deadline = None if minutes is None else clock.CLOCK.monotonic() + minutes * config.MINUTE_SECONDS
@@ -183,27 +184,16 @@ def _wrapup_turn(st, cfg, account, effort, stopped, reason, review_entry=None):
     st["wrapup"] = {"outcome": "not_run", "result": None}
     task_state.save(st)
     notifications.notify(st, cfg, reason["outcome"], turn_monitor.turn_stop_message(reason), account=account["name"], **reason)
-    claude_work = st.get("executor") == "claude" and st.get("kind") not in ("review", "scout")
+    executor = executors.for_turn(st)
     thread = ((review_entry or {}).get("thread") if st.get("kind") == "review"
-              else st.get("session_id") if claude_work
-              else st.get("thread"))
+              else executor.cursor(st))
     if not thread or stopped():
         return
     if st.get("kind") not in ("review", "scout"):
         st["result"] = None
     try:
-        if claude_work:
-            result, _ = claude_work_turn(st, cfg, prompts.wrapup_prompt(st, reason, cfg), effort,
-                                         stopped, account, wrapup=True)
-        else:
-            control = turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3))
-            result, _ = turn_monitor.monitor(st, cfg, account, prompts.wrapup_prompt(st, reason, cfg), effort, stopped,
-                                lambda *args: None, control=control,
-                                wrapup=True, wrapup_thread=thread)
-        st["wrapup"]["outcome"] = result
-        if not claude_work and result in ("stuck", "budget_exhausted"):
-            st["turn_stops"].append(dict(control.reason, turn=st.get("turns", 0), phase="wrapup",
-                                         active_seconds=round(control.elapsed, 3), at=clock.CLOCK.time()))
+        st["wrapup"]["outcome"] = executor.call(
+            "wrapup", st, cfg, account, prompts.wrapup_prompt(st, reason, cfg), effort, stopped, thread)
     except (Exception, SystemExit) as exc:
         st["wrapup"].update(outcome="failed", error=str(exc))
     if st["wrapup"]["outcome"] != "completed":
@@ -225,14 +215,13 @@ def run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=
     kind = st.get("kind", "work")
     phase = "fix" if kind == "work" and st.get("rounds") else kind
     with telemetry_log.record_phase(st, phase, stopped):
-        return _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn)
+        st.pop("refusal", None)
+        return executors.for_turn(st).call("turn", st, cfg, prompt, effort, current_message,
+                                           stopped, sleep, new_turn=new_turn)
 
 
 def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True):
     """Run one work/scout/review phase, sharing quota, rotation and reset handling."""
-    st.pop("refusal", None)
-    if st.get("executor") == "claude" and st.get("kind") not in ("review", "scout"):
-        return run_claude_turn(st, cfg, prompt, effort, current_message, stopped, sleep)
     reviewing = st.get("kind") == "review"
     minutes = (cfg.get("max_review_minutes", 30) if st.get("kind") in ("review", "scout")
                else st.get("max_turn_minutes", cfg.get("max_turn_minutes")))
@@ -516,3 +505,24 @@ def work_turn(st, cfg, prompt, effort, current_message, stopped, sleep, work_pat
     publishing.publish_pr(st, stopped)
     if work_paths is not None:
         st["check_paths"] = sorted(set(work_paths) | set(checking.check_paths(st)))
+
+
+def codex_wrapup_turn(st, cfg, account, prompt, effort, stopped, thread):
+    control = turn_monitor.TurnControl(10, cfg.get("repeat_limit", 3))
+    result, _ = turn_monitor.monitor(st, cfg, account, prompt, effort, stopped,
+                                     lambda *args: None, control=control,
+                                     wrapup=True, wrapup_thread=thread)
+    st["wrapup"]["outcome"] = result
+    if result in ("stuck", "budget_exhausted"):
+        st["turn_stops"].append(dict(control.reason, turn=st.get("turns", 0), phase="wrapup",
+                                     active_seconds=round(control.elapsed, 3), at=clock.CLOCK.time()))
+    return result
+
+
+def claude_wrapup_turn(st, cfg, account, prompt, effort, stopped, thread):
+    result, _ = claude_work_turn(st, cfg, prompt, effort, stopped, account, wrapup=True)
+    return result
+
+
+executors.get("codex").bind(sys.modules[__name__], turn="_run_turn", wrapup="codex_wrapup_turn")
+executors.get("claude").bind(sys.modules[__name__], turn="run_claude_turn", wrapup="claude_wrapup_turn")

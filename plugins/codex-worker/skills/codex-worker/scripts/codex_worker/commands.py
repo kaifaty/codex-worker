@@ -13,7 +13,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import accounts, budgets, claude_accounts, claude_review, claude_runner, clock, config, credit_resets, duty, procs, prompts, result_schema, sandboxing, supervisor, task_state, telemetry_log, threads
+from . import accounts, budgets, claude_accounts, claude_review, claude_runner, clock, config, credit_resets, duty, executors, procs, prompts, result_schema, sandboxing, supervisor, task_state, telemetry_log, threads
 
 
 def main_repo(path):
@@ -30,17 +30,17 @@ def cmd_start(a):
     no_push = getattr(a, "no_push", False)
     if no_push and (a.ci or a.ci_command is not None):
         procs.die("--no-push cannot be combined with --ci or --ci-command; CI requires a published branch")
-    executor = getattr(a, "executor", None) or cfg["executor"]
-    reviewer = getattr(a, "reviewer", None) or ("codex" if executor == "claude" else cfg["reviewer"])
+    executor = (executors.get(a.executor) if getattr(a, "executor", None)
+                else executors.from_state(cfg))
+    reviewer = getattr(a, "reviewer", None) or executor.reviewer(cfg)
     sandbox = a.sandbox if a.sandbox is not None else cfg["sandbox"]
-    if executor == "claude" and sandbox != "off":
-        procs.die("--executor claude supports only --sandbox off; --sandbox workspace is not supported")
-    if executor == "claude":
-        try:
-            claude_runner.validate_work_effort(a.effort or cfg["claude"].get("effort"))
-        except ValueError as exc:
-            procs.die(str(exc))
-    if executor == "claude" or reviewer == "claude":
+    if not executor.supports_sandbox and sandbox != "off":
+        procs.die(f"--executor {executor.name} supports only --sandbox off; --sandbox workspace is not supported")
+    try:
+        executor.prepare(a.effort, cfg)
+    except ValueError as exc:
+        procs.die(str(exc))
+    if reviewer == "claude":
         config.require_claude()
     if (config.TASKS / a.slug).exists():
         procs.die(f"task {a.slug!r} exists; pick another slug or clean it")
@@ -80,7 +80,7 @@ def cmd_start(a):
             'report that with the numbers instead of fixing it.')
     (d / "brief.md").write_text(prompt)
     st = {"slug": a.slug, "repo": str(repo), "worktree": str(wt), "branch": branch, "base": a.base,
-          "executor": executor, "effort": a.effort, "task_type": a.task_type,
+          "executor": executor.name, "effort": a.effort, "task_type": a.task_type,
           "task_model": None if getattr(a, "model", None) == "default" else getattr(a, "model", None),
           "review_model": None if getattr(a, "review_model", None) == "default" else getattr(a, "review_model", None),
           "account": cfg["accounts"][0]["name"], "thread": "", "threads": [],
@@ -100,12 +100,12 @@ def cmd_start(a):
     proc = supervisor.spawn(st, prompt, a.effort, review_after=a.review, fix_rounds=a.fix_rounds or 0)
     for _ in range(300):
         st = task_state.load(a.slug)
-        if st["thread"] or st.get("session_id") or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
+        if st["thread"] or executor.cursor(st) or st.get("outcome") == "sleeping" or st.get("pid") is None or proc.poll() is not None:
             break
         time.sleep(0.1)
-    account = st.get("claude_account") if executor == "claude" else st["account"]
-    cursor = ("session " + (st.get("session_id") or "?")) if executor == "claude" else "thread " + (st["thread"] or "?")
-    print(f"started {a.slug}: executor {executor}, account {account or '?'}, {cursor}, pid {st.get('pid')}\n  worktree {wt}\n  branch {branch}")
+    account = executor.account(st)
+    cursor = executor.cursor_label + " " + (executor.cursor(st) or "?")
+    print(f"started {a.slug}: executor {executor.name}, account {account or '?'}, {cursor}, pid {st.get('pid')}\n  worktree {wt}\n  branch {branch}")
     print(f"  wait: {config.SCRIPT} wait {a.slug}   (run it as a background command)")
 
 
@@ -167,12 +167,10 @@ def cmd_say(a):
     if not msg or not msg.strip():
         procs.die("empty message")
     cfg = config.accounts_config()
-    if st.get("executor") == "claude":
-        try:
-            claude_runner.validate_work_effort(a.effort or st.get("effort") or cfg["claude"].get("effort"))
-        except ValueError as exc:
-            procs.die(str(exc))
-        config.require_claude()
+    try:
+        executors.from_state(st).prepare(a.effort or st.get("effort"), cfg)
+    except ValueError as exc:
+        procs.die(str(exc))
     budgets.set_weekly_budget(st, getattr(a, "max_weekly", None), cfg)
     if getattr(a, "model", None) is not None:
         st["task_model"] = None if a.model == "default" else a.model
@@ -240,10 +238,8 @@ def describe(st, detail):
         state = "running" if supervisor_alive else "idle"
     reviewing = st.get("kind") == "review"
     scouting = st.get("kind") == "scout"
-    account, thread = st["account"], st.get("thread", "")
-    executor = st.get("executor", "codex")
-    if executor == "claude":
-        account, thread = st.get("claude_account") or "?", st.get("session_id") or ""
+    executor = executors.from_state(st)
+    account, thread = executor.status_account(st), executor.cursor(st)
     if reviewing:
         account, thread = st.get("review_account") or "?", ""
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
@@ -252,18 +248,17 @@ def describe(st, detail):
     location = st["worktree"] if scouting else st["branch"]
     label = "  scout" if scouting else ("  review" if reviewing else "")
     line = (f"{st['slug']:24} {state:8} turns {st.get('turns', 0)}  {location}  "
-            f"executor {executor}  account {account}  {'session' if executor == 'claude' and not reviewing else 'thread'} {thread[:13]}" + label
+            f"executor {executor.name}  account {account}  {'thread' if reviewing else executor.cursor_label} {thread[:13]}" + label
             + "  sandbox " + ("read-only" if scouting else st.get("sandbox", "off")))
     if st.get("no_push"):
         line += "  push disabled (--no-push)"
-    if executor == "claude" and reviewing:
-        line += f"\nClaude work account {st.get('claude_account') or '?'}, session {st.get('session_id') or '?'}"
+    if reviewing:
+        line += executor.review_status(st)
     if st.get("task_model"):
         line += f"\nmodel {st['task_model']}  effort {st.get('reasoning_effort') or st.get('effort') or 'default'}"
     if st.get("weekly_budget_warning"):
         line += "\n" + st["weekly_budget_warning"]
-    if executor == "claude" and st.get("error"):
-        line += "\n" + st["error"]
+    line += executor.status_error(st)
     switch = st.get("base_switch")
     if switch:
         line += f"\nbase {switch['from']} is gone; checked against {switch['to']}"
@@ -275,7 +270,7 @@ def describe(st, detail):
     commits = procs.sh(config.GIT + ["log", "--oneline", f"{st['base']}..HEAD"], cwd=st["worktree"], check=False)
     review = config.TASKS / st["slug"] / "review.md"
     message = (review.read_text().strip() if reviewing and review.exists() else
-               "\n\n".join(threads.claude_messages(st)) if executor == "claude" else threads.last_message(st))
+               executor.status_message(st))
     return "\n".join([line, f"worktree {st['worktree']}", *result_schema.result_lines(st.get("result")),
                       f"PR: {pr or 'none'}", "commits:\n" + (commits or "(none)"),
                       "last message:\n" + (message or "(none)")])
@@ -292,36 +287,7 @@ def cmd_status(a):
 def cmd_stats(a):
     st = task_state.load(a.slug)
     cfg = config.accounts_config()
-    if st.get("executor") == "claude":
-        rows = telemetry_log.claude_work_rows(st)
-        token_fields = ("input", "output", "cached_input")
-
-        def total(values):
-            known = [value for value in values if value is not None]
-            return sum(known) if known else None
-
-        def number(value, spec):
-            return format(value, spec) if value is not None else "-"
-
-        totals = {key: total(row.get(key) for row in rows)
-                  for key in ("active_seconds", "cost_usd", "weekly_spent")}
-        totals["tokens"] = {key: total((row.get("tokens") or {}).get(key) for row in rows)
-                            for key in token_fields}
-        print("== Claude work", flush=True)
-        print(f"{'start (UTC)':20} {'min':>6} {'account':16} {'session':13} {'model':24} {'effort':7} "
-              f"{'input':>10} {'output':>10} {'cached':>10} {'cost $':>10} {'weekly %':>8}")
-        for row in rows + [totals]:
-            start = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["started"]))
-                     if row.get("started") is not None else "total:")
-            seconds = row.get("active_seconds")
-            minutes = number(seconds / 60 if seconds is not None else None, ".1f")
-            tokens = [number((row.get("tokens") or {}).get(key), ".0f") for key in token_fields]
-            print(f"{start:20} {minutes:>6} {row.get('account') or '-':16} "
-                  f"{(row.get('session_id') or '-')[:13]:13} {row.get('model') or '-':24} "
-                  f"{row.get('reasoning_effort') or '-':7} "
-                  f"{tokens[0]:>10} {tokens[1]:>10} {tokens[2]:>10} "
-                  f"{number(row.get('cost_usd'), '.4f'):>10} {number(row.get('weekly_spent'), '.2f'):>8}",
-                  flush=True)
+    executors.from_state(st).stats(st)
     for entry in st["threads"] + st["reviews"]:
         if entry.get("reviewer") == "claude":
             continue
@@ -332,6 +298,46 @@ def cmd_stats(a):
             subprocess.run([sys.executable, "-I", str(config.STATS), str(path)], check=True)
         else:
             print("(rollout not found)")
+
+
+def prepare_claude_work(effort, cfg):
+    claude_runner.validate_work_effort(effort or cfg["claude"].get("effort"))
+    config.require_claude()
+
+
+def print_claude_work_stats(st):
+    rows = telemetry_log.claude_work_rows(st)
+    token_fields = ("input", "output", "cached_input")
+
+    def total(values):
+        known = [value for value in values if value is not None]
+        return sum(known) if known else None
+
+    def number(value, spec):
+        return format(value, spec) if value is not None else "-"
+
+    totals = {key: total(row.get(key) for row in rows)
+              for key in ("active_seconds", "cost_usd", "weekly_spent")}
+    totals["tokens"] = {key: total((row.get("tokens") or {}).get(key) for row in rows)
+                        for key in token_fields}
+    print("== Claude work", flush=True)
+    print(f"{'start (UTC)':20} {'min':>6} {'account':16} {'session':13} {'model':24} {'effort':7} "
+          f"{'input':>10} {'output':>10} {'cached':>10} {'cost $':>10} {'weekly %':>8}")
+    for row in rows + [totals]:
+        start = (time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(row["started"]))
+                 if row.get("started") is not None else "total:")
+        seconds = row.get("active_seconds")
+        minutes = number(seconds / 60 if seconds is not None else None, ".1f")
+        tokens = [number((row.get("tokens") or {}).get(key), ".0f") for key in token_fields]
+        print(f"{start:20} {minutes:>6} {row.get('account') or '-':16} "
+              f"{(row.get('session_id') or '-')[:13]:13} {row.get('model') or '-':24} "
+              f"{row.get('reasoning_effort') or '-':7} "
+              f"{tokens[0]:>10} {tokens[1]:>10} {tokens[2]:>10} "
+              f"{number(row.get('cost_usd'), '.4f'):>10} {number(row.get('weekly_spent'), '.2f'):>8}",
+              flush=True)
+
+
+executors.get("claude").bind(sys.modules[__name__], prepare="prepare_claude_work", stats="print_claude_work_stats")
 
 
 def cmd_report(a):

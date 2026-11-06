@@ -5,7 +5,7 @@ import re
 import subprocess
 from pathlib import Path
 
-from . import budgets, checking, claude_accounts, claude_review, clock, config, notifications, procs, prompts, task_state, telemetry_log, threads, turns
+from . import budgets, checking, claude_accounts, claude_review, clock, config, executors, notifications, procs, prompts, task_state, telemetry_log, threads, turns
 
 
 def selected_review_angles(st, cfg):
@@ -128,8 +128,9 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
 def review_turn(st, cfg, prompt, effort, stopped, sleep, new_turn=False, angles=None):
     st["review_account"] = None
     records = []
-    codex_effort = None if st.get("executor") == "claude" and effort == "max" else effort
-    used_accounts = {st["claude_account"]} if st.get("executor") == "claude" and st.get("claude_account") else set()
+    executor = executors.from_state(st)
+    codex_effort = executor.review_effort(effort)
+    used_accounts = executor.review_accounts(st)
     result = None
     st.update(kind="review", outcome="running", reset_wait_seconds=0)
     st.pop("review_result", None)

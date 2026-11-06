@@ -1,6 +1,7 @@
 """Worker modules by import layer; existing modules are marked implemented.
 
 Layer 0:
+    executors (implemented): work-executor contract, registry and state-only policies.
     clock (implemented): real and simulated clocks.
     procs (implemented): process execution, signals, and termination.
     result_schema (implemented): result schemas, parsing, and output lines.
