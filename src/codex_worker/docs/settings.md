@@ -180,8 +180,9 @@ Worktrees never move: git worktree metadata and task state hold absolute paths t
 left in place: `.bak-*` files, `~/.codex/checks`, `~/.codex/briefs`, `~/.codex-accounts`, every Codex
 file, and the lock files `codex-worker.lock` and `duty.lock`.
 
-Commands that write task records (`start`, `scout`, `say`, `review`, `clean`, `verdict`,
-`reset-credit`) hold the settings lock shared for their whole run; `login` and the `claude-*` account
+Commands that write task records, journals or cached limits (`start`, `scout`, `say`, `review`,
+`clean`, `verdict`, `accounts`, `reset-credit`, `claude-probe`) hold the settings lock shared for their
+whole run; `login` and the `claude-*` account
 commands hold it exclusively. `migrate-home --apply` holds the legacy settings lock and `duty.lock`
 exclusively from its final checks until the marker is written. The legacy lock files are never moved,
 so a command that starts meanwhile waits for the same lock. Once granted, a command resolves its data

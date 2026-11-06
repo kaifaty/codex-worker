@@ -289,9 +289,10 @@ COMMAND_HANDLERS = {
     "migrate-home": home_migration.cmd_migrate_home,
     "_run": supervisor.cmd__run,
 }
-# Commands that write task records hold the settings lock shared, so
-# migrate-home cannot move the data home under them.
-HOME_LOCKED_COMMANDS = ("start", "scout", "say", "review", "clean", "verdict", "reset-credit")
+# Commands that write task records, journals or cached limits hold the settings
+# lock shared, so migrate-home cannot move the data home under them.
+HOME_LOCKED_COMMANDS = ("start", "scout", "say", "review", "clean", "verdict", "accounts", "reset-credit",
+                        "claude-probe")
 
 
 def main():
