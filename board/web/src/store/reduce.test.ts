@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { Accounts, Snapshot, TaskSummary } from "../types";
+import type { Accounts, Machines, Snapshot, TaskSummary } from "../types";
 import { emptyState, reduce, type BoardState } from "./reduce";
 
 const task = (slug: string, extra: Partial<TaskSummary> = {}): TaskSummary => ({
@@ -65,6 +65,18 @@ describe("reduce", () => {
     const fresh: Accounts = { fetched_at: 300, error: "timeout", data: null };
     const next = reduce(loaded(), { type: "accounts", accounts: fresh }, 1);
     expect(next.accounts).toBe(fresh);
+  });
+
+  it("machines come from the snapshot, are null without the field and are replaced by a message", () => {
+    expect(loaded().machines).toBeNull();
+    const first: Machines = { config_error: null, items: [] };
+    const withMachines = reduce(emptyState, { type: "snapshot", snapshot: { ...snapshot([]), machines: first } }, 1);
+    expect(withMachines.machines).toBe(first);
+    const next: Machines = { config_error: "bad toml", items: [] };
+    const after = reduce(withMachines, { type: "machines", machines: next }, 2);
+    expect(after.machines).toBe(next);
+    expect(after.tasks).toBe(withMachines.tasks);
+    expect(reduce(after, { type: "snapshot", snapshot: snapshot([]) }, 3).machines).toBeNull();
   });
 
   it("ping records the server time and keeps the tasks", () => {

@@ -20,7 +20,7 @@ const STEP_MS = 1000;
 
 const TIME_KEYS = new Set([
   "generated_at", "phase_started_at", "sleeping_until", "created", "updated_at", "at", "fetched_at",
-  "resets_at", "limited_until", "expires_at", "since", "checked_at",
+  "resets_at", "limited_until", "expires_at", "since", "checked_at", "sampled_at",
 ]);
 
 function shiftValue(value: unknown, delta: number): unknown {

@@ -53,10 +53,64 @@ export interface Accounts {
   data: unknown | null; // `accounts --json` output, passed through unchanged
 }
 
+export interface Gpu {
+  name: string;
+  utilization_percent: number | null;
+  memory_used_bytes: number | null; // null on Apple: the memory is shared, there is no video memory line
+  memory_total_bytes: number | null;
+  processes: { name: string; memory_bytes: number }[];
+}
+
+export interface Metrics {
+  os: string;
+  cpu: { cores: number; load1: number; load5: number } | null;
+  memory: { total_bytes: number; available_bytes: number } | null;
+  gpus: Gpu[];
+  disks: { mount: string; total_bytes: number; free_bytes: number }[];
+}
+
+export type MachineStatus = "free" | "busy" | "overloaded" | "offline" | "unknown";
+export type MachineError = "timeout" | "unreachable" | "bad_output" | "probe_failed";
+
+/** The hypervisor or host a machine runs on; shown for context, never part of the status. */
+export interface HostView {
+  name: string;
+  cpu: Metrics["cpu"];
+  memory: Metrics["memory"];
+  error: MachineError | null;
+}
+
+export interface HistoryPoint {
+  at: number;
+  load_percent: number | null;
+  memory_percent: number | null;
+  gpu_percent: number | null;
+}
+
+export interface Machine {
+  id: string;
+  name: string;
+  role: string | null;
+  status: MachineStatus;
+  reasons: string[]; // "cpu", "memory", "gpu", "gpu_memory", "disk:<mount>"
+  checked_at: number | null; // last attempt
+  sampled_at: number | null; // last success; the metrics stay after a failure
+  error: MachineError | null;
+  metrics: Metrics | null;
+  host: HostView | null;
+  history: HistoryPoint[]; // up to 120 points, one per 30 s
+}
+
+export interface Machines {
+  config_error: string | null;
+  items: Machine[];
+}
+
 export interface Snapshot {
   generated_at: number;
   tasks: TaskSummary[]; // all non-closed tasks, plus at most 50 closed records with the newest updated_at
   accounts: Accounts;
+  machines?: Machines; // missing from an older server
 }
 
 // WebSocket /ws, server → client only.
@@ -66,4 +120,5 @@ export type ServerMessage =
   | { type: "task_removed"; slug: string }
   | { type: "activity"; slug: string; activity: Activity }
   | { type: "accounts"; accounts: Accounts }
+  | { type: "machines"; machines: Machines }
   | { type: "ping"; at: number };
