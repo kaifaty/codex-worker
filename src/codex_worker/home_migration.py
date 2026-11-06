@@ -153,7 +153,7 @@ def cmd_migrate_home(a):
     if not reasons:
         record, stage = current_plan(codex, target, staging)
         print("\n".join(plan_lines(record)))
-        if stage != "new":
+        if stage != "new" or staging.exists():
             print("an earlier migrate-home stopped part way; --apply finishes it")
     if reasons:
         procs.die("migrate-home: " + "; ".join(reasons))

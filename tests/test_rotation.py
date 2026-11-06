@@ -16,6 +16,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import rotation_workspace
+import rotation_data_home
 import rotation_weekly_budgets
 import rotation_time_budgets
 import rotation_results
@@ -77,7 +78,8 @@ class RotationTests(
         rotation_reset_credits.ResetCreditTests,
         rotation_accounts.AccountAuthTests,
         rotation_capacity.CapacityRetryTests,
-        rotation_telemetry.TelemetryReportTests):
+        rotation_telemetry.TelemetryReportTests,
+        rotation_data_home.DataHomeTests):
     def version_cli(self, *args):
         result = subprocess.run([PYTHON, "-I", str(SCRIPT), *args], cwd=self.repo,
                                 env=self.env, text=True, capture_output=True, timeout=90)

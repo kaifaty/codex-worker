@@ -1,6 +1,6 @@
 # Reflection: lessons from task records
 
-`clean` keeps each task's record in `~/.codex/claude-tasks/.archive/<slug>-<time>/`: `brief.md`, `messages.jsonl`
+`clean` keeps each task's record in `~/.teamster/tasks/.archive/<slug>-<time>/` (`~/.codex/claude-tasks/.archive/` in a legacy home): `brief.md`, `messages.jsonl`
 (follow-ups), `state.json` (turns, reviews with findings and decisions, checks), `last.md`, `check.log` and
 `stderr.log`. Reflection turns a record into a change to the harness — briefs, `AGENTS.md`, standing rules,
 checks — only where the record shows why.

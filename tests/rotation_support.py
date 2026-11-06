@@ -74,7 +74,8 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False), flush=True)
 
 def journal_records():
-    journal = Path(os.environ["CODEX_TASK_HOME"]) / "codex-worker-resets.jsonl"
+    # Data home tests run without CODEX_TASK_HOME and never consume resets.
+    journal = Path(os.environ.get("CODEX_TASK_HOME", str(home))) / "codex-worker-resets.jsonl"
     entries = []
     for line in journal.read_text().splitlines() if journal.exists() else []:
         try:

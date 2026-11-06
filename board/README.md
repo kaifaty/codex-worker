@@ -33,10 +33,10 @@ that takes three demo agents through every place.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `CODEX_TASK_HOME` | `~/.codex` | Read tasks from `claude-tasks/` and archives from `claude-tasks/.archive/`. Snapshots include at most 50 closed records together, ranked by state mtime. |
+| `TEAMSTER_HOME`, `CODEX_TASK_HOME` | `~/.teamster` | The worker's data home, found by the worker's rules (`codex-worker docs settings`). Read tasks from `tasks/` and archives from `tasks/.archive/` (`claude-tasks/` in a legacy home in `~/.codex`). Snapshots include at most 50 closed records together, ranked by state mtime. |
 | `BOARD_POLL_SECONDS` | `1.0` | Interval between file mtime and size polls, in seconds. |
 | `BOARD_ACCOUNTS_SECONDS` | `300` | Minimum interval between account subprocess calls, in seconds. |
-| `BOARD_MACHINES_FILE` | `<CODEX_TASK_HOME>/board-machines.json` | Machine configuration; reread when mtime or size changes. Missing means no machines; invalid files preserve the last valid list and expose `config_error`. |
+| `BOARD_MACHINES_FILE` | `<data home>/board-machines.json` | Machine configuration; reread when mtime or size changes. Missing means no machines; invalid files preserve the last valid list and expose `config_error`. |
 | `BOARD_MACHINES_SECONDS` | `30` | Interval between parallel machine and optional physical host probe cycles, in seconds. |
 | `BOARD_STALE_DAYS` | `7` | Close non-alive tasks older than this many days by state mtime. Non-alive scouts are always closed; alive tasks are exempt from the age rule. |
 | `BOARD_CLAUDE_DESKTOP_DIR` | `~/Library/Application Support/Claude` | Read desktop metadata from `claude-code-sessions/*/*/local_*.json`. Missing directories are skipped. |
@@ -60,8 +60,9 @@ across project directories run at most once per 60 seconds; a found path is cach
 
 On macOS, launchd can keep the board running: it starts at login and restarts after a crash.
 `codex-worker-board plist` prints the job and installs nothing. It accepts `--host` and `--port` with
-the defaults above, and copies `CODEX_TASK_HOME` and every `BOARD_*` variable set in the current
-environment into the job. Logs go to `<CODEX_TASK_HOME>/board-server.log`.
+the defaults above. It sets `TEAMSTER_HOME` to a new-layout data home (also copying `CODEX_TASK_HOME`
+when set) or `CODEX_TASK_HOME` to a legacy one, and copies every `BOARD_*` variable set in the current
+environment into the job. Logs go to `<data home>/board-server.log`.
 
 1. Clone the repository to a permanent place outside working directories, then build and sync:
 

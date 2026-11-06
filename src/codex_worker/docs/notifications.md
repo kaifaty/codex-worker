@@ -1,6 +1,6 @@
 # Task notifications
 
-The user can configure task notifications with `notify` in `~/.codex/codex-worker.json`: `"macos"`, or
+The user can configure task notifications with `notify` in the settings (`~/.teamster/config.json`): `"macos"`, or
 an argv list that receives the event JSON as its final argument. `notify_events` optionally filters
 event types. Hooks run asynchronously and write their output or launch errors to the task's
 `notify.log`; the repository README has examples and the full event list.

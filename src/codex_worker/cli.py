@@ -21,10 +21,11 @@
   codex-worker --version                              print the installed version
   codex-worker docs [<name>]                         list documents or print one
   codex-worker path                                  print the package directory
+  codex-worker migrate-home [--apply]                print or apply the move of legacy data out of ~/.codex
   codex-worker duty tick | status [--json] | clear | plist [--minutes N]  elect, show, clear or schedule the duty account
 
 All commands accept -h/--help.
-~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
+~/.teamster/config.json optionally configures language (en), accounts, switch_at (99),
 soft_switch_at (same as switch_at),
 credits (false), credits_floor (0), credits_floor_until (none),
 wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
@@ -32,10 +33,11 @@ executor (codex), reviewer (codex), claude (isolated account pool settings), rev
 start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
 start/say --ci-command CMD enables CI via sh -c; say inherits it, and --no-ci-command removes it.
 say --ci/--no-ci enables/disables CI; --ci-rounds N replaces the saved round limit. ci_timeout_minutes defaults to 30.
-Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without rotation; weekly budgets still monitor rollout usage.
-State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
-CODEX_TASK_HOME and CODEX_TASK_CODEX override the main home and CLI binary (also for tests).
+State/logs: ~/.teamster/tasks/<slug>/; worktree: ~/.teamster/worktrees/claude-<slug>/<repo>.
+TEAMSTER_HOME selects the data home; CODEX_TASK_HOME and CODEX_TASK_CODEX override the Codex home and CLI binary.
+A legacy data home in ~/.codex keeps codex-worker.json (fallback claude-accounts.json), claude-tasks/ and
+codex-worker-log.jsonl; migrate-home [--apply] prints or applies the move (docs settings).
 The internal _run <slug> supervisor survives the caller and opens a new thread on rotation.
 """
 import argparse
