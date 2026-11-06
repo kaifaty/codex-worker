@@ -120,13 +120,13 @@ class PackageSmokeTest(unittest.TestCase):
                   "checks": [{"command": "test -f smoke.txt", "outcome": "passed", "details": "1 file"}],
                   "pr": "", "pr_title": "", "pr_body": "", "questions": [], "remaining": [],
                   "findings": [], "commit_message": ""}
-        (codex_home / "fixture.json").write_text(json.dumps({
+        fixture = {
             "account": {"type": "chatgpt", "email": "smoke@example.test", "planType": "pro"},
             "accountId": "smoke", "ordinaryUsageAllowed": True,
             "primary": {"usedPercent": 10, "windowDurationMins": 10080, "resetsAt": 4102444800},
             "secondary": None, "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
             "runs": [{"mode": "complete", "reply": result, "write_files": {"smoke.txt": "smoke\n"},
-                      "commit_files": ["smoke.txt"]}]}))
+                      "commit_files": ["smoke.txt"]}]}
 
         def cli(*args):
             # The installed command runs outside the repository, without PYTHONPATH.
@@ -147,6 +147,10 @@ class PackageSmokeTest(unittest.TestCase):
             with self.subTest(language=language):
                 (codex_home / "codex-worker.json").write_text(json.dumps({"language": language}))
                 slug = "smoke-" + language
+                # The fake turn holds until the test has read the live supervisor pid.
+                gate = self.root / ("turn-gate-" + language)
+                fixture["runs"][0]["delay_gate"] = str(gate)
+                (codex_home / "fixture.json").write_text(json.dumps(fixture))
                 started = cli("start", slug, "--brief", str(brief), "--repo", str(repo),
                               "--no-push", "--check", "test -f smoke.txt")
                 self.assertIn("  wait: codex-worker wait %s   " % slug, started.stdout)
@@ -155,6 +159,9 @@ class PackageSmokeTest(unittest.TestCase):
                 self.assertEqual(json.loads(state_path.read_text())["plugin_version"], VERSION)
                 supervisor = int(re.search(r", pid ([0-9]+)", started.stdout)[1])
                 self.assertNotEqual(supervisor, os.getpid())
+                self.assertIn(str((installed / "__main__.py").resolve()) + " _run " + slug, subprocess.run(
+                    ["ps", "-ww", "-o", "command=", "-p", str(supervisor)], text=True, capture_output=True).stdout)
+                gate.touch()
 
                 waited = cli("wait", slug, "--timeout", "120").stdout
                 state = json.loads(state_path.read_text())
