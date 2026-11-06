@@ -1,6 +1,6 @@
 # Codex threads in the desktop app
 
-For a thread the user runs in the Codex app (not started by this skill), the app owns it, so `say` and
+For a thread the user runs in the Codex app (not started by this tool), the app owns it, so `say` and
 `exec resume` can't touch it ("already has an active writer"). Instead:
 
 - Read it: `~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl`; messages have
@@ -18,4 +18,4 @@ For a thread the user runs in the Codex app (not started by this skill), the app
   The hook chains to Codex Computer Use only when its client exists.
 
 Steering a desktop turn mid-way requires the app's Steer control. Restarting the desktop app kills the
-turns of the app's threads; exec tasks of this skill are separate processes and keep running.
+turns of the app's threads; exec tasks of this tool are separate processes and keep running.

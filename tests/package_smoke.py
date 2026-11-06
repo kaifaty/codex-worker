@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -99,7 +100,8 @@ class PackageSmokeTest(unittest.TestCase):
             directory.mkdir()
         trace = self.root / "fake-trace.jsonl"
         fake = fake_bin / "codex"
-        fake.write_text("#!" + sys.executable + "\n" + FAKE_CODEX)
+        fake.write_text("#!" + sys.executable + "\nimport os\nos.environ.setdefault(\"CODEX_FAKE_TRACE\", "
+                        + repr(str(trace)) + ")\n" + FAKE_CODEX)
         fake.chmod(0o700)
         git_dir = str(Path(shutil.which("git")).parent)
         env = {"PATH": os.pathsep.join([str(fake_bin), git_dir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
@@ -218,10 +220,22 @@ class PackageSmokeTest(unittest.TestCase):
         self.assertEqual(hooks, {"value": "codex_worker.__main__:cli.main",
                                  "missing": {"codex": [], "claude": []}})
 
+        # The duty job has no Claude token and must never consult the real Keychain.
+        security = home / ".local/bin/security"
+        security.parent.mkdir(parents=True)
+        security.write_text("#!/bin/sh\nexit 44\n")
+        security.chmod(0o700)
         plist_text = cli("duty", "plist").stdout
         self.assertNotIn("plugins", plist_text)
-        program = plistlib.loads(plist_text.encode("utf-8"))["ProgramArguments"]
-        self.assertEqual(program, [str(command), "duty", "tick"])
+        job = plistlib.loads(plist_text.encode("utf-8"))
+        started = time.time()
+        self.run_checked(job["ProgramArguments"], cwd=str(outside),
+                         env=dict(job["EnvironmentVariables"], HOME=str(home)))
+        status = json.loads(cli("duty", "status", "--json").stdout)
+        self.assertGreaterEqual(status["duty"]["checked_at"], started)
+        self.assertFalse(status["stale"])
+        self.assertEqual(status["duty"]["account"], "main")
+        self.assertEqual(job["ProgramArguments"], [str(command), "duty", "tick"])
 
 
 if __name__ == "__main__":

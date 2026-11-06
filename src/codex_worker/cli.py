@@ -6,7 +6,7 @@
   codex-worker review <slug> [--effort E] [--review-model M] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
   codex-worker wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
   codex-worker status [<slug>]                       state, account and current thread
-  codex-worker stats <slug>                          codex-stats.py for every task thread
+  codex-worker stats <slug>                          codex_stats.py for every task thread
   codex-worker report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model|executor|reviewer] [--json]
   codex-worker verdict <slug> accepted|revised|redone|dropped [--note TEXT]  record the lead's verdict
   codex-worker stop <slug>                           interrupt without rotating

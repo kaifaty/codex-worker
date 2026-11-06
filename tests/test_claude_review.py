@@ -1832,18 +1832,30 @@ class ClaudeReviewTests(RotationTestCase):
         installed = Path(PYTHON).parent / "codex-worker"
         expected = ([str(installed), "duty", "tick"] if installed.is_file()
                     else [PYTHON, "-I", str(SCRIPT), "duty", "tick"])
-        self.assertEqual(job["ProgramArguments"], expected)
         worker = load_worker(self.env, name="duty_plist_worker")
         interpreter = self.root / "venv" / "bin" / "python"
-        interpreter.parent.mkdir(parents=True)
+        created = subprocess.run([PYTHON, "-m", "venv", "--without-pip", str(interpreter.parent.parent)],
+                                 cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(created.returncode, 0, created.stderr)
+        self.assertFalse(interpreter.with_name("codex-worker").exists())
         with mock.patch.object(worker.commands.sys, "executable", str(interpreter)):
             fallback = worker.commands.duty_launchd_plist(15)
+            started = time.time()
+            launched = subprocess.run(fallback["ProgramArguments"], cwd=self.root, env=self.env,
+                                      text=True, capture_output=True, timeout=30)
+            self.assertEqual(launched.returncode, 0, launched.stderr)
+            elected = json.loads((self.home / "duty.json").read_text())
+            self.assertGreaterEqual(elected["checked_at"], started)
+            status = json.loads(self.cli("duty", "status", "--json"))
+            self.assertEqual(status["duty"], elected)
+            self.assertFalse(status["stale"])
             self.assertEqual(fallback["ProgramArguments"],
                              [str(interpreter), "-I", str(SCRIPT), "duty", "tick"])
             installed = interpreter.with_name("codex-worker")
             installed.write_text("#!/bin/sh\n")
             stable = worker.commands.duty_launchd_plist(15)
             self.assertEqual(stable["ProgramArguments"], [str(installed), "duty", "tick"])
+        self.assertEqual(job["ProgramArguments"], expected)
         self.assertFalse((self.root / "launchctl-called").exists())
         self.assertFalse((home / "Library").exists())
 
