@@ -8,22 +8,25 @@ const props = defineProps<{ history: HistoryPoint[]; field: HistoryKey; title: s
 
 const W = 300;
 const H = 60;
-const data = computed(() => chart(props.history, props.field));
+const data = computed(() => chart(props.history, props.field, props.now));
 const path = computed(() => chartPath(data.value, W, H));
 const percent = (value: number | null) => (value === null ? "нет данных" : `${formatNumber(value)} %`);
-const lastAt = computed(() => props.history.reduce((latest, point) => Math.max(latest, point.at), -Infinity));
 
-// Hover: the sample nearest to the pointer.
+// Hover: the sample in the window nearest to the pointer, measured from the line's right edge.
 const hover = ref<HistoryPoint | null>(null);
 function onMove(event: PointerEvent) {
   const box = (event.currentTarget as HTMLElement).getBoundingClientRect();
   if (box.width <= 0) return;
-  const at = lastAt.value - (1 - (event.clientX - box.left) / box.width) * CHART_WINDOW;
+  const end = data.value.end;
+  const at = end - (1 - (event.clientX - box.left) / box.width) * CHART_WINDOW;
   let best: HistoryPoint | null = null;
-  for (const point of props.history) if (!best || Math.abs(point.at - at) < Math.abs(best.at - at)) best = point;
+  for (const point of props.history) {
+    if (end - point.at > CHART_WINDOW) continue;
+    if (!best || Math.abs(point.at - at) < Math.abs(best.at - at)) best = point;
+  }
   hover.value = best && Math.abs(best.at - at) <= 60 ? best : null;
 }
-const hoverX = computed(() => (hover.value ? (1 - (lastAt.value - hover.value.at) / CHART_WINDOW) * 100 : 0));
+const hoverX = computed(() => (hover.value ? (1 - (data.value.end - hover.value.at) / CHART_WINDOW) * 100 : 0));
 const hoverValue = computed(() => (hover.value ? hover.value[props.field] : null));
 const hoverY = computed(() =>
   hoverValue.value === null ? null : 100 - Math.min(Math.max(hoverValue.value, 0), 100),

@@ -285,7 +285,7 @@ export function freeSummary(machines: Machine[]): string {
 export type HistoryKey = "cpu_percent" | "memory_percent" | "gpu_percent";
 
 export interface ChartPoint {
-  /** 0 = an hour before the last point, 1 = the last point. */
+  /** 0 = CHART_WINDOW before the right edge, 1 = the right edge (`Chart.end`). */
   x: number;
   value: number;
 }
@@ -297,18 +297,22 @@ export interface Chart {
   current: number | null;
   /** Fewer than two points: the history is still being collected. */
   collecting: boolean;
-  /** No known value at all. */
+  /** No known value in the window. */
   empty: boolean;
+  /** Time of the right edge: `now`, or the last point when the browser clock is behind it. */
+  end: number;
 }
 
 export const CHART_WINDOW = 3600;
 /** Points come every 30 s; a longer silence is a gap, not a straight line. */
 const CHART_GAP = 90;
 
-export function chart(history: HistoryPoint[], key: HistoryKey): Chart {
+/** The last hour up to `now`, so stale data ends short of the right edge instead of looking fresh. */
+export function chart(history: HistoryPoint[], key: HistoryKey, now: number): Chart {
   const points = [...history].sort((a, b) => a.at - b.at);
   const last = points[points.length - 1];
-  const end = last?.at ?? 0;
+  // A point slightly ahead of the browser clock still lands on the edge rather than past it.
+  const end = Math.max(now, last?.at ?? -Infinity);
   const segments: ChartPoint[][] = [];
   let run: ChartPoint[] = [];
   let previousAt: number | null = null;
@@ -330,6 +334,7 @@ export function chart(history: HistoryPoint[], key: HistoryKey): Chart {
     current: last ? last[key] : null,
     collecting: points.length < 2,
     empty: segments.length === 0,
+    end,
   };
 }
 
