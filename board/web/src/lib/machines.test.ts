@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { HistoryPoint, Machine } from "../types";
 import {
+  CHART_WINDOW,
   chart,
   chartPath,
   cpuLevel,
@@ -151,7 +152,7 @@ describe("history chart", () => {
   const point = (at: number, load: number | null): HistoryPoint => ({ at, cpu_percent: load, memory_percent: 50, gpu_percent: null });
 
   it("breaks the line at a null and at a missing sample instead of drawing zero", () => {
-    const data = chart([point(0, 10), point(30, 20), point(60, null), point(90, 30), point(120, 40), point(300, 50)], "cpu_percent");
+    const data = chart([point(0, 10), point(30, 20), point(60, null), point(90, 30), point(120, 40), point(300, 50)], "cpu_percent", 300);
     expect(data.segments.map((s) => s.map((p) => p.value))).toEqual([[10, 20], [30, 40], [50]]);
     expect(data.current).toBe(50);
     const path = chartPath(data, 300, 60);
@@ -160,10 +161,24 @@ describe("history chart", () => {
   });
 
   it("is still collecting with fewer than two points, and empty without known values", () => {
-    expect(chart([point(0, 10)], "cpu_percent").collecting).toBe(true);
-    expect(chart([], "cpu_percent").collecting).toBe(true);
-    const gpu = chart([point(0, 10), point(30, 20)], "gpu_percent");
+    expect(chart([point(0, 10)], "cpu_percent", 0).collecting).toBe(true);
+    expect(chart([], "cpu_percent", 0).collecting).toBe(true);
+    const gpu = chart([point(0, 10), point(30, 20)], "gpu_percent", 30);
     expect(gpu).toMatchObject({ collecting: false, empty: true, current: null });
+  });
+
+  it("ends the window at now, so stale data stops short of the right edge", () => {
+    const history = [point(5000, 10), point(6000, 20), point(6030, 30)];
+    const xs = (now: number) => chart(history, "cpu_percent", now).segments.flat().map((p) => p.x);
+    const stale = chart(history, "cpu_percent", 6630);
+    expect(stale.segments.flat().at(-1)!.x).toBeCloseTo(1 - 600 / CHART_WINDOW);
+    expect(stale).toMatchObject({ current: 30, collecting: false, empty: false, end: 6630 });
+    expect(xs(6030).at(-1)).toBe(1);
+    // A server clock slightly ahead of the browser's: the newest point still sits on the edge.
+    expect(xs(6000).at(-1)).toBe(1);
+    // The point at 5000 is more than CHART_WINDOW before the edge and leaves the line.
+    expect(xs(5000 + CHART_WINDOW + 1)).toHaveLength(2);
+    expect(chart(history, "cpu_percent", 6030 + CHART_WINDOW + 1)).toMatchObject({ empty: true, current: 30, collecting: false });
   });
 });
 
