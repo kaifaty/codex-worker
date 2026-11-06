@@ -115,6 +115,16 @@ describe("islands", () => {
     expect(shown.map((t) => t.slug)).toEqual([...shown].sort((a, b) => a.created! - b.created!).map((t) => t.slug));
   });
 
+  it("keeps attention tasks on the island ahead of sleeping ones", () => {
+    const sleeping = Array.from({ length: MAX_BENCHES }, (_, i) =>
+      task({ slug: `s${i}`, column: "sleeping", alive: false, updated_at: 2000 + i }),
+    );
+    const { shown, hidden } = islandTasks([...sleeping, task({ slug: "stuck", column: "attention", alive: false, updated_at: 1000 })], "repo");
+    expect(shown.map((t) => t.slug)).toContain("stuck");
+    expect(hidden).toHaveLength(1);
+    expect(hidden[0].column).toBe("sleeping");
+  });
+
   it("starts on the repository with the most tasks that are not closed", () => {
     const tasks = [
       task({ slug: "1", repo: "b" }),

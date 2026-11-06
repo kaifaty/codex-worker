@@ -139,11 +139,11 @@ export function placement(task: TaskSummary, now: number, peers: readonly TaskSu
   }
 }
 
-const COLUMN_RANK: Record<TaskSummary["column"], number> = { running: 0, sleeping: 1, attention: 2, review_me: 3, closed: 4 };
+const COLUMN_RANK: Record<TaskSummary["column"], number> = { running: 0, attention: 1, sleeping: 2, review_me: 3, closed: 4 };
 
 /**
  * The tasks of island `repo`, closed ones left out. At most MAX_BENCHES are shown, running ones first and
- * then the most recently updated; `shown` is in bench order (oldest first), `hidden` are the rest.
+ * then the rest by column and most recent update; `shown` is in bench order (oldest first), `hidden` are the rest.
  */
 export function islandTasks(tasks: readonly TaskSummary[], repo: string): { shown: TaskSummary[]; hidden: TaskSummary[] } {
   const live = tasks.filter((task) => task.repo === repo && task.column !== "closed");
