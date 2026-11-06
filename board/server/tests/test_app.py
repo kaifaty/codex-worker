@@ -334,3 +334,32 @@ def test_session_rest_websocket_status_activity_and_removal(tmp_path):
             metadata.unlink()
             client.portal.call(application.state.board.poll)
             assert receive_until(socket, "task_removed")["slug"] == "local_example"
+
+
+@pytest.mark.parametrize("layout", ["legacy", "new", "marker", "teamster"])
+def test_data_home_layouts(tmp_path, monkeypatch, layout):
+    home = tmp_path / "user"
+    monkeypatch.setenv("HOME", str(home))
+    for name in ("TEAMSTER_HOME", "CODEX_TASK_HOME", "BOARD_MACHINES_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BOARD_CODEX_TASK", str(tmp_path / "accounts.py"))
+    codex = home / ".codex"
+    data = codex if layout == "legacy" else tmp_path / "data" if layout != "new" else home / ".teamster"
+    data.mkdir(parents=True)
+    codex.mkdir(parents=True, exist_ok=True)
+    if layout == "marker":
+        (codex / "teamster-home").write_text(f"{data}\n")
+        monkeypatch.setenv("CODEX_TASK_HOME", str(codex))
+    elif layout == "teamster":
+        monkeypatch.setenv("TEAMSTER_HOME", str(data))
+    directory = data / ("claude-tasks" if layout == "legacy" else "tasks") / "demo"
+    directory.mkdir(parents=True)
+    (directory / "state.json").write_text(json.dumps({
+        "slug": "demo", "kind": "work", "repo": "/tmp/repository", "branch": "demo-branch",
+        "executor": "codex", "account": "main", "pid": None, "outcome": "idle", "turns": 1, "created": 1.0}))
+    settings = Settings.from_env()
+    assert (settings.task_home, settings.layout) == (data, "legacy" if layout == "legacy" else "new")
+    board = create_app(settings).state.board
+    assert board.machines.path == data / "board-machines.json"
+    board.store.poll()
+    assert [task["slug"] for task in board.store.summaries()] == ["demo"]

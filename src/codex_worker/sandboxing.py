@@ -52,7 +52,7 @@ def workspace_filter_driver(st):
 
 
 def rules_path(cfg=None):
-    override = config.CODEX_HOME / "codex-worker-rules.md"
+    override = config.data_path("rules")
     if override.is_file():
         return override
     cfg = config.accounts_config() if cfg is None else cfg

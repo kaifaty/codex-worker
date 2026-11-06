@@ -21,8 +21,8 @@ def reset_credits(info):
 
 @contextmanager
 def reset_journal(cancelled=lambda: False):
-    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = config.CODEX_HOME / "codex-worker-resets.jsonl"
+    config.DATA_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    path = config.data_path("resets")
     # Parallel tasks must agree on a key, even if one dies during the RPC.
     with path.open("a+", encoding="utf-8") as journal:
         waiting_logged = False

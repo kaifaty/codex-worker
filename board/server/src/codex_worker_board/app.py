@@ -21,11 +21,36 @@ REPOSITORY = Path(__file__).resolve().parents[4]
 PING_SECONDS = 20
 FILE_LIMIT = 256 * 1024
 LOCAL_HOST = re.compile(r"(?:localhost|127\.0\.0\.1|\[::1\])(?::[0-9]+)?", re.I)
+# The board's files in the worker's data home, by layout. The board never imports the worker.
+LAYOUT_FILES = {
+    "legacy": {"tasks": "claude-tasks", "board_machines": "board-machines.json", "board_log": "board-server.log"},
+    "new": {"tasks": "tasks", "board_machines": "board-machines.json", "board_log": "board-server.log"},
+}
+
+
+def resolve_data_home(environ=None):
+    """(data home, layout) by the worker's rules, first match wins."""
+    environ = os.environ if environ is None else environ
+    if environ.get("TEAMSTER_HOME"):
+        return Path(environ["TEAMSTER_HOME"]).expanduser(), "new"
+    if environ.get("CODEX_TASK_HOME"):
+        codex = Path(environ["CODEX_TASK_HOME"]).expanduser()
+        marker = codex / "teamster-home"
+        target = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+        return (Path(target).expanduser(), "new") if target else (codex, "legacy")
+    home = Path.home()
+    data, codex = home / ".teamster", home / ".codex"
+    if data.exists():
+        return data, "new"
+    if ((home / ".teamster.migrating").exists() or (codex / "claude-tasks").exists()
+            or (codex / "codex-worker.json").exists()):
+        return codex, "legacy"
+    return data, "new"
 
 
 @dataclass
 class Settings:
-    task_home: Path
+    task_home: Path  # the worker's data home
     codex_task: Path
     poll_seconds: float = 1.0
     accounts_seconds: float = 300
@@ -38,11 +63,16 @@ class Settings:
     machines_file: Path | None = None
     machines_seconds: float = 30
     ssh_command: str = "ssh"
+    layout: str = "legacy"
+
+    def path(self, purpose):
+        return self.task_home / LAYOUT_FILES[self.layout][purpose]
 
     @classmethod
     def from_env(cls):
+        task_home, layout = resolve_data_home()
         return cls(
-            task_home=Path(os.environ.get("CODEX_TASK_HOME", "~/.codex")).expanduser(),
+            task_home=task_home, layout=layout,
             codex_task=Path(os.environ.get(
                 "BOARD_CODEX_TASK",
                 str(REPOSITORY / "src/codex_worker/__main__.py"),
@@ -97,12 +127,12 @@ class Board:
     def __init__(self, settings):
         self.settings = settings
         self.store = Store(
-            settings.task_home / "claude-tasks", stale_days=settings.stale_days,
+            settings.path("tasks"), stale_days=settings.stale_days,
             claude_desktop_dir=settings.claude_desktop_dir, claude_home=settings.claude_home,
             sessions_seconds=settings.sessions_seconds, session_stale_hours=settings.session_stale_hours,
         )
         self.accounts = Accounts(settings.codex_task, settings.accounts_seconds)
-        self.machines = Machines(settings.machines_file or settings.task_home / "board-machines.json",
+        self.machines = Machines(settings.machines_file or settings.path("board_machines"),
                                  settings.ssh_command)
         self.lock = asyncio.Lock()
         self.clients = set()

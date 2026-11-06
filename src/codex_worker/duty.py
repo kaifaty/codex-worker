@@ -10,7 +10,7 @@ import os
 import sys
 from contextlib import contextmanager
 
-from . import accounts, claude_accounts, clock, config, result_schema
+from . import accounts, claude_accounts, clock, config, procs, result_schema
 
 
 DUTY_FAMILIES = ("claude", "codex")
@@ -22,11 +22,11 @@ DUTY_WARNINGS = set()
 
 
 def duty_path():
-    return config.CODEX_HOME / "duty.json"
+    return config.data_path("duty")
 
 
 def duty_log_path():
-    return config.CODEX_HOME / "duty-log.jsonl"
+    return config.data_path("duty_log")
 
 
 def duty_label(record):
@@ -76,14 +76,21 @@ def read_duty(warn=True):
 
 @contextmanager
 def duty_lock(wait=True):
-    """Hold duty.lock; with wait=False yield False at once while another holder has it."""
-    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    with (config.CODEX_HOME / "duty.lock").open("a") as lock:
+    """Hold duty.lock; with wait=False yield False at once while another holder has it.
+
+    migrate-home holds the legacy duty lock while it moves the data home, so a
+    holder that waited for it checks that its data home is still current.
+    """
+    config.DATA_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with config.data_path("duty_lock").open("a") as lock:
         try:
             fcntl.flock(lock, fcntl.LOCK_EX | (0 if wait else fcntl.LOCK_NB))
         except BlockingIOError:
             yield False
             return
+        reason = config.home_moved()
+        if reason:
+            procs.die(reason)
         yield True
 
 

@@ -15,7 +15,7 @@ TELEMETRY_PHASES = []
 def claude_work_rows(st):
     """Read measured Claude work phases for this task's lifetime."""
     try:
-        with (config.CODEX_HOME / "codex-worker-log.jsonl").open(encoding="utf-8") as stream:
+        with journal_path().open(encoding="utf-8") as stream:
             return [row for row in config.ROLLOUT["read_events"](stream)
                     if isinstance(row, dict) and row.get("slug") == st["slug"]
                     and row.get("created") == st.get("created")
@@ -38,7 +38,7 @@ def telemetry_phase(st):
 
 
 def journal_path():
-    return config.CODEX_HOME / "codex-worker-log.jsonl"
+    return config.data_path("telemetry")
 
 
 def append_row(row, stopped=lambda: False):

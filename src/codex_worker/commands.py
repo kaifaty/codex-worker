@@ -1,5 +1,4 @@
 """Task commands, descriptions and main repositories."""
-import fcntl
 import json
 import os
 import plistlib
@@ -544,15 +543,25 @@ def print_accounts(infos, cfg, duty_record=None):
 DUTY_LAUNCHD_LABEL = "codex-worker.duty"
 
 
+def home_environment():
+    """The variables that make a launchd job resolve this process's homes."""
+    if config.LAYOUT == "legacy":
+        return {"CODEX_TASK_HOME": str(config.CODEX_HOME)}
+    environment = {"TEAMSTER_HOME": str(config.DATA_HOME)}
+    if config.CODEX_HOME != config.default_codex_home().resolve():
+        environment["CODEX_TASK_HOME"] = str(config.CODEX_HOME)
+    return environment
+
+
 def duty_launchd_plist(minutes):
     """A launchd job for duty tick; printing it never installs or loads anything."""
     environment = {"PATH": os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
-                                            "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
-                   "CODEX_TASK_HOME": str(config.CODEX_HOME)}
+                                            "/usr/bin", "/bin", "/usr/sbin", "/sbin"])}
+    environment.update(home_environment())
     for key in ("CODEX_TASK_CODEX", "CODEX_TASK_CLAUDE"):
         if os.environ.get(key):
             environment[key] = os.environ[key]
-    log = str(config.CODEX_HOME / "duty-launchd.log")
+    log = str(config.data_path("duty_launchd_log"))
     command = Path(sys.executable).parent / "codex-worker"
     if command.is_file():
         program = [str(command), "duty", "tick"]
@@ -673,11 +682,11 @@ def cmd_login(a):
         account = {"name": a.name, "home": str(config.CODEX_HOME.parent / ".codex-accounts" / a.name)}
         cfg["accounts"].append(account)
     cfg.pop("enabled", None)
-    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = config.CODEX_HOME / "codex-worker.json"
-    tmp = path.with_suffix(f".{os.getpid()}.tmp")
-    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
-    tmp.replace(path)
+    with config.home_lock(exclusive=True):
+        path = config.data_path("settings")
+        tmp = path.with_suffix(f".{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n")
+        tmp.replace(path)
     accounts.prepare_home(account)
     binary = config.codex_binary()
     os.execvpe(binary, [binary, "login"] + ([] if a.browser else ["--device-auth"]), accounts.account_env(account))
@@ -696,11 +705,9 @@ def terminal_device():
 
 @contextmanager
 def _locked_claude_settings():
-    config.CODEX_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
-    path = config.CODEX_HOME / "codex-worker.json"
-    with (config.CODEX_HOME / "codex-worker.lock").open("a") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        source = path if path.exists() else config.CODEX_HOME / "claude-accounts.json"
+    path = config.data_path("settings")
+    with config.home_lock(exclusive=True):
+        source = config.settings_path()
         settings = json.loads(source.read_text(encoding="utf-8")) if source.exists() else {}
         normalized = config.accounts_config()["claude"]["accounts"]
         pool = settings.setdefault("claude", {}).setdefault("accounts", normalized)
