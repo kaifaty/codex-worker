@@ -7,6 +7,8 @@ import { COLUMNS, KIND_FILTERS, isKindFilter, matchesKind, type KindFilter } fro
 import { loadJson, saveJson } from "./lib/storage";
 import AccountsPanel from "./components/AccountsPanel.vue";
 import BoardColumn from "./components/BoardColumn.vue";
+import MachinePanel from "./components/MachinePanel.vue";
+import MachinesStrip from "./components/MachinesStrip.vue";
 import TaskPanel from "./components/TaskPanel.vue";
 
 const props = defineProps<{ board: Board }>();
@@ -34,6 +36,11 @@ const isPrefs = (value: unknown): value is Prefs => {
 };
 const prefs = ref<Prefs>(loadJson(PREFS_KEY, defaults, isPrefs));
 watch(prefs, (value) => saveJson(PREFS_KEY, value), { deep: true });
+
+// Kept apart from Prefs so that saved prefs stay valid.
+const MACHINES_KEY = "codex-board.machines-collapsed.v1";
+const machinesCollapsed = ref(loadJson(MACHINES_KEY, false, (v): v is boolean => typeof v === "boolean"));
+watch(machinesCollapsed, (value) => saveJson(MACHINES_KEY, value));
 
 // Tasks, desktop sessions or both; kept apart from Prefs so that saved prefs stay valid.
 const KIND_KEY = "codex-board.kind.v1";
@@ -95,6 +102,35 @@ const selectedTask = computed(() => (selected.value ? (board.state.value.tasks[s
 
 function open(slug: string) {
   selected.value = slug;
+}
+
+// The machine card works on both tabs; it and the task card replace each other on the board.
+const machineId = ref<string | null>(null);
+const selectedMachine = computed(
+  () => board.state.value.machines?.items.find((machine) => machine.id === machineId.value) ?? null,
+);
+let machineOpener: HTMLElement | null = null;
+function openMachine(id: string, opener: HTMLElement | null) {
+  machineId.value = id;
+  machineOpener = opener;
+  selected.value = null;
+}
+watch(selected, (slug) => {
+  if (slug) machineId.value = null;
+});
+function closeMachine() {
+  const id = machineId.value;
+  machineId.value = null;
+  if (!id) return;
+  const opener = machineOpener;
+  machineOpener = null;
+  void nextTick(() => {
+    // The button that opened the card, else the machine's visible button if the strip changed meanwhile.
+    const buttons = document.querySelectorAll<HTMLElement>(`[data-machine="${CSS.escape(id)}"] button`);
+    const visible = (button: HTMLElement | null) => !!button?.isConnected && button.offsetParent !== null;
+    const target = visible(opener) ? opener : [...buttons].find(visible);
+    target?.focus();
+  });
 }
 
 function close() {
@@ -185,6 +221,15 @@ onBeforeUnmount(() => board.stop());
       </div>
     </header>
 
+    <MachinesStrip
+      :machines="board.state.value.machines"
+      :now="now"
+      :collapsed="machinesCollapsed"
+      :selected="machineId"
+      @toggle="machinesCollapsed = !machinesCollapsed"
+      @open="openMachine"
+    />
+
     <AccountsPanel
       v-show="view === 'board'"
       :accounts="board.state.value.accounts"
@@ -230,6 +275,8 @@ onBeforeUnmount(() => board.stop());
       </p>
       <p v-else class="map-note">Загружаю карту…</p>
     </template>
+
+    <MachinePanel v-if="machineId" :id="machineId" :machine="selectedMachine" :now="now" @close="closeMachine" />
   </div>
 </template>
 

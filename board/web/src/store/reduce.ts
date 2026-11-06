@@ -1,4 +1,4 @@
-import type { Accounts, ServerMessage, TaskSummary } from "../types";
+import type { Accounts, Machines, ServerMessage, TaskSummary } from "../types";
 
 export interface BoardState {
   /** False until the first snapshot arrives. */
@@ -7,6 +7,8 @@ export interface BoardState {
   /** Tasks by slug. */
   tasks: Readonly<Record<string, TaskSummary>>;
   accounts: Accounts | null;
+  /** null until a server that reports machines sends them. */
+  machines: Machines | null;
   /** Server time of the last ping. */
   lastPing: number | null;
   /** Client time (ms) of the last live change of each task; drives the change highlight. */
@@ -18,6 +20,7 @@ export const emptyState: BoardState = {
   generatedAt: null,
   tasks: {},
   accounts: null,
+  machines: null,
   lastPing: null,
   changedAt: {},
 };
@@ -42,6 +45,7 @@ export function reduce(state: BoardState, message: ServerMessage, now: number): 
         generatedAt: message.snapshot.generated_at,
         tasks,
         accounts: message.snapshot.accounts,
+        machines: message.snapshot.machines ?? null,
         lastPing: state.lastPing,
         changedAt: {},
       };
@@ -73,6 +77,8 @@ export function reduce(state: BoardState, message: ServerMessage, now: number): 
     }
     case "accounts":
       return { ...state, accounts: message.accounts };
+    case "machines":
+      return { ...state, machines: message.machines };
     case "ping":
       return { ...state, lastPing: message.at };
     default:

@@ -17,7 +17,7 @@ from codex_worker_board.machines import Machines, machine_status, normalize_metr
 def metrics():
     return {
         "os": "linux",
-        "cpu": {"cores": 4, "load1": 0, "load5": 0},
+        "cpu": {"cores": 4, "load1": 0, "load5": 0, "percent": None},
         "memory": {"total_bytes": 1000, "available_bytes": 1000},
         "gpus": [],
         "disks": [{"mount": "/", "total_bytes": 1000, "free_bytes": 1000}],
@@ -40,6 +40,10 @@ def fake_ssh(tmp_path, body):
     ("cpu", 2.8, "busy", ["cpu"]),
     ("cpu", 5.999, "busy", ["cpu"]),
     ("cpu", 6, "overloaded", ["cpu"]),
+    ("cpu_percent", 69.99, "free", []),
+    ("cpu_percent", 70, "busy", ["cpu"]),
+    ("cpu_percent", 89.99, "busy", ["cpu"]),
+    ("cpu_percent", 90, "overloaded", ["cpu"]),
     ("memory", 250, "free", []),
     ("memory", 249, "busy", ["memory"]),
     ("memory", 100, "busy", ["memory"]),
@@ -57,6 +61,8 @@ def test_status_threshold_boundaries(field, value, status, reasons):
     sample = metrics()
     if field == "cpu":
         sample["cpu"]["load1"] = value
+    elif field == "cpu_percent":
+        sample["cpu"]["percent"] = value
     elif field == "memory":
         sample["memory"]["available_bytes"] = value
     elif field == "disk":
@@ -92,6 +98,14 @@ def test_status_failures_and_all_triggered_reasons():
     assert machine_status(sample, 2) == ("offline", [])
 
 
+def test_known_cpu_percent_overrides_load_average():
+    sample = metrics()
+    sample["cpu"].update(cores=10, load1=124, percent=36)
+    assert machine_status(sample, 0) == ("free", [])
+    sample["cpu"]["percent"] = None
+    assert machine_status(sample, 0) == ("overloaded", ["cpu"])
+
+
 def test_untrusted_metrics_are_projected_coerced_and_bounded():
     sample = metrics()
     sample["cpu"] = {"cores": "4", "load1": "2.5", "load5": "1.5", "private": "discard"}
@@ -106,7 +120,9 @@ def test_untrusted_metrics_are_projected_coerced_and_bounded():
     sample["private"] = "discard"
     clean = normalize_metrics(sample)
     assert set(clean) == {"os", "cpu", "memory", "gpus", "disks"}
-    assert clean["cpu"] == {"cores": 4, "load1": 2.5, "load5": 1.5}
+    assert clean["cpu"] == {"cores": 4, "load1": 2.5, "load5": 1.5, "percent": None}
+    assert normalize_metrics(dict(metrics(), cpu={"cores": 4, "load1": 1, "load5": 1, "percent": "36.5"}))[
+        "cpu"]["percent"] == 36.5
     assert clean["memory"] == {"total_bytes": 1000, "available_bytes": 500}
     assert len(clean["os"]) == len(clean["gpus"][0]["name"]) == 200
     assert clean["gpus"][0]["processes"] == [
@@ -115,7 +131,9 @@ def test_untrusted_metrics_are_projected_coerced_and_bounded():
     assert "discard" not in json.dumps(clean)
     for bad in ([], {"os": "linux"}, dict(metrics(), cpu={"cores": 0, "load1": 0, "load5": 0}),
                 dict(metrics(), cpu={"cores": 4, "load1": "NaN", "load5": 0}),
-                dict(metrics(), cpu={"cores": 1, "load1": 1e308, "load5": 0})):
+                dict(metrics(), cpu={"cores": 1, "load1": 1e308, "load5": 0}),
+                dict(metrics(), cpu={"cores": 4, "load1": 0, "load5": 0, "percent": 100.5}),
+                dict(metrics(), cpu={"cores": 4, "load1": 0, "load5": 0, "percent": -1})):
         with pytest.raises(ValueError):
             normalize_metrics(bad)
 
@@ -201,7 +219,7 @@ def test_fake_ssh_arguments_probe_stdin_host_and_retained_samples(tmp_path):
         assert machine["host"] == {"name": "Hypervisor", "cpu": host_sample["cpu"],
                                    "memory": host_sample["memory"], "error": None}
         assert machine["sampled_at"] == machine["history"][0]["at"]
-        assert machine["history"][0] == {"at": machine["sampled_at"], "load_percent": 0,
+        assert machine["history"][0] == {"at": machine["sampled_at"], "cpu_percent": 0,
                                           "memory_percent": 0, "gpu_percent": None}
         sampled_at = machine["sampled_at"]
         mode.touch()
@@ -286,7 +304,7 @@ def test_timeout_kills_and_reaps_without_blocking_fast_machine(tmp_path, monkeyp
     asyncio.run(check())
 
 
-def test_history_keeps_120_latest_successes_and_unbounded_load(tmp_path, monkeypatch):
+def test_history_keeps_120_latest_successes_and_cpu_percent(tmp_path, monkeypatch):
     path = tmp_path / "machines.json"
     write_config(path, [{"id": "local", "name": "Local", "local": True}])
     call = 0
@@ -296,6 +314,8 @@ def test_history_keeps_120_latest_successes_and_unbounded_load(tmp_path, monkeyp
         call += 1
         value = metrics()
         value["cpu"]["load1"] = call
+        # Even calls report a busy percentage; odd ones fall back to load, capped at 100.
+        value["cpu"]["percent"] = 42 if call % 2 == 0 else None
         value["gpus"] = [{"name": "One", "utilization_percent": 20, "memory_used_bytes": None,
                           "memory_total_bytes": None, "processes": []},
                          {"name": "Two", "utilization_percent": 75, "memory_used_bytes": None,
@@ -310,8 +330,9 @@ def test_history_keeps_120_latest_successes_and_unbounded_load(tmp_path, monkeyp
             await machines.refresh()
         history = machines.value["items"][0]["history"]
         assert len(history) == 120
-        assert history[0]["load_percent"] == 150
-        assert history[-1]["load_percent"] == 3125
+        assert history[0]["cpu_percent"] == 42
+        assert history[-1]["cpu_percent"] == 100
+        assert "load_percent" not in history[-1]
         assert history[-1]["memory_percent"] == 0
         assert history[-1]["gpu_percent"] == 75
 

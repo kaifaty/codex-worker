@@ -8,8 +8,10 @@ import re
 import subprocess
 import sys
 import json
+import time
 
 COMMAND_TIMEOUT = 5
+CPU_SAMPLE_SECONDS = 1
 MIB = 1024 * 1024
 MIN_PROCESS_MEMORY = 100 * MIB
 
@@ -48,6 +50,46 @@ def parse_memory_pressure(text, total_bytes):
         return None
     return {"total_bytes": total_bytes,
             "available_bytes": total_bytes * int(match.group(1)) // 100}
+
+
+def parse_proc_stat(text):
+    """Return (busy, total) jiffies from the aggregate `cpu` line of /proc/stat; idle is idle + iowait."""
+    lines = text.splitlines()
+    parts = lines[0].split() if lines else []
+    if len(parts) < 6 or parts[0] != "cpu":
+        return None
+    try:
+        values = [int(value) for value in parts[1:9]]
+    except ValueError:
+        return None
+    if any(value < 0 for value in values):
+        return None
+    total = sum(values)
+    return total - values[3] - values[4], total
+
+
+def cpu_percent_between(first, second):
+    """Busy share of all cores between two /proc/stat samples, or None."""
+    if first is None or second is None:
+        return None
+    total = second[1] - first[1]
+    busy = second[0] - first[0]
+    if total <= 0 or busy < 0:
+        return None
+    return round(min(100.0, busy / total * 100), 2)
+
+
+def parse_top_cpu(text):
+    """`100 - idle` from the last `CPU usage:` line of `top -l 2 -n 0 -s 1`; the first sample is since boot."""
+    matches = re.findall(
+        r"CPU usage:\s*[0-9.]+% user,\s*[0-9.]+% sys,\s*([0-9.]+)% idle", text
+    )
+    if not matches:
+        return None
+    idle = number(matches[-1])
+    if idle is None or idle > 100:
+        return None
+    return round(100 - idle, 2)
 
 
 def process_name(path):
@@ -106,6 +148,28 @@ def parse_ioreg(text, name):
             for value in values]
 
 
+def read_proc_stat():
+    try:
+        with open("/proc/stat", encoding="utf-8") as source:
+            return parse_proc_stat(source.read())
+    except OSError:
+        return None
+
+
+def cpu_percent(os_name):
+    """Busy share of all cores over about one second, or None."""
+    if os_name == "linux":
+        first = read_proc_stat()
+        if first is None:
+            return None
+        time.sleep(CPU_SAMPLE_SECONDS)
+        return cpu_percent_between(first, read_proc_stat())
+    if os_name == "darwin":
+        text = command(["top", "-l", "2", "-n", "0", "-s", str(CPU_SAMPLE_SECONDS)])
+        return parse_top_cpu(text) if text is not None else None
+    return None
+
+
 def memory(os_name):
     if os_name == "linux":
         try:
@@ -153,7 +217,7 @@ def sample(disks, host=False):
         cores = os.cpu_count()
         load1, load5, _ = os.getloadavg()
         if cores:
-            cpu = {"cores": cores, "load1": load1, "load5": load5}
+            cpu = {"cores": cores, "load1": load1, "load5": load5, "percent": cpu_percent(os_name)}
     except (AttributeError, OSError):
         pass
     mounts = []
