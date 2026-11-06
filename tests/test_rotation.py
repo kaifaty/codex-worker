@@ -16,7 +16,9 @@ from pathlib import Path
 # Isolated Python omits the script directory from its import path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 # Every fixture uses temporary homes; an inherited data home would take precedence.
-os.environ.pop("TEAMSTER_HOME", None)
+for key in tuple(os.environ):
+    if key.startswith("TEAMSTER_"):
+        os.environ.pop(key)
 
 import rotation_workspace
 import rotation_data_home

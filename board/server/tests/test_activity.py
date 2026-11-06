@@ -3,7 +3,7 @@ import os
 
 import pytest
 
-from codex_worker_board.activity import EventTail, TAIL_BYTES
+from teamster_board.activity import EventTail, TAIL_BYTES
 
 
 @pytest.mark.parametrize("event_type", ["item.started", "item.completed"])
@@ -55,7 +55,7 @@ def test_incremental_tail_ignores_bad_json_and_defers_partial_line(tmp_path, mon
         parsed.append(value)
         return original_loads(value)
 
-    monkeypatch.setattr("codex_worker_board.activity.json.loads", capture_loads)
+    monkeypatch.setattr("teamster_board.activity.json.loads", capture_loads)
     with path.open("ab") as stream:
         stream.write(second[30:])
     os.utime(path, (200, 200))
@@ -92,7 +92,7 @@ def test_tail_bounds_initial_read_and_resets_after_replacement_and_truncation(tm
             reads.append((start, len(data)))
             return data
 
-    monkeypatch.setattr("codex_worker_board.activity.os.fdopen", lambda *args: TrackedStream(original_fdopen(*args)))
+    monkeypatch.setattr("teamster_board.activity.os.fdopen", lambda *args: TrackedStream(original_fdopen(*args)))
     assert tail.read()["text"] == "Latest"
     assert reads == [(path.stat().st_size - TAIL_BYTES, TAIL_BYTES)]
     path.write_bytes(event)

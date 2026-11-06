@@ -9,8 +9,8 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.testclient import WebSocketDenialResponse
 
-from codex_worker_board import app as board_app
-from codex_worker_board.app import Settings, create_app
+from teamster_board import app as board_app
+from teamster_board.app import Settings, create_app
 
 
 SUMMARY_FIELDS = {
@@ -61,6 +61,12 @@ def test_stale_days_environment_reaches_store(tmp_path, monkeypatch):
     monkeypatch.setenv("BOARD_CODEX_TASK", str(tmp_path / "fake_accounts.py"))
     monkeypatch.delenv("BOARD_STALE_DAYS", raising=False)
     assert Settings.from_env().stale_days == 7
+    assert Settings.from_env().teamster == tmp_path / "fake_accounts.py"
+    monkeypatch.setenv("BOARD_TEAMSTER_COMMAND", str(tmp_path / "new_accounts.py"))
+    assert Settings.from_env().teamster == tmp_path / "new_accounts.py"
+    monkeypatch.delenv("BOARD_TEAMSTER_COMMAND")
+    monkeypatch.delenv("BOARD_CODEX_TASK")
+    assert Settings.from_env().teamster == board_app.REPOSITORY / "src/teamster/__main__.py"
     monkeypatch.setenv("BOARD_STALE_DAYS", "2.5")
     settings = Settings.from_env()
     assert settings.stale_days == 2.5

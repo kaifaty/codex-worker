@@ -23,7 +23,8 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = "plugins/codex-worker/skills/codex-worker/scripts"
 ENTRYPOINT = SCRIPTS + "/codex_task.py"
 PACKAGE = SCRIPTS + "/codex_worker"
-CURRENT_PACKAGE = "src/codex_worker"
+PREVIOUS_PACKAGE = "src/codex_worker"
+CURRENT_PACKAGE = "src/teamster"
 CATEGORIES = ("moved", "same", "changed", "missing", "duplicate", "new")
 
 
@@ -36,7 +37,7 @@ def _git(root, *args):
 
 def _is_worker_path(path):
     return (path == ENTRYPOINT
-            or (str(PurePosixPath(path).parent) in {PACKAGE, CURRENT_PACKAGE}
+            or (str(PurePosixPath(path).parent) in {PACKAGE, PREVIOUS_PACKAGE, CURRENT_PACKAGE}
                 and path.endswith(".py")))
 
 
@@ -46,7 +47,7 @@ def sources_at_revision(root, revision):
         root, "rev-parse", "--verify", revision + "^{commit}",
     ).decode("ascii").strip()
     listing = _git(root, "ls-tree", "-r", "--name-only", "-z", revision,
-                   "--", ENTRYPOINT, PACKAGE, CURRENT_PACKAGE)
+                   "--", ENTRYPOINT, PACKAGE, PREVIOUS_PACKAGE, CURRENT_PACKAGE)
     paths = sorted(path.decode("utf-8") for path in listing.split(b"\0")
                    if path and _is_worker_path(path.decode("utf-8")))
     return {path: _git(root, "show", "--no-ext-diff", revision + ":" + path)
@@ -54,7 +55,8 @@ def sources_at_revision(root, revision):
 
 
 def working_sources(root):
-    package = CURRENT_PACKAGE if (root / CURRENT_PACKAGE).is_dir() else PACKAGE
+    package = next((path for path in (CURRENT_PACKAGE, PREVIOUS_PACKAGE, PACKAGE)
+                    if (root / path).is_dir()), PACKAGE)
     paths = [root / ENTRYPOINT] + sorted((root / package).glob("*.py"))
     return {path.relative_to(root).as_posix(): path.read_bytes()
             for path in paths if path.is_file()}
@@ -109,7 +111,7 @@ def _aliases(tree, modules):
     for node in _module_imports(tree):
         if isinstance(node, ast.ImportFrom):
             if not ((node.level == 1 and node.module is None)
-                    or (node.level == 0 and node.module == "codex_worker")):
+                    or (node.level == 0 and node.module in {"codex_worker", "teamster"})):
                 continue
             for alias in node.names:
                 target = "codex_worker." + alias.name
@@ -117,9 +119,9 @@ def _aliases(tree, modules):
                     candidates[alias.asname or alias.name].append((target, alias))
         else:
             for alias in node.names:
-                if (alias.asname and alias.name.startswith("codex_worker.")
-                        and alias.name in modules):
-                    candidates[alias.asname].append((alias.name, alias))
+                if (alias.asname and alias.name.startswith(("codex_worker.", "teamster."))
+                        and alias.name.replace("teamster.", "codex_worker.", 1) in modules):
+                    candidates[alias.asname].append((alias.name.replace("teamster.", "codex_worker.", 1), alias))
 
     # The layout checker forbids aliases being rebound in any scope. Be
     # conservative here too: a local argument or reassignment must not make a

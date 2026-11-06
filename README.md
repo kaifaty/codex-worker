@@ -1,4 +1,4 @@
-# codex-worker
+# teamster
 
 Let the lead plan and review while a worker implements in its own git worktree. The tool runs
 Codex or Claude as the worker through an installed Python command. A thin plugin supports Claude Code
@@ -11,8 +11,20 @@ fix rounds. The lead checks the final diff and review and handles merging. Optio
 can pause a task until a usage window resets. On GitHub, `--ci` waits for PR checks and gives Codex
 one bounded repair turn with failed-check logs before the lead reviews the final result.
 
-This repository contains the `codex-worker` command and its thin Claude Code plugin, distributed
+This repository contains the `teamster` command and its thin Claude Code plugin, distributed
 through the `kaifaty` marketplace.
+
+## Upgrading an existing codex-worker installation
+
+The tool and plugin are now named `teamster`. The `codex-worker` command remains a silent alias.
+Existing data, login homes and Keychain service names stay the same.
+
+1. Wait until no tasks are running.
+2. `uv tool uninstall codex-worker`
+3. `uv tool install git+https://github.com/kaifaty/codex-worker`
+4. `claude plugin uninstall codex-worker@kaifaty`
+5. `claude plugin marketplace update kaifaty`
+6. `claude plugin install teamster@kaifaty`
 
 ## Requirements
 
@@ -31,11 +43,11 @@ Choose a model per task with `start --model M`, and a separate Codex review mode
 `--review-model M` on `start`, `say`, or `review`. Follow-ups inherit both choices; `say --model default`
 or `--review-model default` restores the corresponding Codex configuration default. Before choosing,
 use `accounts --json` to read account limits as structured data. See
-[task models and account JSON](src/codex_worker/docs/settings.md#task-models).
+[task models and account JSON](src/teamster/docs/settings.md#task-models).
 
 The worker finds Codex in this order:
 
-1. `CODEX_TASK_CODEX`, if set to the executable to use.
+1. `TEAMSTER_CODEX`, then the legacy `CODEX_TASK_CODEX`, if set to the executable to use.
 2. On macOS, the bundled executable at
    `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, if present.
 3. `codex` on `PATH`.
@@ -46,33 +58,33 @@ The worker finds Codex in this order:
 
    ```sh
    uv tool install git+https://github.com/kaifaty/codex-worker
-   codex-worker --version
+   teamster --version
    ```
 
 2. Add the plugin for Claude Code:
 
    ```text
    /plugin marketplace add kaifaty/codex-worker
-   /plugin install codex-worker@kaifaty
+   /plugin install teamster@kaifaty
    ```
 
-Invoke the skill with `/codex-worker:codex-worker`, followed by the task. For example:
+Invoke the skill with `/teamster:teamster`, followed by the task. For example:
 
 ```text
-/codex-worker:codex-worker Add CSV export for the current search results.
+/teamster:teamster Add CSV export for the current search results.
 Use the existing filters, add a focused test, and open a PR for review.
 ```
 
-The command also works without Claude Code; run `codex-worker --help` for usage.
-Read the lead guide with `codex-worker docs lead-guide`; `codex-worker docs` lists all documents.
-Use `codex-worker path` to find the installed package directory and its standalone helpers.
+The command also works without Claude Code; run `teamster --help` for usage.
+Read the lead guide with `teamster docs lead-guide`; `teamster docs` lists all documents.
+Use `teamster path` to find the installed package directory and its standalone helpers.
 
-Update with `uv tool upgrade codex-worker` when no tasks are running: supervisors run from the same
+Update with `uv tool upgrade teamster` when no tasks are running: supervisors run from the same
 installed files, which an upgrade replaces. The plugin checks that the command is version 1.51.0 or newer.
 
 ## Other leads
 
-Another agent or a human can read the [lead guide](src/codex_worker/docs/lead-guide.md)
+Another agent or a human can read the [lead guide](src/teamster/docs/lead-guide.md)
 and call the CLI directly. Other leads have not been verified yet.
 
 ## A short task cycle
@@ -80,9 +92,9 @@ and call the CLI directly. Other leads have not been verified yet.
 The skill handles these commands for the lead. To run them yourself:
 
 ```sh
-codex-worker start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --ci --check "python3 -m unittest tests.test_csv_export"
-codex-worker wait csv-export
-codex-worker status csv-export
+teamster start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --ci --check "python3 -m unittest tests.test_csv_export"
+teamster wait csv-export
+teamster status csv-export
 ```
 
 Use a brief with the change, context, measurable completion conditions, focused checks, and boundaries.
@@ -96,7 +108,7 @@ For GitHub repositories, `start --ci` or `"ci": true` enables CI for the task. F
 the setting and repair-round limit (initially 1); `say --ci` enables it, `say --no-ci` disables it,
 and `say --ci-rounds N` changes the limit. The supervisor waits for the published PR's exact HEAD
 and sends failures to Codex for bounded repairs. See
-[CI details](src/codex_worker/docs/ci.md).
+[CI details](src/teamster/docs/ci.md).
 The lead merges only after `CI … passed` and rechecks `gh pr checks <url>` immediately before merging.
 
 Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
@@ -114,18 +126,18 @@ Check the actual diff, latest review, and rejection reasons: the worker's claims
 Send remaining findings through `say` or record issues after the round limit:
 
 ```sh
-codex-worker say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
-codex-worker wait csv-export
+teamster say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
+teamster wait csv-export
 ```
 
-See [turn outcomes](src/codex_worker/docs/results.md#turn-outcomes)
+See [turn outcomes](src/teamster/docs/results.md#turn-outcomes)
 for stop reasons and the next action.
 
 Codex does not merge. After the result has been reviewed and merged under your repository's rules,
 remove the worktree and archive its threads:
 
 ```sh
-codex-worker clean csv-export
+teamster clean csv-export
 ```
 
 ## Read code with a scout
@@ -136,11 +148,11 @@ verified facts, assumptions, relevant tests, and what it did not inspect. Check 
 only the cited lines.
 
 ```sh
-codex-worker scout csv-path "Where are export filters applied, and which tests cover them?" --repo .
-codex-worker wait csv-path
-codex-worker say csv-path "Does the same path handle empty results?"
-codex-worker wait csv-path
-codex-worker clean csv-path
+teamster scout csv-path "Where are export filters applied, and which tests cover them?" --repo .
+teamster wait csv-path
+teamster say csv-path "Does the same path handle empty results?"
+teamster wait csv-path
+teamster clean csv-path
 ```
 
 Use `--file Q.md` instead of a quoted question, and `--effort E` to override reasoning effort.
@@ -151,7 +163,7 @@ the scout's state and logs and archives its threads, leaving the inspected direc
 
 ## Commands
 
-Run all commands as `codex-worker <command>`.
+Run all commands as `teamster <command>`.
 
 | Command | Purpose |
 |---|---|
@@ -198,8 +210,8 @@ Task JSON includes `task_type` plus `models` and `reasoning_efforts` lists in fi
 Use `report --by effort,task-type` to compare task counts, done fractions, and medians of rounds,
 active minutes, and weekly usage. A task appears once in every observed group; each group includes
 its whole task cost. Missing values, including old journal entries, group as `unknown`.
-See [telemetry](src/codex_worker/docs/telemetry.md) for metadata and grouping details.
-Empty searches with environment assignments bypass the repeat guard; state and `report --json` retain [turn stop history](src/codex_worker/docs/telemetry.md#the-journal) across follow-ups.
+See [telemetry](src/teamster/docs/telemetry.md) for metadata and grouping details.
+Empty searches with environment assignments bypass the repeat guard; state and `report --json` retain [turn stop history](src/teamster/docs/telemetry.md#the-journal) across follow-ups.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
 add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and
@@ -230,9 +242,9 @@ of a passing saved check and may run only focused checks for a specific finding,
 `--max-minutes M` on `start` and `say` caps active implementation time across account rotations;
 reviews and scouts use a separate cap. `--max-weekly P` on `start`, `say`, or `review` caps total task
 usage across phases, follow-ups and accounts. Repeated identical command failures also stop a turn.
-See [budgets](src/codex_worker/docs/budgets.md),
-[weekly accounting](src/codex_worker/docs/telemetry.md#weekly-usage-accounting),
-and [turn outcomes and wrap-ups](src/codex_worker/docs/results.md#turn-outcomes)
+See [budgets](src/teamster/docs/budgets.md),
+[weekly accounting](src/teamster/docs/telemetry.md#weekly-usage-accounting),
+and [turn outcomes and wrap-ups](src/teamster/docs/results.md#turn-outcomes)
 for limits, stop behavior and the next action.
 
 ## Checks after each turn
@@ -277,9 +289,9 @@ data home, apart from Codex's home `~/.codex`, which keeps `config.toml`, sessio
 The data home is `TEAMSTER_HOME` when set, otherwise `~/.teamster`. An existing installation that keeps
 `claude-tasks/` or `codex-worker.json` in `~/.codex` goes on using it in the legacy layout
 (`codex-worker.json` with the fallback `claude-accounts.json`, `claude-tasks/`, `codex-worker-log.jsonl`,
-`codex-worker-rules.md`) until `codex-worker migrate-home --apply` moves it; `codex-worker migrate-home`
+`codex-worker-rules.md`) until `teamster migrate-home --apply` moves it; `teamster migrate-home`
 alone prints the plan. Worktrees stay in place behind a symlink. The resolving rules, the full name
-table, the refusals and the rollback steps are in `codex-worker docs settings`.
+table, the refusals and the rollback steps are in `teamster docs settings`.
 
 A minimal configuration is:
 
@@ -316,13 +328,14 @@ A minimal configuration is:
 A settings file containing only language or other preferences does **not** enable automatic account
 monitoring or rotation. The `accounts` command remains available to inspect the current login.
 
-English standing rules are in `src/codex_worker/rules.md`; Russian rules are in `src/codex_worker/rules.ru.md`.
+English standing rules are in `src/teamster/rules.md`; Russian rules are in `src/teamster/rules.ru.md`.
 If `~/.teamster/rules.md` exists, it replaces both. Use this file for other languages or your
 own working rules. The worker substitutes `{branch}` and `{base}` in the selected rules.
 Scouts use their own read-only instructions instead of these task rules. Account status labels are
 always English.
 
-`CODEX_TASK_HOME` can select another main Codex home. Without `TEAMSTER_HOME` the data home then is
+`TEAMSTER_CODEX_HOME` selects another main Codex home when `TEAMSTER_HOME` is set; otherwise
+`CODEX_TASK_HOME` keeps its legacy meaning. Without `TEAMSTER_HOME` the data home then is
 that directory in the legacy layout, unless its `teamster-home` file names a data home.
 
 ## Optional workspace sandbox
@@ -397,7 +410,7 @@ go to the task's `notify.log`; a notification failure does not fail the task.
 If you choose to configure it, sign in to each subscription separately:
 
 ```sh
-codex-worker login second
+teamster login second
 ```
 
 The human completes the device-code sign-in, or uses `--browser`. Additional account homes default to
@@ -436,7 +449,7 @@ Authentication errors get one retry, then rotation; `needs login` means run `log
 
 Use `--reviewer claude` on `start`, `say`, or `review` to review through a pool of isolated Claude
 Code CLI accounts; implementation and fixes remain in Codex. The human adds each subscription with
-`codex-worker claude-login first`, which runs isolated `claude setup-token`, prompts for the token
+`teamster claude-login first`, which runs isolated `claude setup-token`, prompts for the token
 through macOS Keychain, and appends to `claude.accounts` in `~/.teamster/config.json`. Defaults are
 `~/.claude-accounts/first` and the `codex-worker-claude-first` Keychain service. Override them with
 `--config-dir DIR` and `--keychain SERVICE`. Tokens stay out of arguments, settings, state and logs.
@@ -472,15 +485,15 @@ the same.
 `accounts` shows each account's name, both window percentages and resets, and its limit marker.
 `claude-limits.json` stores limits by name; an old unnamed cache belongs to `default`. Review state,
 journal rows and `report --json` include the Claude account name. See
-[account setup](src/codex_worker/docs/accounts.md#claude-account-pool) and
-[settings](src/codex_worker/docs/settings.md#claude-accounts).
+[account setup](src/teamster/docs/accounts.md#claude-account-pool) and
+[settings](src/teamster/docs/settings.md#claude-accounts).
 
 ## Optional desktop-app notifications
 
 For threads created in the Codex desktop app, the bundled `wait_turn.py` can wait for completion
 events written by `turn_log.py`. This optional hook is separate from the task notifications above.
 
-To enable that optional hook, run `codex-worker path` and set `notify` in your
+To enable that optional hook, run `teamster path` and set `notify` in your
 `~/.codex/config.toml` to that directory's `turn_log.py`. Replace `<package-path>` below with the
 printed absolute path; TOML does not expand shell commands, `~` or variables here:
 
@@ -495,8 +508,8 @@ chains to Codex Computer Use only if its client exists. It does not automaticall
 other notify hooks.
 
 ```sh
-python3 -I "$(codex-worker path)/wait_turn.py" <thread-id>
-python3 -I "$(codex-worker path)/codex_stats.py" <thread-id>
+python3 -I "$(teamster path)/wait_turn.py" <thread-id>
+python3 -I "$(teamster path)/codex_stats.py" <thread-id>
 ```
 
 Run `wait_turn.py` in the background from Claude Code. Desktop threads belong to the app; the worker's
@@ -537,7 +550,7 @@ python3 -I tests/test_rotation.py RotationTests.test_mid_turn_rotation_preserves
 ```
 
 `python3 -I tests/package_smoke.py` installs the package into a temporary virtual environment and runs
-a task through the installed `codex-worker` command with a fake Codex. It needs network access to fetch
+a task through the installed `teamster` command with a fake Codex. It needs network access to fetch
 the build backend, so it is not part of `test_rotation.py`.
 
 ## License

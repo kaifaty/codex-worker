@@ -18,7 +18,7 @@ from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "src/codex_worker/__main__.py")
+          / "src/teamster/__main__.py")
 CHILD = WORKER_BOOTSTRAP + """
 import json
 import sys

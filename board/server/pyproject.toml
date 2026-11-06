@@ -1,12 +1,13 @@
 [project]
-name = "codex-worker-board"
+name = "teamster-board"
 version = "0.1.0"
-description = "Read-only local task board for codex-worker"
+description = "Read-only local task board for teamster"
 requires-python = ">=3.10"
 dependencies = ["fastapi>=0.115", "uvicorn[standard]>=0.30"]
 
 [project.scripts]
-codex-worker-board = "codex_worker_board.__main__:main"
+teamster-board = "teamster_board.__main__:main"
+codex-worker-board = "teamster_board.__main__:main"
 
 [dependency-groups]
 dev = ["pytest>=8", "httpx>=0.27"]

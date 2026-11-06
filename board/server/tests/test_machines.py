@@ -9,9 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from codex_worker_board import machines as machines_module
-from codex_worker_board import probe
-from codex_worker_board.machines import Machines, machine_status, normalize_metrics
+from teamster_board import machines as machines_module
+from teamster_board import probe
+from teamster_board.machines import Machines, machine_status, normalize_metrics
 
 
 def metrics():

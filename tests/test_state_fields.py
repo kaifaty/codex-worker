@@ -17,7 +17,7 @@ from worker_loader import load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "src/codex_worker/__main__.py")
+          / "src/teamster/__main__.py")
 
 
 def literal_mapping_keys(node):

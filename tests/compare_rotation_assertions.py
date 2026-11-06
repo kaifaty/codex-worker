@@ -240,7 +240,8 @@ def changed_definitions(before, after, require_assertions=False, modules=()):
 
 
 def compare(revision, strip_module_hops=False):
-    modules = ({path.stem for path in (SCRIPTS / "codex_worker").glob("*.py")}
+    modules = ({path.stem for package in ("teamster", "codex_worker")
+                for path in (SCRIPTS / package).glob("*.py")}
                if strip_module_hops else set())
     before, before_helpers = collect_definitions(sources_at_revision(revision), modules)
     after, after_helpers = collect_definitions(working_sources(), modules)

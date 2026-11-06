@@ -1,4 +1,4 @@
-"""The launchd job printed by `codex-worker-board plist`."""
+"""The launchd job printed by `teamster-board plist`."""
 
 import os
 import plistlib
@@ -11,8 +11,8 @@ from pathlib import Path
 
 import pytest
 
-from codex_worker_board import __main__ as board_main
-from codex_worker_board.app import REPOSITORY
+from teamster_board import __main__ as board_main
+from teamster_board.app import REPOSITORY
 
 
 PATH = os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
@@ -34,18 +34,18 @@ def test_plist_fields(tmp_path, monkeypatch, capsys, console_script):
     venv = tmp_path / "venv/bin"
     venv.mkdir(parents=True)
     if console_script:
-        (venv / "codex-worker-board").write_text("")
+        (venv / "teamster-board").write_text("")
     monkeypatch.setattr(sys, "executable", str(venv / "python"))
     board_main.main(["plist", "--host", "127.0.0.2", "--port", "9001"])
     job = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
     options = ["--host", "127.0.0.2", "--port", "9001"]
     if console_script:
-        assert job["ProgramArguments"] == [str(venv / "codex-worker-board")] + options
+        assert job["ProgramArguments"] == [str(venv / "teamster-board")] + options
     else:
-        assert job["ProgramArguments"] == [str(venv / "python"), "-m", "codex_worker_board"] + options
+        assert job["ProgramArguments"] == [str(venv / "python"), "-m", "teamster_board"] + options
     log = str(tmp_path / "home/board-server.log")
     assert job == {
-        "Label": "codex-worker.board", "ProgramArguments": job["ProgramArguments"],
+        "Label": "teamster.board", "ProgramArguments": job["ProgramArguments"],
         "WorkingDirectory": str(REPOSITORY), "RunAtLoad": True, "KeepAlive": True, "ThrottleInterval": 10,
         "EnvironmentVariables": {"PATH": PATH, "CODEX_TASK_HOME": str(tmp_path / "home"),
                                  "BOARD_STALE_DAYS": "3", "BOARD_MACHINES_FILE": "~/machines.json"},
@@ -63,6 +63,7 @@ def test_plist_names_the_data_home_by_layout(tmp_path, monkeypatch, capsys, vari
     monkeypatch.delenv("CODEX_TASK_HOME")
     monkeypatch.delenv("TEAMSTER_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TEAMSTER_CODEX_HOME", str(tmp_path / "ignored-codex"))
     data = tmp_path / (".teamster" if variable == "TEAMSTER_HOME" else ".codex")
     (data / ("tasks" if variable == "TEAMSTER_HOME" else "claude-tasks")).mkdir(parents=True)
     board_main.main(["plist"])
@@ -82,8 +83,11 @@ def test_plist_resolves_a_relative_data_home(tmp_path, monkeypatch, capsys):
     environment = job["EnvironmentVariables"]
     for directory in (tmp_path, job["WorkingDirectory"]):
         assert Path(directory, environment["TEAMSTER_HOME"]) == tmp_path / "data"
-        assert Path(directory, environment["CODEX_TASK_HOME"]) == tmp_path / "codex"
+        assert Path(directory, environment["TEAMSTER_CODEX_HOME"]) == tmp_path / "codex"
     assert job["StandardOutPath"] == job["StandardErrorPath"] == str(tmp_path / "data/board-server.log")
+    monkeypatch.setenv("TEAMSTER_CODEX_HOME", "other-codex")
+    assert board_main.launchd_plist("127.0.0.1", 8787)["EnvironmentVariables"]["TEAMSTER_CODEX_HOME"] == str(
+        tmp_path / "other-codex")
 
 
 def free_port():
@@ -92,7 +96,8 @@ def free_port():
         return probe.getsockname()[1]
 
 
-def test_plist_program_serves_snapshot(tmp_path, monkeypatch):
+@pytest.mark.parametrize("command", ["teamster-board", "codex-worker-board"])
+def test_plist_program_serves_snapshot(tmp_path, monkeypatch, command):
     home, task_home = tmp_path / "home", tmp_path / "tasks"
     home.mkdir()
     task_home.mkdir()
@@ -104,10 +109,10 @@ def test_plist_program_serves_snapshot(tmp_path, monkeypatch):
     monkeypatch.setenv("BOARD_CLAUDE_HOME", str(tmp_path / "claude"))
     monkeypatch.setenv("BOARD_CLAUDE_DESKTOP_DIR", str(tmp_path / "desktop"))
     port = free_port()
-    output = subprocess.run([sys.executable, "-m", "codex_worker_board", "plist", "--port", str(port)],
+    output = subprocess.run([str(Path(sys.executable).parent / command), "plist", "--port", str(port)],
                             check=True, capture_output=True, timeout=30).stdout
     job = plistlib.loads(output)
-    assert job["ProgramArguments"][0] == str(Path(sys.executable).parent / "codex-worker-board")
+    assert job["ProgramArguments"][0] == str(Path(sys.executable).parent / "teamster-board")
     assert {key: job["EnvironmentVariables"][key]
             for key in ("BOARD_CODEX_TASK", "BOARD_CLAUDE_HOME", "BOARD_CLAUDE_DESKTOP_DIR")} == {
         "BOARD_CODEX_TASK": str(fake), "BOARD_CLAUDE_HOME": str(tmp_path / "claude"),
