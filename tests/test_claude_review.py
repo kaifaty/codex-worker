@@ -1,8 +1,13 @@
 """Claude review subprocesses use a separate credential and leave work to Codex."""
+import contextlib
 import datetime
+import fcntl
+import io
 import json
 import os
+import plistlib
 import shlex
+import shutil
 import subprocess
 import sys
 import time
@@ -1435,6 +1440,413 @@ class ClaudeReviewTests(RotationTestCase):
             "codex": {"reviews": 1, "cost_usd": 0}, "claude": {"reviews": 1, "cost_usd": 0.125}})
         text = self.cli("report")
         self.assertIn("Reviews by reviewer: codex 1 ($0.00); claude 1 ($0.12)", text)
+
+
+    def write_duty(self, family, account, checked_at=None, claude=None, codex=None):
+        now = time.time()
+        record = {"account": account, "family": family, "since": now,
+                  "checked_at": now if checked_at is None else checked_at, "reason": "fixture duty",
+                  "rooms": {"claude": claude or {}, "codex": codex or {}}}
+        (self.home / "duty.json").write_text(json.dumps(record))
+        return record
+
+    def set_codex_used(self, home, used):
+        path = home / "fixture.json"
+        value = json.loads(path.read_text())
+        value["primary"]["usedPercent"] = used
+        path.write_text(json.dumps(value))
+
+    def duty_snapshot(self, weekly, updated=None, short=.1, short_reset=None):
+        return {"updated_at": time.time() if updated is None else updated, "unifiedWindows": {
+            "five_hour": {"utilization": short, "resetsAt": short_reset or self.reset},
+            "seven_day": {"utilization": weekly, "resetsAt": self.reset + 86400}}}
+
+    def test_duty_elect_families_margins_ties_weights_and_unavailable_holders(self):
+        self.claude_pool_fixture()
+        worker = self.worker()
+        duty, cfg, now = worker.duty, worker.config.accounts_config(), time.time()
+        settings = cfg["duty"]
+        self.assertEqual(settings, {"relative_margin": 25, "absolute_margin": 100,
+                                    "claude_only_task_types": ["visual", "layout"]})
+
+        def candidate(name, room, family="claude", unavailable=None):
+            return {"family": family, "name": name, "room": room, "unavailable": unavailable}
+
+        def elected(candidates, holder=None, family="claude"):
+            current = {"account": holder, "family": family} if holder else None
+            return duty.duty_label(duty.elect(candidates, current, settings))
+
+        codex = candidate("main", 5000, "codex")
+        self.assertEqual(elected([codex, candidate("first", 10)]), "claude/first")
+        self.assertEqual(elected([codex, candidate("first", 0, unavailable="limited")]), "codex/main")
+        self.assertEqual(elected([codex, candidate("first", 1)], "main", "codex"), "claude/first")
+        for holder_room, best_room, switched in ((400, 500, True), (400, 499, False),
+                                                 (10, 14, False), (1000, 1200, False), (1000, 1300, True)):
+            with self.subTest(holder=holder_room, best=best_room):
+                self.assertEqual(elected([candidate("first", holder_room), candidate("second", best_room)], "first"),
+                                 "claude/second" if switched else "claude/first")
+        self.assertEqual(duty.elect([candidate("first", 0, unavailable="limited")],
+                                    {"account": "first", "family": "claude"}, settings),
+                         {"account": None, "family": None, "reason": "no account available"})
+        self.assertEqual(elected([candidate("second", 50), candidate("first", 50)]), "claude/first")
+        self.assertEqual(elected([candidate("first", 50), candidate("second", 50)], "second"), "claude/second")
+
+        first, second = cfg["claude"]["accounts"]
+        fresh = duty.claude_duty_candidate(cfg, second, self.duty_snapshot(.5), now, now)
+        self.assertEqual(fresh, {"family": "claude", "name": "second", "room": 35, "unavailable": None})
+        partial = self.duty_snapshot(.5)
+        del partial["unifiedWindows"]["five_hour"]
+        self.assertEqual(duty.claude_duty_candidate(cfg, second, partial, now, now), fresh)
+        for label, snapshot in (
+                ("limit", dict(self.duty_snapshot(.1), limited_until=now + 600)),
+                ("token", dict(self.duty_snapshot(.1), token_unavailable=True, token_retry_at=now + 600,
+                               limited_until=now + 600)),
+                ("five-hour", self.duty_snapshot(.1, short=.99)),
+                ("stale", self.duty_snapshot(.1, updated=now - 3600)),
+                ("unknown", {"updated_at": now})):
+            with self.subTest(unavailable=label):
+                holder = duty.claude_duty_candidate(cfg, first, snapshot, now, now)
+                self.assertIsNotNone(holder["unavailable"])
+                self.assertEqual(elected([holder, fresh], "first"), "claude/second")
+        # A snapshot saved by this tick's refresh is fresh even when every snapshot ages at once.
+        cfg["claude"]["limits_max_age_minutes"] = 0
+        self.assertIsNone(duty.claude_duty_candidate(cfg, first, self.duty_snapshot(.1), now, now - 1)["unavailable"])
+        self.assertEqual(duty.claude_duty_candidate(cfg, first, self.duty_snapshot(.1, updated=now - 2), now,
+                                                    now - 1)["unavailable"], "limits stale")
+        cfg["claude"]["limits_max_age_minutes"] = 30
+        first["weight"], second["weight"] = 20, 5
+        large = duty.claude_duty_candidate(cfg, first, self.duty_snapshot(.5), now, now)
+        small = duty.claude_duty_candidate(cfg, second, self.duty_snapshot(.1), now, now)
+        self.assertEqual((large["room"], small["room"]), (700, 375))
+        self.assertEqual(elected([small, large]), "claude/first")
+
+        cfg.update(switch_at=99, soft_switch_at=80)
+        info = {"name": "main", "logged_in": True, "weight": 2, "limits": {
+            "primary": {"used": 30, "minutes": 300, "reset": None},
+            "secondary": {"used": 50, "minutes": 10080, "reset": None}}}
+        self.assertEqual(duty.codex_duty_candidate(cfg, info),
+                         {"family": "codex", "name": "main", "room": 60, "unavailable": None})
+        for label, changes in (("five-hour", {"limits": dict(info["limits"], primary={"used": 99, "minutes": 300})}),
+                               ("login", {"logged_in": False}), ("unknown", {"logged_in": None}),
+                               ("limited", {"ordinary": False})):
+            with self.subTest(codex=label):
+                self.assertIsNotNone(duty.codex_duty_candidate(cfg, dict(info, **changes))["unavailable"])
+
+    def test_duty_tick_records_changes_once_and_skips_failed_refreshes(self):
+        self.claude_pool_fixture(runs=[{"mode": "invalid_json", "limits": {}}], names=("first", "second", "unknown"))
+        limits_path = self.home / "claude-tasks" / "claude-limits.json"
+        limits_path.write_text(json.dumps({"first": self.duty_snapshot(.1),
+                                           "second": self.duty_snapshot(0, updated=time.time() - 3600)}))
+        duty_path, log = self.home / "duty.json", self.home / "duty-log.jsonl"
+        duty_path.write_text("{broken")
+        output = self.cli("duty", "tick")
+        record = json.loads(duty_path.read_text())
+        self.assertEqual(duty_path.read_text(), json.dumps(record, indent=2) + "\n")
+        self.assertEqual((record["family"], record["account"]), ("claude", "first"), output)
+        self.assertEqual(record["rooms"], {"claude": {"first": 75}, "codex": {"main": 89, "second": 89}})
+        self.assertIn("duty changed to claude/first since", output)
+        # The stale and the unknown account were probed, failed, and stayed out of the election.
+        self.assertEqual(len(self.claude_invocations()), 2)
+        entries = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([(entry["from"], entry["to"]) for entry in entries], [(None, "claude/first")])
+        self.assertEqual(entries[0]["rooms"], record["rooms"])
+        self.assertEqual(entries[0]["at"], record["since"])
+
+        limits = json.loads(limits_path.read_text())
+        limits["second"] = self.duty_snapshot(0)
+        limits_path.write_text(json.dumps(limits))
+        self.assertIn("kept: second room 85 vs 75 misses the relative and absolute margins", self.cli("duty", "tick"))
+        kept = json.loads(duty_path.read_text())
+        self.assertEqual((kept["account"], kept["since"]), ("first", record["since"]))
+        self.assertGreaterEqual(kept["checked_at"], record["checked_at"])
+        self.assertEqual(len(log.read_text().splitlines()), 1)
+        self.assertEqual(len(self.claude_invocations()), 2)
+
+        settings_path = self.home / "claude-accounts.json"
+        settings = json.loads(settings_path.read_text())
+        settings["claude"]["accounts"][1]["weight"] = 20
+        settings_path.write_text(json.dumps(settings))
+        self.cli("duty", "tick")
+        switched = json.loads(duty_path.read_text())
+        self.assertEqual(switched["account"], "second")
+        self.assertEqual(switched["reason"], "second room 1700 vs 75 passes both margins")
+        entries = [json.loads(line) for line in log.read_text().splitlines()]
+        self.assertEqual([(entry["from"], entry["to"]) for entry in entries],
+                         [(None, "claude/first"), ("claude/first", "claude/second")])
+        # A tick that fails between the record and the log line never logs one change twice.
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        limits = json.loads(limits_path.read_text())
+        limits["second"]["limited_until"] = self.reset
+        limits_path.write_text(json.dumps(limits))
+        with mock.patch.object(worker.duty, "duty_log_path", side_effect=OSError("interrupted")), \
+                self.assertRaises(OSError):
+            worker.duty.run_duty_tick(cfg, [], time.time())
+        self.assertEqual(json.loads(duty_path.read_text())["account"], "first")
+        self.cli("duty", "tick")
+        self.assertEqual(json.loads(duty_path.read_text())["account"], "first")
+        self.assertEqual(len(log.read_text().splitlines()), 2)
+        # A second tick while one holds the lock changes nothing.
+        before = duty_path.read_text()
+        with (self.home / "duty.lock").open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            self.assertEqual(self.cli("duty", "tick"), "duty tick: another duty tick is running; nothing changed\n")
+        self.assertEqual(duty_path.read_text(), before)
+        # A fresh snapshot is not probed, but a missing token is marked as probes do, so the
+        # only working Codex account on duty still takes new work.
+        fixture = json.loads(self.claude_fixture_path.read_text())
+        fixture["security"] = {"codex-worker-claude-" + name: {"unavailable": True}
+                               for name in ("first", "second", "unknown")}
+        self.claude_fixture_path.write_text(json.dumps(fixture))
+        self.set_codex_used(self.other, 99)
+        self.cli("duty", "tick")
+        self.assertEqual(json.loads(duty_path.read_text())["account"], "main")
+        self.assertEqual(len(log.read_text().splitlines()), 3)
+        self.assertTrue(all(worker.claude_accounts.token_marked(info)
+                            for info in worker.claude_accounts.read_limits().values()))
+        infos = [{"name": name, "logged_in": True, "account_id": name, "limits": {
+            "primary": {"used": used, "minutes": 10080, "reset": self.reset},
+            "secondary": {"used": 2, "minutes": 300, "reset": self.reset}}}
+            for name, used in (("main", 10), ("second", 99))]
+        self.assertEqual(worker.accounts.available(infos, cfg, worker.duty.codex_reserved(infos, cfg))["name"],
+                         "main")
+
+    def test_duty_selection_skips_duty_for_new_claude_work_and_reviews_with_exceptions(self):
+        self.claude_pool_fixture()
+        worker = self.worker()
+        cfg = worker.config.accounts_config()
+        limits = {"first": self.duty_snapshot(.1), "second": self.duty_snapshot(.5)}
+        limits_path = worker.config.TASKS / "claude-limits.json"
+        limits_path.write_text(json.dumps(limits))
+
+        def choices(task_type=None, own=None):
+            review = worker.claude_review.select_account(cfg, "review", task_type=task_type)
+            work = worker.account_rotation.claude_choice({"claude_account": own, "task_type": task_type},
+                                                         cfg, lambda: False)
+            return review and review["name"], work and work["name"]
+
+        with mock.patch.dict(os.environ, self.env, clear=True):
+            baseline = choices()
+            self.assertEqual(baseline, ("first", "first"))
+            self.write_duty("claude", "first", codex={"main": 89})
+            self.assertEqual(choices(), ("second", "second"))
+            self.assertEqual(choices(own="first"), ("second", "first"))
+            limits["second"]["limited_until"] = self.reset
+            limits_path.write_text(json.dumps(limits))
+            # Reviews fall back to Codex and work waits, as with an exhausted pool.
+            self.assertEqual(choices(), (None, None))
+            self.assertEqual(choices(task_type="visual"), ("first", "first"))
+            for home in (self.home, self.other):
+                self.set_codex_used(home, 99)
+            self.assertEqual(choices(), ("first", "first"))
+            self.set_codex_used(self.home, 10)
+            self.assertEqual(choices(), (None, None))
+            cfg["soft_switch_at"] = 80
+            self.set_codex_used(self.home, 85)
+            self.assertEqual(choices(), (None, None))
+            cfg["soft_switch_at"] = 99
+            del limits["second"]["limited_until"]
+            limits_path.write_text(json.dumps(limits))
+            self.write_duty("claude", "second", codex={"main": 89})
+            self.assertEqual(choices(), ("first", "first"))
+            (self.home / "duty.json").write_text("{broken")
+            stderr = io.StringIO()
+            with contextlib.redirect_stderr(stderr):
+                self.assertEqual(choices(), baseline)
+                self.assertEqual(choices(), baseline)
+            self.assertEqual(stderr.getvalue().count("duty.json is unreadable"), 1, stderr.getvalue())
+
+        def info(name, used):
+            return {"name": name, "logged_in": True, "account_id": name, "limits": {
+                "primary": {"used": used, "minutes": 10080, "reset": self.reset},
+                "secondary": {"used": 2, "minutes": 300, "reset": self.reset}}}
+
+        def codex_choice(infos):
+            chosen = worker.accounts.available(infos, cfg, worker.duty.codex_reserved(infos, cfg))
+            return chosen and chosen["name"]
+
+        infos = [info("main", 10), info("second", 10)]
+        self.write_duty("codex", "main")
+        self.assertEqual(codex_choice(infos), "second")
+        # Claude is available now, so the duty account still skips new work.
+        self.assertIsNone(codex_choice([info("main", 10), info("second", 99)]))
+        limits_path.write_text(json.dumps({name: self.duty_snapshot(.1, updated=time.time() - 3600)
+                                           for name in ("first", "second")}))
+        self.assertEqual(codex_choice([info("main", 10), info("second", 99)]), "main")
+
+        # A Codex sleep is planned without the reset of a duty account the task may not take.
+        limits_path.write_text(json.dumps(limits))
+        now = time.time()
+        sleeping = [dict(info(name, 99), limits={
+            "primary": {"used": 99, "minutes": 10080, "reset": now + delay},
+            "secondary": {"used": 2, "minutes": 300, "reset": now + delay}}) for name, delay in (("main", 600),
+                                                                                            ("second", 3600))]
+        st = {"slug": "duty-sleep", "account": "second", "thread": "", "rotations": []}
+        (worker.config.TASKS / "duty-sleep").mkdir()
+        slept = []
+        self.assertIsNone(worker.account_rotation.wait_for_account(
+            st, sleeping, cfg, "all accounts unavailable", lambda: bool(slept), slept.append))
+        self.assertEqual(st["sleeping"]["account"], "second")
+        self.assertAlmostEqual(st["sleeping"]["until"], now + 3600 + worker.config.RESET_MARGIN, delta=1)
+
+        # An automatic reset credit is never spent on a duty account the task may not take.
+        later = now + 30 * 3600
+        credited = [dict(info(name, 99), limits={
+            "primary": {"used": 99, "minutes": 10080, "reset": later},
+            "secondary": {"used": 2, "minutes": 300, "reset": later}}, reset_credits={
+            "availableCount": 1, "credits": [{"id": name + "-credit", "status": "available",
+                                              "resetType": "codexRateLimits", "expiresAt": now + expires}]})
+            for name, expires in (("main", 3600), ("second", 7200))]
+        with mock.patch.object(worker.credit_resets, "reset_credit_action",
+                               return_value={"outcome": "failed", "credit": {"id": "spent"}}) as action:
+            self.assertIsNone(worker.account_rotation.try_reset_credit(
+                st, credited, dict(cfg, use_reset_credits=True), lambda: False))
+        self.assertEqual(action.call_args.args[0]["name"], "second")
+
+        # A Claude sleep waits for the duty account when an exception will let the task take it.
+        self.write_duty("claude", "first")
+        limits_path.write_text(json.dumps({"first": dict(self.duty_snapshot(.1), limited_until=now + 600),
+                                           "second": dict(self.duty_snapshot(.5), limited_until=now + 3600)}))
+        for task_type, codex_used in ((None, 99), ("visual", 10)):
+            with self.subTest(task_type=task_type), mock.patch.dict(os.environ, self.env, clear=True):
+                self.set_codex_used(self.home, codex_used)
+                st, slept = {"slug": "duty-sleep", "task_type": task_type, "rotations": []}, []
+                self.assertIsNone(worker.account_rotation.wait_for_claude_account(
+                    st, cfg, "all Claude accounts unavailable", lambda: bool(slept), slept.append))
+                self.assertEqual(st["sleeping"]["account"], "first")
+                self.assertAlmostEqual(st["sleeping"]["until"], now + 600 + worker.config.RESET_MARGIN, delta=1)
+
+    def test_duty_codex_tasks_reviews_and_rotation_skip_the_duty_account(self):
+        third = self.root / "third-home"
+        third.mkdir()
+        self.configure(language="en", accounts=[{"name": "main", "home": str(self.home)},
+                                                {"name": "second", "home": str(self.other)},
+                                                {"name": "third", "home": str(third)}])
+        work = {"mode": "complete", "reply": self.work_result()}
+        self.account(self.home, "A", self.reset, runs=[work, work, {"mode": "limit"}])
+        self.account(self.other, "B", self.reset + 3600, runs=[
+            {"mode": "complete", "reply": self.review_result(False)}, work])
+        self.account(third, "C", self.reset + 7200, runs=[work])
+        rooms = {"main": 89, "second": 89, "third": 89}
+        self.start("duty-own")
+        self.wait("duty-own")
+        self.assertEqual(self.state("duty-own")["account"], "main")
+        self.write_duty("codex", "main", codex=rooms)
+        thread = self.state("duty-own")["thread"]
+        self.cli("say", "duty-own", "Continue on the same account.")
+        self.wait("duty-own")
+        state = self.state("duty-own")
+        self.assertEqual((state["account"], state["thread"]), ("main", thread))
+        self.assertTrue(self.invocations()[-1]["resume"])
+        self.cli("review", "duty-own")
+        self.wait("duty-own")
+        self.assertEqual(self.state("duty-own")["reviews"][-1]["account"], "second")
+        self.start("duty-new")
+        self.wait("duty-new")
+        self.assertEqual(self.state("duty-new")["account"], "second")
+        # The former duty account takes new work again; a limit rotates past the new duty account.
+        self.write_duty("codex", "second", codex=rooms)
+        self.start("duty-rotate")
+        self.wait("duty-rotate")
+        state = self.state("duty-rotate")
+        self.assertEqual(state["account"], "third")
+        self.assertEqual([(entry["from"], entry["to"]) for entry in state["rotations"] if "from" in entry],
+                         [("main", "third")])
+        self.assertEqual([entry["home"] for entry in self.invocations()],
+                         [str(self.home), str(self.home), str(self.other), str(self.other),
+                          str(self.home), str(third)])
+
+    def test_duty_claude_work_rotation_sleeps_past_the_duty_and_own_task_stays(self):
+        self.fixture_timeout = 90
+        rejected = {"status": "rejected", "resetsAt": self.reset,
+                    "unifiedWindows": {"seven_day": {"utilization": 1, "resetsAt": self.reset}}}
+        accounts = self.claude_pool_fixture(runs=[{"limits": rejected, "reply": self.work_result()},
+                                                  {"reply": self.work_result()}, {"reply": self.work_result()}])
+        now = time.time()
+        (self.home / "claude-tasks" / "claude-limits.json").write_text(json.dumps({
+            "first": self.duty_snapshot(.1, short_reset=now + 900),
+            "second": self.duty_snapshot(.3, short_reset=now + 1800)}))
+        self.write_duty("claude", "first", claude={"first": 75, "second": 55}, codex={"main": 89})
+        self.start("duty-claude-new", "--executor", "claude")
+        self.cli("wait", "duty-claude-new", "--timeout", "60", timeout=75)
+        state = self.state("duty-claude-new")
+        self.assertEqual((state["outcome"], state["claude_account"]), ("sleeping", "second"))
+        # The task sleeps until the other account returns, not until the duty account's next reset.
+        self.assertEqual(state["sleeping"]["account"], "second")
+        self.assertAlmostEqual(state["sleeping"]["until"], self.reset + 0.1, delta=1)
+        self.assertEqual([entry["config_dir"] for entry in self.claude_invocations()], [accounts[1]["config_dir"]])
+        self.cli("stop", "duty-claude-new")
+        self.wait("duty-claude-new")
+
+        self.cli("duty", "clear")
+        self.start("duty-claude-own", "--executor", "claude", "--parallel")
+        self.wait("duty-claude-own")
+        session = self.state("duty-claude-own")["session_id"]
+        self.assertEqual(self.state("duty-claude-own")["claude_account"], "first")
+        self.write_duty("claude", "first", claude={"first": 75}, codex={"main": 89})
+        self.cli("say", "duty-claude-own", "Continue on the duty account.")
+        self.wait("duty-claude-own")
+        self.assertEqual(self.state("duty-claude-own")["claude_account"], "first")
+        resumed = self.claude_invocations()[-1]
+        self.assertEqual(resumed["config_dir"], accounts[0]["config_dir"])
+        self.assertEqual(resumed["argv"][resumed["argv"].index("--resume") + 1], session)
+
+    def test_duty_status_clear_accounts_and_launchd_plist(self):
+        self.claude_pool_fixture()
+        self.assertEqual(self.cli("duty", "status"), "no duty account: duty.json is absent\n")
+        self.assertIsNone(json.loads(self.cli("accounts", "--json"))["duty"])
+        record = self.write_duty("claude", "first", checked_at=time.time() - 100 * 60,
+                                 claude={"first": 75}, codex={"main": 89})
+        status = self.cli("duty", "status")
+        self.assertIn("duty claude/first since ", status)
+        self.assertIn("rooms: claude first 75; codex main 89\n", status)
+        self.assertRegex(status, r"warning: no duty check for 10\d minutes; re-election is not running")
+        report = json.loads(self.cli("duty", "status", "--json"))
+        self.assertEqual((report["duty"], report["stale"], report["unreadable"]), (record, True, False))
+        self.assertEqual(json.loads(self.cli("accounts", "--json"))["duty"], record)
+        self.assertRegex(self.cli("accounts"), r"\nclaude first: [^\n]*; on duty\n")
+        self.write_duty("codex", "second", codex={"main": 89, "second": 89})
+        self.assertNotIn("warning", self.cli("duty", "status"))
+        self.assertFalse(json.loads(self.cli("duty", "status", "--json"))["stale"])
+        self.assertRegex(self.cli("accounts"), r"\nsecond\t[^\n]*\tavailable \(on duty\)\n")
+        log = self.home / "duty-log.jsonl"
+        log.write_text("{}\n")
+        self.assertIn("duty cleared", self.cli("duty", "clear"))
+        self.assertFalse((self.home / "duty.json").exists())
+        self.assertEqual(log.read_text(), "{}\n")
+        self.assertEqual(self.cli("duty", "status"), "no duty account: duty.json is absent\n")
+
+        plugin, cache = SCRIPT.parents[3], self.root / "plugin-cache" / "codex-worker"
+        relative = SCRIPT.relative_to(plugin)
+        shutil.copytree(plugin, cache / "1.9.0")
+        stub = ("import json, os, sys\nfrom pathlib import Path\n"
+                "Path(os.environ['CODEX_TASK_HOME'], 'launched.json').write_text(json.dumps("
+                "{'script': __file__, 'argv': sys.argv[1:], 'isolated': sys.flags.isolated}))\n")
+        for version in ("1.10.0", "1.2.0", "2.0", "9.9.9-beta"):
+            (cache / version / relative).parent.mkdir(parents=True)
+            (cache / version / relative).write_text(stub)
+        (cache / "3.0.0").mkdir()
+        launchctl = self.root / "launchctl"
+        launchctl.write_text("#!/bin/sh\ntouch " + shlex.quote(str(self.root / "launchctl-called")) + "\n")
+        launchctl.chmod(0o700)
+        result = subprocess.run([PYTHON, "-I", str(cache / "1.9.0" / relative), "duty", "plist", "--minutes", "15"],
+                                cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        job = plistlib.loads(result.stdout.encode())
+        home, log = Path(self.env["HOME"]), str(self.home / "duty-launchd.log")
+        self.assertEqual((job["StartInterval"], job["RunAtLoad"]), (900, True))
+        self.assertEqual((job["StandardOutPath"], job["StandardErrorPath"]), (log, log))
+        environment = job["EnvironmentVariables"]
+        self.assertEqual(environment["CODEX_TASK_HOME"], str(self.home))
+        for directory in ("/opt/homebrew/bin", str(home / ".local/bin"), "/usr/bin"):
+            self.assertIn(directory, environment["PATH"].split(os.pathsep))
+        launched = subprocess.run(job["ProgramArguments"], cwd=self.root, env=dict(environment, HOME=str(home)),
+                                  text=True, capture_output=True, timeout=30)
+        self.assertEqual(launched.returncode, 0, launched.stderr)
+        self.assertEqual(json.loads((self.home / "launched.json").read_text()), {
+            "script": str(cache / "1.10.0" / relative), "argv": ["duty", "tick"], "isolated": 1})
+        self.assertFalse((self.root / "launchctl-called").exists())
+        self.assertFalse((home / "Library").exists())
 
 
 if __name__ == "__main__":

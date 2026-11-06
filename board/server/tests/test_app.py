@@ -1,7 +1,9 @@
 """Contract checks through the REST and WebSocket interfaces."""
 
 import json
+import os
 import subprocess
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,7 +17,7 @@ SUMMARY_FIELDS = {
     "slug", "kind", "repo", "branch", "task_type", "executor", "account", "reviewer",
     "model", "effort", "column", "phase", "phase_started_at", "alive", "turn", "fix_round",
     "outcome", "result_status", "summary", "pr", "ci", "sleeping_until", "created", "updated_at",
-    "activity",
+    "activity", "title", "link",
 }
 
 
@@ -72,6 +74,8 @@ def test_rest_contract_files_and_unknown_paths(board):
     assert isinstance(snapshot["generated_at"], float)
     assert len(snapshot["tasks"]) == 1
     assert set(snapshot["tasks"][0]) == SUMMARY_FIELDS
+    assert snapshot["tasks"][0]["title"] is None
+    assert snapshot["tasks"][0]["link"] is None
     assert set(snapshot["accounts"]) == {"fetched_at", "error", "data"}
     for name, filename in (("brief", "brief.md"), ("last", "last.md"),
                            ("review", "review.md"), ("check", "check.log")):
@@ -186,3 +190,102 @@ def test_symlinks_do_not_expose_other_files(board, tmp_path):
     alias.symlink_to(directory, target_is_directory=True)
     client.portal.call(application.state.board.poll)
     assert client.get("/api/tasks/alias").status_code == 404
+
+
+def test_session_environment_defaults_and_store_overrides(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_TASK_HOME", str(tmp_path / "tasks"))
+    monkeypatch.setenv("BOARD_CODEX_TASK", str(tmp_path / "accounts.py"))
+    for name in ("BOARD_CLAUDE_DESKTOP_DIR", "BOARD_CLAUDE_HOME", "BOARD_SESSIONS_SECONDS",
+                 "BOARD_SESSION_STALE_HOURS"):
+        monkeypatch.delenv(name, raising=False)
+    defaults = Settings.from_env()
+    assert defaults.claude_desktop_dir == Path.home() / "Library/Application Support/Claude"
+    assert defaults.claude_home == Path.home() / ".claude"
+    assert defaults.sessions_seconds == 5
+    assert defaults.session_stale_hours == 48
+    monkeypatch.setenv("BOARD_CLAUDE_DESKTOP_DIR", str(tmp_path / "desktop"))
+    monkeypatch.setenv("BOARD_CLAUDE_HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("BOARD_SESSIONS_SECONDS", "2.5")
+    monkeypatch.setenv("BOARD_SESSION_STALE_HOURS", "12")
+    settings = Settings.from_env()
+    assert settings.claude_desktop_dir == tmp_path / "desktop"
+    assert settings.claude_home == tmp_path / "home"
+    store = create_app(settings).state.board.store
+    assert store.sessions_seconds == 2.5
+    assert store.session_stale_hours == 12
+
+
+def test_session_rest_websocket_status_activity_and_removal(tmp_path):
+    desktop = tmp_path / "desktop"
+    home = tmp_path / "home"
+    directory = desktop / "claude-code-sessions" / "account" / "device"
+    directory.mkdir(parents=True)
+    metadata = directory / "local_example.json"
+    state = {"sessionId": "local_example", "cliSessionId": "cli-example", "title": "Example session",
+             "cwd": "/tmp/project", "originCwd": "/tmp/project", "model": "claude-model",
+             "effort": "high", "isArchived": False, "createdAt": 1000,
+             "lastActivityAt": 1793872800000, "completedTurns": 1,
+             "interruptedAwaitingPerson": None, "prs": [], "private": "metadata secret"}
+    metadata.write_text(json.dumps(state))
+    live_dir = home / "sessions"
+    live_dir.mkdir(parents=True)
+    live_path = live_dir / f"{os.getpid()}.json"
+    live = {"pid": os.getpid(), "sessionId": "cli-example", "cwd": "/tmp/project",
+            "status": "idle", "statusUpdatedAt": 1793872801000, "entrypoint": "desktop",
+            "private": "live state secret"}
+    live_path.write_text(json.dumps(live))
+    transcript = home / "projects" / "-tmp-project" / "cli-example.jsonl"
+    transcript.parent.mkdir(parents=True)
+    fake = tmp_path / "accounts.py"
+    fake.write_text("print('{}')\n")
+    settings = Settings(tmp_path / "tasks", fake, poll_seconds=3600,
+                        claude_desktop_dir=desktop, claude_home=home, sessions_seconds=0)
+    application = create_app(settings)
+    with TestClient(application, base_url="http://localhost", headers={"Host": "localhost"}) as client:
+        snapshot = client.get("/api/snapshot").json()
+        assert len(snapshot["tasks"]) == 1
+        task = snapshot["tasks"][0]
+        assert set(task) == SUMMARY_FIELDS
+        assert task["kind"] == "session"
+        assert task["alive"] is False
+        detail = client.get("/api/tasks/local_example").json()
+        assert set(detail) == SUMMARY_FIELDS | {"timeline", "files"}
+        assert detail["files"] == []
+        assert len(detail["timeline"]) == 2
+        assert "secret" not in json.dumps(detail)
+        for path in ("/api/tasks/local_example/files/brief", "/api/tasks/local_example/files/state.json",
+                     "/api/tasks/%2e%2e%2fx", "/api/tasks/%2e%2e%2fx/files/brief"):
+            assert client.get(path).status_code == 404
+        with client.websocket_connect("/ws") as socket:
+            assert socket.receive_json()["type"] == "snapshot"
+            live["status"] = "busy"
+            live_path.write_text(json.dumps(live))
+            client.portal.call(application.state.board.poll)
+            changed = receive_until(socket, "task")
+            assert changed["task"]["slug"] == "local_example"
+            assert changed["task"]["alive"] is True
+            assert changed["task"]["column"] == "running"
+            event = {"type": "assistant", "timestamp": "2026-11-05T10:00:02Z",
+                     "message": {"content": [{"type": "text", "text": "First update"}]}}
+            transcript.write_text(json.dumps(event) + "\n")
+            client.portal.call(application.state.board.poll)
+            activity = receive_until(socket, "activity")
+            assert activity == {"type": "activity", "slug": "local_example",
+                                "activity": {"at": 1793872802.0, "kind": "message", "text": "First update"}}
+            event["message"]["content"][0]["text"] = "Appended update"
+            with transcript.open("a") as stream:
+                stream.write(json.dumps(event) + "\n")
+            client.portal.call(application.state.board.poll)
+            assert receive_until(socket, "activity")["activity"]["text"] == "Appended update"
+            state["isArchived"] = True
+            metadata.write_text(json.dumps(state))
+            client.portal.call(application.state.board.poll)
+            assert receive_until(socket, "task_removed") == {"type": "task_removed", "slug": "local_example"}
+            assert client.get("/api/tasks/local_example").status_code == 404
+            state["isArchived"] = False
+            metadata.write_text(json.dumps(state))
+            client.portal.call(application.state.board.poll)
+            assert receive_until(socket, "task")["task"]["slug"] == "local_example"
+            metadata.unlink()
+            client.portal.call(application.state.board.poll)
+            assert receive_until(socket, "task_removed")["slug"] == "local_example"

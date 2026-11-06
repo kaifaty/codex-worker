@@ -265,7 +265,7 @@ def available(infos, cfg, exclude=()):
     return min(choices, key=lambda i: longest_window(i).get("reset") or float("inf")) if choices else None
 
 
-def claude_account_lines(cfg):
+def claude_account_lines(cfg, duty_account=None):
     limits, lines = claude_accounts.read_limits(), []
     for account in claude_accounts.accounts(cfg):
         info = limits.get(account["name"], {})
@@ -277,5 +277,7 @@ def claude_account_lines(cfg):
         if claude_accounts.limited(info):
             reason = " (token unavailable)" if claude_accounts.token_marked(info) else ""
             parts.append("limited until " + config.local_time(info.get("limited_until", info.get("resetsAt"))) + reason)
+        if account["name"] == duty_account:
+            parts.append("on duty")
         lines.append("claude " + account["name"] + ": " + "; ".join(parts))
     return lines

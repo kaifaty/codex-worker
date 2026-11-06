@@ -20,7 +20,7 @@ Reference detail lives in `references/`. Read a file only when its topic comes u
 | [review-cycle.md](references/review-cycle.md) | angle choices, fix-round mechanics and automatic stops |
 | [settings.md](references/settings.md) | brief language, standing-rules override, default caps, `config.toml` trust |
 | [sandbox.md](references/sandbox.md) | the user wants `--sandbox workspace`, or `wait` prints `== sandbox: workspace` |
-| [accounts.md](references/accounts.md) | subscriptions and rotation, credits and their floor, `auto-continue at`, `needs login`, reset credits |
+| [accounts.md](references/accounts.md) | subscriptions and rotation, credits and their floor, `auto-continue at`, `needs login`, reset credits, the duty account |
 | [notifications.md](references/notifications.md) | the user asks about task notifications |
 | [telemetry.md](references/telemetry.md) | `report`, or deciding whether fix rounds or review angles pay off |
 | [reflection.md](references/reflection.md) | after `clean` of a task whose fix cycle did not converge or that ended `blocked`; the weekly batch; before changing `AGENTS.md` or standing rules |
@@ -122,6 +122,7 @@ Without `--reviewer`, Claude tasks use Codex reviews; Codex tasks keep the confi
 | Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` saves an isolated Claude CLI account with a token entered at the Keychain prompt, then probes it; a failed probe leaves the account saved and exits nonzero |
 | Probe a Claude account | `claude-probe <name>` — send one short request to check its token and cache five-hour and seven-day limits |
 | Rename a Claude account | `claude-rename <old> <new>` — rename its pool entry and cached limits, keeping its config directory and Keychain service |
+| Duty account | `duty tick` — refresh stale limits and elect the duty account that new work skips; `duty status [--json]` — duty, reason, rooms and check age, warning after 90 minutes; `duty clear` — no duty; `duty plist [--minutes 30]` — print a launchd job for `duty tick` ([accounts.md](references/accounts.md#duty-account)) |
 | Remove a Claude account | `claude-remove <name>` — remove its pool entry and cached limits, leaving its directory and Keychain entry for manual deletion; the last account cannot be removed |
 | Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
 | Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock`; it reminds you when the task has no `verdict` |

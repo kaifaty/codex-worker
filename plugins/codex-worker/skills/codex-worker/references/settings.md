@@ -21,6 +21,9 @@ that file is absent.
 | `credits_floor_until` | none | `YYYY-MM-DD`; the floor applies through the end of this local date and is `0` from the next day |
 | `soft_switch_at` | value of `switch_at` | number in `(0, switch_at]`; prefer accounts below this usage percentage in both windows, then use the reserve up to `switch_at`; see [accounts.md](accounts.md#rotation) |
 | `notify`, `notify_events` | | [notifications.md](notifications.md) |
+| `duty.relative_margin` | `25` | finite number ≥ 0; the duty account moves within a family only to a room at least this many percent larger ([accounts.md](accounts.md#duty-account)) |
+| `duty.absolute_margin` | `100` | finite number ≥ 0; the same move also needs a room at least this many units larger |
+| `duty.claude_only_task_types` | `["visual", "layout"]` | task types (`--task-type`) that a Claude duty account still takes when it is the only Claude account left |
 
 ## Task models
 
@@ -57,6 +60,7 @@ All timestamps below are UTC ISO 8601 strings; unknown values are `null`.
 | `thresholds` | Object with configured `soft_switch_at` and `switch_at` used-percentage thresholds |
 | `credits_floor` | Active credit floor: the configured value, or `0` after `credits_floor_until` |
 | `credits_floor_until` | Configured end date of the floor (`YYYY-MM-DD`), or `null` |
+| `duty` | Contents of `~/.codex/duty.json` (`account`, `family`, `since`, `checked_at`, `reason`, `rooms` by family), or `null` without a readable duty record ([accounts.md](accounts.md#duty-account)) |
 
 The JSON includes no tokens, credential paths, or raw account errors.
 

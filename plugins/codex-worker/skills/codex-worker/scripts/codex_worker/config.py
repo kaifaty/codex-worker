@@ -188,6 +188,19 @@ def accounts_config():
             procs.die("claude." + key + " must be a nonempty string or null")
     if type(claude["max_turns"]) is not int or claude["max_turns"] < 1:
         procs.die("claude.max_turns must be a positive integer")
+    duty_settings = cfg.setdefault("duty", {})
+    if not isinstance(duty_settings, dict):
+        procs.die("duty must be an object")
+    duty_settings.setdefault("relative_margin", 25)
+    duty_settings.setdefault("absolute_margin", 100)
+    duty_settings.setdefault("claude_only_task_types", ["visual", "layout"])
+    for key in ("relative_margin", "absolute_margin"):
+        if not result_schema.is_finite_number(duty_settings[key]) or duty_settings[key] < 0:
+            procs.die("duty." + key + " must be a finite nonnegative number")
+    task_types = duty_settings["claude_only_task_types"]
+    if not isinstance(task_types, list) or not all(
+            isinstance(label, str) and re.fullmatch(r"[a-z0-9-]{1,32}", label) for label in task_types):
+        procs.die("duty.claude_only_task_types must be a list of task types (1-32 characters of a-z, 0-9 and '-')")
     if cfg["sandbox"] not in ("off", "workspace"):
         procs.die('sandbox must be "off" or "workspace"')
     if not isinstance(cfg["writable_dirs"], list) or not all(
@@ -258,6 +271,9 @@ def accounts_config():
         home = Path(a["home"]).expanduser().resolve()
         if str(home) in homes:
             procs.die(f"duplicate account home: {home}")
+        weight = a.get("weight", 1)
+        if not result_schema.is_finite_number(weight) or weight <= 0:
+            procs.die("accounts.weight must be a positive finite number")
         a["home"] = str(home)
         names.add(name)
         homes.add(str(home))

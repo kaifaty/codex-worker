@@ -1,7 +1,7 @@
 """Work turns, wrap-up turns and turn execution."""
 import json
 
-from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_runner, clock, config, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
+from . import account_rotation, accounts, budgets, checking, claude_accounts, claude_runner, clock, config, duty, notifications, prompts, publishing, result_schema, task_state, telemetry_log, threads, turn_monitor
 
 
 LIMIT_REASONS = ("usage limit", "authentication failed", "token unavailable")
@@ -258,8 +258,11 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         same_account = {i["name"] for i in infos if current.get("account_id")
                         and i.get("account_id") == current["account_id"]}
         resuming = bool(st.get("thread")) and not reviewing
-        chosen = accounts.available(infos, cfg, same_account if resuming else ())
-        if resuming and current.get("logged_in") and not accounts.exhausted(current, cfg):
+        # New work skips the duty account; a resumed thread keeps its own account.
+        usable = resuming and current.get("logged_in") and not accounts.exhausted(current, cfg)
+        reserved = duty.codex_reserved(infos, cfg, () if usable else same_account if resuming else ())
+        chosen = accounts.available(infos, cfg, (same_account if resuming else set()) | reserved)
+        if usable:
             if (not accounts.exhausted(current, cfg, soft=True) or not chosen
                     or accounts.exhausted(chosen, cfg, soft=True)):
                 chosen = current
@@ -267,11 +270,12 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                 soft_rotation = True
         floor_reason = None
         if not chosen and cfg["credits"]:
-            if current.get("logged_in") and accounts.has_credits(current, cfg):
+            if (current.get("logged_in") and accounts.has_credits(current, cfg)
+                    and (resuming or current.get("name") not in reserved)):
                 chosen = current
             else:
                 floor_reason = accounts.credit_floor_reason(current, cfg) if current.get("logged_in") else None
-                chosen = accounts.credit_account(infos, cfg)
+                chosen = accounts.credit_account(infos, cfg, reserved)
         if stopped():
             return
         if not chosen:
@@ -326,13 +330,15 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
         used_ids = {i.get("account_id") for i in infos if i["name"] in used and i.get("account_id")}
         excluded = used | {i["name"] for i in infos if i.get("account_id") in used_ids}
         if soft:
-            chosen = accounts.available(infos, cfg, excluded)
+            # The current account still works, so a soft switch never moves to the duty account.
+            chosen = accounts.available(infos, cfg, excluded | duty.codex_reserved(infos, cfg))
             if chosen and not accounts.exhausted(chosen, cfg, soft=True):
                 # Keep the local windows until RPC confirms their reset, even if RPC usage lags.
                 soft_visited[account["name"]] = local["limits"]
                 return {"reason": reason, "infos": infos, "chosen": chosen, "soft": True}
             return None
         current["ordinary"] = False
+        excluded |= duty.codex_reserved(infos, cfg, excluded)
         chosen = accounts.available(infos, cfg, excluded) if rotations < len(cfg["accounts"]) else None
         if allow_credits and not chosen and cfg["credits"] and current.get("logged_in"):
             # Each limit sample re-reads the balance, so a live exec on credits stops at the floor.
@@ -458,8 +464,10 @@ def _run_turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn
                           "; ".join("run login " + name for name in names))
                 task_state.save(st)
                 break
+            excluded = {account["name"]}
+            excluded |= duty.codex_reserved(infos, cfg, excluded)
             decision = {"reason": "authentication error", "infos": infos,
-                        "chosen": accounts.available(infos, cfg, {account["name"]})}
+                        "chosen": accounts.available(infos, cfg, excluded)}
         chosen = decision["chosen"]
         if not chosen:
             chosen = account_rotation.wait_for_account(st, decision["infos"], cfg, decision["reason"], stopped, sleep)

@@ -79,7 +79,8 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
     """Retry a limited Claude account before allowing a Codex fallback."""
     attempted = set()
     deadline = None
-    account = claude_review.select_account(cfg, "review", prefer_unused=used_accounts, stopped=stopped)
+    account = claude_review.select_account(cfg, "review", prefer_unused=used_accounts, stopped=stopped,
+                                           task_type=st.get("task_type"))
     while account is not None:
         name = account["name"]
         retry = False
@@ -110,7 +111,8 @@ def claude_review_turn(st, cfg, prompt, stopped, used_accounts):
                     entry["limited_until"] = claude_accounts.mark_limited(
                         name, token_unavailable=response["reason"] == "token unavailable")
                     account = claude_review.select_account(cfg, "review", exclude=attempted,
-                                                           prefer_unused=used_accounts, stopped=stopped)
+                                                           prefer_unused=used_accounts, stopped=stopped,
+                                                           task_type=st.get("task_type"))
                     retry = account is not None
                     entry["retry_account"] = account["name"] if retry else "codex"
             elif response.get("reason"):
