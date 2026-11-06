@@ -1,7 +1,7 @@
 # codex-worker board
 
 A read-only local view of codex-worker tasks and Claude Code sessions from the Claude desktop app,
-with phases, accounts and live activity. The server reads JSON and event logs from disk without
+with phases, accounts, live activity and configured machine metrics. The server reads JSON and event logs from disk without
 importing the plugin or changing source files. REST and WebSocket
 payloads are defined in [CONTRACT.md](CONTRACT.md).
 
@@ -13,8 +13,8 @@ uv run --project board/server codex-worker-board
 
 Open http://localhost:8787. The server listens on `127.0.0.1` by default; CLI options are
 `--host` (default `127.0.0.1`) and `--port` (default `8787`). Requests must use a localhost Host header;
-WebSocket Origins, when present, must also be localhost. The server only reads task files and listens
-on localhost; it has no task control endpoints.
+WebSocket Origins, when present, must also be localhost. The server reads task files and machine
+metrics and listens on localhost; it has no task control endpoints.
 
 The frontend builds into `board/web/dist`, which the server serves with an SPA fallback:
 
@@ -29,6 +29,8 @@ Until that directory exists, `/` returns a short build instruction. The API is a
 | `CODEX_TASK_HOME` | `~/.codex` | Read tasks from `claude-tasks/` and archives from `claude-tasks/.archive/`. Snapshots include at most 50 closed records together, ranked by state mtime. |
 | `BOARD_POLL_SECONDS` | `1.0` | Interval between file mtime and size polls, in seconds. |
 | `BOARD_ACCOUNTS_SECONDS` | `300` | Minimum interval between account subprocess calls, in seconds. |
+| `BOARD_MACHINES_FILE` | `<CODEX_TASK_HOME>/board-machines.json` | Machine configuration; reread when mtime or size changes. Missing means no machines; invalid files preserve the last valid list and expose `config_error`. |
+| `BOARD_MACHINES_SECONDS` | `30` | Interval between parallel machine and optional physical host probe cycles, in seconds. |
 | `BOARD_STALE_DAYS` | `7` | Close non-alive tasks older than this many days by state mtime. Non-alive scouts are always closed; alive tasks are exempt from the age rule. |
 | `BOARD_CLAUDE_DESKTOP_DIR` | `~/Library/Application Support/Claude` | Read desktop metadata from `claude-code-sessions/*/*/local_*.json`. Missing directories are skipped. |
 | `BOARD_CLAUDE_HOME` | `~/.claude` | Read live state from `sessions/<pid>.json` and activity from `projects/*/<cliSessionId>.jsonl`. Key files are never opened. |
@@ -47,7 +49,63 @@ only events from the current busy period are shown. Transcript paths use ASCII l
 cwd encoding. Until a transcript is found, its direct path is checked on every poll and fallback searches
 across project directories run at most once per 60 seconds; a found path is cached.
 
-Run the server tests with temporary task and Claude directories and fake account scripts:
+## Machine metrics
+
+Create the machine configuration outside the public repository, using
+[machines.example.json](machines.example.json) as a fictitious example. The file contains a `machines`
+array. Each machine requires a unique `id` matching `^[a-z0-9-]+$`, a `name`, and exactly one of
+`local: true` or `ssh`. Optional `role` describes the machine; `disks` contains absolute paths and
+defaults to `["/"]`. A VM may include `host: {"name": "Hypervisor", "ssh": "root@hypervisor.example"}`
+to collect its physical host's CPU and memory separately. Every `ssh` must match
+`^[A-Za-z0-9_][A-Za-z0-9_.@:-]*$`; targets beginning with `-` are rejected. Any invalid entry rejects
+the file. The server keeps the last valid configuration and publishes a short `config_error` until
+a corrected file is loaded. Removing the file clears the list without an error.
+
+Every 30 seconds by default, the server runs a standalone Python 3.9-compatible probe locally with
+`python3 -I - <disks…>` or remotely with
+`ssh -o BatchMode=yes -o ConnectTimeout=5 -- <target> python3 -I - <disks…>`, sending the probe source
+through stdin and quoting remote paths. All probes run concurrently with individual 15-second
+timeouts and a 1 MiB output limit. A timed-out process is killed and awaited. The probe only reads
+state: no file writes, service or container control, or sudo. Its external commands use 5-second
+timeouts and disconnected stdin. No SSH connection is attempted unless a target is configured.
+
+Metrics contain OS, CPU core count and load averages, total and available memory, GPU utilization and
+memory, up to five GPU processes using at least 100 MiB each, and total/free bytes for requested disks.
+Linux memory comes from `/proc/meminfo`; macOS memory comes from `sysctl` and `memory_pressure`.
+NVIDIA data comes from `nvidia-smi`, with UUID matching processes to GPUs; Apple GPU utilization comes
+from `ioreg` and uses shared memory. Missing sections are `null` or empty lists. Missing disk paths
+are skipped. Only process basenames or their virtual environment project names are exposed, never
+full executable paths. Untrusted output is validated and strings are limited to 200 characters.
+
+`GET /api/snapshot` includes `machines: {config_error, items}`. Every machine contains its identity,
+`status`, `reasons`, attempt/success timestamps, last error and successful metrics, optional host
+CPU/memory, and up to 120 history points in memory. Successful probes append history with CPU load
+percentage (which can exceed 100%), used-memory percentage and highest GPU utilization; failures
+preserve the last successful metrics and history. Error values are `timeout`, `unreachable` (SSH exit
+255), `bad_output` or `probe_failed`. SSH targets never appear in API or WebSocket data, including
+errors; stderr goes only to server logs. Physical host metrics do not affect machine status.
+
+Status is `unknown` before any attempt, `offline` after a failure without successful data or two
+consecutive failures, otherwise `free`, `busy` or `overloaded` based on the last successful metrics.
+One failure with prior data preserves the computed status and records the error. Thresholds are:
+
+| Metric | `busy` | `overloaded` |
+| --- | --- | --- |
+| CPU load1 / cores | ≥ 0.7 | ≥ 1.5 |
+| Available memory / total | < 25% | < 10% |
+| GPU utilization | ≥ 70% | — |
+| GPU used memory / total | ≥ 60% | — |
+| Disk free space / total | < 15% | < 5% |
+
+The highest severity wins. Reasons use `cpu`, `memory`, `gpu`, `gpu_memory` and `disk:<mount>` for
+matching conditions at that severity or above; `free`, `offline` and `unknown` have no reasons.
+The server sends `{"type": "machines", "machines": Machines}` after each cycle whose data changed,
+ignoring `checked_at` in comparison. The existing frontend ignores the added snapshot field and
+unknown message type. Machine selection and the machine interface are separate work.
+The complete `Metrics`, `Gpu`, `Machine`, `Machines`, host and history types are in
+[CONTRACT.md](CONTRACT.md#types).
+
+Run the server tests with temporary task and Claude directories, fake account scripts and fake SSH:
 
 ```sh
 uv run --project board/server pytest board/server/tests -q
