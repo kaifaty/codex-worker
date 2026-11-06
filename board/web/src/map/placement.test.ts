@@ -122,7 +122,7 @@ describe("islands", () => {
     const { shown, hidden } = islandTasks([...sleeping, task({ slug: "stuck", column: "attention", alive: false, updated_at: 1000 })], "repo");
     expect(shown.map((t) => t.slug)).toContain("stuck");
     expect(hidden).toHaveLength(1);
-    expect(hidden[0].column).toBe("sleeping");
+    expect(hidden[0]?.column).toBe("sleeping");
   });
 
   it("starts on the repository with the most tasks that are not closed", () => {
