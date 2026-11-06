@@ -321,8 +321,13 @@ class DataHomeTests(RotationTestCase):
         for label in ("teamster.board", "teamster.duty"):
             self.assertIn(f"launchctl kickstart -k gui/$(id -u)/{label}", output)
             old_label = label.replace("teamster.", "codex-worker.")
-            self.assertIn(f"launchctl bootout gui/$(id -u)/{old_label}", output)
-            self.assertIn(f"launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist", output)
+            command = "board/server/.venv/bin/teamster-board" if label.endswith(".board") else "teamster duty"
+            self.assertIn("\n".join([
+                f"  launchctl bootout gui/$(id -u)/{old_label}",
+                f"  rm ~/Library/LaunchAgents/{old_label}.plist",
+                f"  {command} plist > ~/Library/LaunchAgents/{label}.plist",
+                f"  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist",
+            ]), output)
         data = self.user / ".teamster"
         self.assertFalse(old_tasks.exists())
         self.assertEqual(os.readlink(self.home / "worktrees"), str(disk))

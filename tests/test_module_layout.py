@@ -15,7 +15,7 @@ import unittest
 SCRIPTS = (Path(__file__).resolve().parents[1]
            / "src")
 PACKAGE_FILE_ALLOWLIST = {"teamster/config.py", "teamster/__main__.py"}
-ENTRYPOINTS = {"worker_entry", "teamster.__main__"}
+ENTRYPOINTS = {"codex_task", "teamster.__main__"}
 # Standalone helpers run by path and never import the package.
 STANDALONE = {"codex_stats.py", "rollout.py", "task_report.py", "turn_log.py", "wait_turn.py"}
 
@@ -352,12 +352,12 @@ def _file_bindings(tree):
 
 def check_layout(scripts):
     """Return file:line diagnostics for the entrypoint and its own package."""
-    paths = ([scripts / "worker_entry.py"] if (scripts / "worker_entry.py").is_file() else [])
+    paths = ([scripts / "codex_task.py"] if (scripts / "codex_task.py").is_file() else [])
     paths += sorted(path for path in (scripts / "teamster").glob("*.py")
                     if path.name not in STANDALONE)
     modules = {}
     for path in paths:
-        module = ("worker_entry" if path.parent == scripts else
+        module = ("codex_task" if path.parent == scripts else
                   "teamster" if path.stem == "__init__" else "teamster." + path.stem)
         modules[module] = path
     findings = []
@@ -367,7 +367,7 @@ def check_layout(scripts):
                 names = ([node.module or ""] if isinstance(node, ast.ImportFrom)
                          else [alias.name for alias in node.names])
                 if (isinstance(node, ast.ImportFrom) and node.level) or any(
-                        name.split(".")[0] in {"worker_entry", "teamster"} for name in names):
+                        name.split(".")[0] in {"codex_task", "teamster"} for name in names):
                     findings.append("%s:%s: standalone-import: %s" % (path, node.lineno, path.name))
     definitions = {}
     edges = {module: [] for module in modules}
@@ -392,7 +392,7 @@ def check_layout(scripts):
         imports_to_check = []
         for node, top in _imports(tree):
             if isinstance(node, ast.ImportFrom):
-                internal = bool(node.level) or (node.module or "").split(".")[0] in {"worker_entry", "teamster"}
+                internal = bool(node.level) or (node.module or "").split(".")[0] in {"codex_task", "teamster"}
                 imports = []
                 if internal:
                     imports = ([(alias, "teamster." + alias.name) for alias in node.names]
@@ -400,7 +400,7 @@ def check_layout(scripts):
                                    or (not node.level and node.module == "teamster")) else None)
             else:
                 imports = [(alias, alias.name) for alias in node.names
-                           if alias.name.split(".")[0] in {"worker_entry", "teamster"}]
+                           if alias.name.split(".")[0] in {"codex_task", "teamster"}]
                 internal = bool(imports)
             for alias in node.names:
                 # The entrypoint exposes package modules for callers and tests.
@@ -470,7 +470,7 @@ def check_layout(scripts):
                     and node.func.id in {"globals", "locals", "vars"}
                     and not node.args and not node.keywords):
                 report(path, node.lineno, "no-dynamic-namespace", node.func.id + "()")
-            if (module != "worker_entry"
+            if (module != "codex_task"
                     and path.relative_to(scripts).as_posix() not in PACKAGE_FILE_ALLOWLIST
                     and isinstance(node, ast.Name)
                     and node.id == "__file__"):
@@ -500,7 +500,7 @@ class ModuleLayoutTests(unittest.TestCase):
     def check_tree(self, files):
         with tempfile.TemporaryDirectory(prefix="codex-module-layout-") as directory:
             root = Path(directory)
-            (root / "worker_entry.py").write_text("", encoding="utf-8")
+            (root / "codex_task.py").write_text("", encoding="utf-8")
             for relative, source in files.items():
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -517,7 +517,7 @@ class ModuleLayoutTests(unittest.TestCase):
         for path in SCRIPTS.rglob("*"):
             if path.is_file() and path.suffix in {".py", ".md"}:
                 source = path.read_text(encoding="utf-8")
-                for forbidden in ("plugins/cache", "CLAUDE_SKILL_DIR", "$T", "worker_entry.py"):
+                for forbidden in ("plugins/cache", "CLAUDE_SKILL_DIR", "$T", "codex_task.py"):
                     self.assertNotIn(forbidden, source, str(path))
         with tempfile.TemporaryDirectory(prefix="codex-layout-help-") as directory:
             environment = dict(os.environ, HOME=directory, CODEX_TASK_HOME=directory,
@@ -724,14 +724,14 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_entrypoint_imports_are_own_imports(self):
         findings = self.check_tree({
-            "worker_entry.py": "value = 1\n",
-            "teamster/a.py": "from worker_entry import value\nvalue\n",
+            "codex_task.py": "value = 1\n",
+            "teamster/a.py": "from codex_task import value\nvalue\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: module-import-only", findings[0])
         findings = self.check_tree({
-            "worker_entry.py": "import teamster.a as worker\n",
-            "teamster/a.py": "import worker_entry as entry\nentry\n",
+            "codex_task.py": "import teamster.a as worker\n",
+            "teamster/a.py": "import codex_task as entry\nentry\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: acyclic-imports", findings[0])
@@ -754,7 +754,7 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_known_module_import_forms_pass(self):
         self.assertEqual(self.check_tree({
-            "worker_entry.py": "import teamster.a as worker\n",
+            "codex_task.py": "import teamster.a as worker\n",
             "teamster/a.py": "from teamster import b\nb\n",
             "teamster/b.py": "import teamster.c as other\nother\n",
             "teamster/c.py": "name = 1\n",
@@ -770,7 +770,7 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_control_flow_targets_are_module_bindings(self):
         self.assertEqual(self.check_tree({
-            "worker_entry.py": ("for item in ():\n    pass\n"
+            "codex_task.py": ("for item in ():\n    pass\n"
                               "with open('unused') as stream:\n    pass\n"
                               "try:\n    pass\nexcept Exception as error:\n    pass\n"
                               "def function():\n    return item, stream, error\n"),
@@ -816,12 +816,12 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_only_entrypoint_package_module_imports_are_reexports(self):
         self.assertEqual(self.check_tree({
-            "worker_entry.py": "from teamster import a\n",
+            "codex_task.py": "from teamster import a\n",
             "teamster/a.py": "",
         }), [])
-        findings = self.check_tree({"worker_entry.py": "import math\n"})
+        findings = self.check_tree({"codex_task.py": "import math\n"})
         self.assertEqual(len(findings), 1, findings)
-        self.assertIn("worker_entry.py:1: unused-import: math", findings[0])
+        self.assertIn("codex_task.py:1: unused-import: math", findings[0])
 
     def test_module_attribute_import_forms_and_nested_reads(self):
         for statement, alias in (

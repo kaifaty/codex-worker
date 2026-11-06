@@ -177,13 +177,15 @@ def cmd_migrate_home(a):
     print("Restart the launchd jobs so they use the new data home:")
     for label in LAUNCHD_LABELS:
         print(f"  launchctl kickstart -k gui/$(id -u)/{label}")
-    print(f"Regenerate printed plists ({config.COMMAND} duty plist, teamster-board plist): "
+    print(f"Regenerate printed plists ({config.COMMAND} duty plist, board/server/.venv/bin/teamster-board plist): "
           "they now set TEAMSTER_HOME.")
     print("Jobs loaded under old codex-worker.* labels need their plists regenerated and reloaded:")
+    print("Run board commands from the board repository checkout after syncing board/server.")
     for label in LAUNCHD_LABELS:
         old_label = label.replace("teamster.", "codex-worker.")
-        command = "teamster-board" if label.endswith(".board") else config.COMMAND + " duty"
+        command = "board/server/.venv/bin/teamster-board" if label.endswith(".board") else config.COMMAND + " duty"
         plist = f"~/Library/LaunchAgents/{label}.plist"
         print(f"  launchctl bootout gui/$(id -u)/{old_label}")
+        print(f"  rm ~/Library/LaunchAgents/{old_label}.plist")
         print(f"  {command} plist > {plist}")
         print(f"  launchctl bootstrap gui/$(id -u) {plist}")

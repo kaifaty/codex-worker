@@ -193,13 +193,16 @@ home again and stops if the home moved or a migration is unfinished; run it agai
 After the move, restart the launchd jobs with
 `launchctl kickstart -k gui/$(id -u)/teamster.board` and
 `launchctl kickstart -k gui/$(id -u)/teamster.duty`. Jobs loaded under old `codex-worker.*`
-labels need their plists regenerated and reloaded:
+labels need their plists regenerated and reloaded. Run the board command from the board repository
+checkout after syncing `board/server`, as described in the [board setup](../../../board/README.md#run-as-a-service):
 
 ```sh
 launchctl bootout gui/$(id -u)/codex-worker.board
-teamster-board plist > ~/Library/LaunchAgents/teamster.board.plist
+rm ~/Library/LaunchAgents/codex-worker.board.plist
+board/server/.venv/bin/teamster-board plist > ~/Library/LaunchAgents/teamster.board.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/teamster.board.plist
 launchctl bootout gui/$(id -u)/codex-worker.duty
+rm ~/Library/LaunchAgents/codex-worker.duty.plist
 teamster duty plist > ~/Library/LaunchAgents/teamster.duty.plist
 launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/teamster.duty.plist
 ```
