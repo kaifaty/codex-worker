@@ -70,7 +70,8 @@ def test_stale_days_environment_reaches_store(tmp_path, monkeypatch):
 def test_rest_contract_files_and_unknown_paths(board):
     client, _, directory, _, _ = board
     snapshot = client.get("/api/snapshot").json()
-    assert set(snapshot) == {"generated_at", "tasks", "accounts"}
+    assert set(snapshot) == {"generated_at", "tasks", "accounts", "machines"}
+    assert snapshot["machines"] == {"config_error": None, "items": []}
     assert isinstance(snapshot["generated_at"], float)
     assert len(snapshot["tasks"]) == 1
     assert set(snapshot["tasks"][0]) == SUMMARY_FIELDS
@@ -213,6 +214,50 @@ def test_session_environment_defaults_and_store_overrides(tmp_path, monkeypatch)
     store = create_app(settings).state.board.store
     assert store.sessions_seconds == 2.5
     assert store.session_stale_hours == 12
+
+
+def test_machine_environment_and_websocket(tmp_path, monkeypatch):
+    monkeypatch.setenv("CODEX_TASK_HOME", str(tmp_path))
+    monkeypatch.delenv("BOARD_MACHINES_FILE", raising=False)
+    monkeypatch.delenv("BOARD_MACHINES_SECONDS", raising=False)
+    defaults = Settings.from_env()
+    assert defaults.machines_seconds == 30
+    assert create_app(defaults).state.board.machines.path == tmp_path / "board-machines.json"
+    config = tmp_path / "machines.json"
+    target = "private-target.example"
+    config.write_text(json.dumps({"machines": [{"id": "worker", "name": "Worker", "ssh": target}]}))
+    fake = tmp_path / "fake-ssh"
+    fake.write_text("#!/usr/bin/env python3\nimport sys\nsys.stdin.read()\n"
+                    f"print({target!r}, file=sys.stderr)\nsys.exit(255)\n")
+    fake.chmod(0o700)
+    accounts = tmp_path / "accounts.py"
+    accounts.write_text("print('{}')\n")
+    monkeypatch.setenv("BOARD_CODEX_TASK", str(accounts))
+    monkeypatch.setenv("BOARD_CLAUDE_HOME", str(tmp_path / "claude"))
+    monkeypatch.setenv("BOARD_CLAUDE_DESKTOP_DIR", str(tmp_path / "desktop"))
+    monkeypatch.setenv("BOARD_MACHINES_FILE", str(config))
+    monkeypatch.setenv("BOARD_MACHINES_SECONDS", "0.05")
+    settings = Settings.from_env()
+    settings.ssh_command = str(fake)
+    assert settings.machines_file == config
+    assert settings.machines_seconds == 0.05
+    application = create_app(settings)
+    with TestClient(application, base_url="http://localhost", headers={"Host": "localhost"}) as client:
+        with client.websocket_connect("/ws") as socket:
+            first = socket.receive_json()
+            assert "machines" in first["snapshot"]
+            # A config error changes the payload even if the first probe already completed.
+            config.write_text('{"machines": [')
+            message = receive_until(socket, "machines")
+            while message["machines"]["config_error"] is None:
+                message = receive_until(socket, "machines")
+            item = message["machines"]["items"][0]
+            assert item["error"] == "unreachable"
+            assert item["status"] == "offline"
+        response = client.get("/api/snapshot")
+        assert target not in response.text
+        assert target not in json.dumps(message)
+        assert response.json()["machines"]["items"][0]["metrics"] is None
 
 
 def test_session_rest_websocket_status_activity_and_removal(tmp_path):
