@@ -46,13 +46,13 @@ const dutyTitle = (duty: DutyInfo) =>
                 <span class="visually-hidden">{{ item.row.executor === "codex" ? "Codex" : "Claude" }}</span>
               </span>
               <span class="name ellipsis" :title="item.row.name">{{ item.row.name }}</span>
-              <span v-if="item.row.duty" class="duty" :title="dutyTitle(item.row.duty)">дежурный</span>
               <span v-if="item.row.weeklyPercent !== null" class="pct num" :class="level(item.row.weeklyPercent)">{{ Math.round(item.row.weeklyPercent) }} %</span>
             </div>
             <div v-if="item.row.weeklyPercent !== null" class="bar" role="img" :aria-label="`Неделя: ${Math.round(item.row.weeklyPercent)} %`">
               <span :class="level(item.row.weeklyPercent)" :style="{ width: `${Math.min(100, Math.max(0, item.row.weeklyPercent))}%` }"></span>
             </div>
             <div class="line sub">
+              <span v-if="item.row.duty" class="duty" :title="dutyTitle(item.row.duty)">дежурный</span>
               <span v-if="item.row.status" class="status" :class="{ bad: item.row.bad }">
                 {{ item.row.status }}<template v-if="item.row.limitedUntil !== null"> · {{ formatUntil(item.row.limitedUntil, now) }}</template>
               </span>
@@ -200,6 +200,7 @@ const dutyTitle = (duty: DutyInfo) =>
 .duty {
   flex: none;
   padding: 0 5px;
+  margin-right: auto;
   border: 1px solid var(--border);
   border-radius: 999px;
   color: var(--muted);

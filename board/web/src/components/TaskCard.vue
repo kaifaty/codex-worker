@@ -288,10 +288,11 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
 
 /* A desktop session: a quieter, flat card with a dashed outline, so it never reads as a task. */
 .card.session {
+  border-color: var(--border-strong);
   border-style: dashed;
   border-left-style: solid;
   border-left-color: color-mix(in srgb, var(--claude) 45%, var(--border));
-  background: var(--surface-3);
+  background: transparent;
   box-shadow: none;
 }
 
