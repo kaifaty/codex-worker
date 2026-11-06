@@ -35,7 +35,7 @@ def fixture_messages(st):
 class ExecutorTests(RotationTestCase):
     def test_executor_selection_stays_in_contract(self):
         violations = []
-        for path in (SCRIPT.parent / "codex_worker").glob("*.py"):
+        for path in SCRIPT.parent.glob("*.py"):
             # Standalone helpers moved into the package directory are not package code.
             if path.name in ("executors.py", "codex_stats.py", "rollout.py", "task_report.py"):
                 continue
@@ -84,7 +84,7 @@ class ExecutorTests(RotationTestCase):
         executor.bind(sys.modules[__name__], turn="fixture_work_turn", last_message="fixture_last_message",
                       messages="fixture_messages", pr_messages="fixture_messages")
         worker.executors.register(executor)
-        for path in (SCRIPT.parent / "codex_worker").glob("*.py"):
+        for path in SCRIPT.parent.glob("*.py"):
             self.assertNotIn(name, path.read_text())
 
         original_spawn = worker.supervisor.spawn

@@ -1,8 +1,8 @@
 # codex-worker
 
 Let the lead plan and review while a worker implements in its own git worktree. The tool runs
-Codex or Claude as the worker and is distributed as a Claude Code plugin. Claude Code is a supported
-lead; the lead writes the brief, reviews the result and decides when to merge.
+Codex or Claude as the worker through an installed Python command. A thin plugin supports Claude Code
+as the lead; the lead writes the brief, reviews the result and decides when to merge.
 
 The lead writes a bounded brief, starts the worker, and waits in the background. Codex commits and pushes;
 the supervisor opens and updates the PR in every mode, using Codex's result title and description.
@@ -11,7 +11,8 @@ fix rounds. The lead checks the final diff and review and handles merging. Optio
 can pause a task until a usage window resets. On GitHub, `--ci` waits for PR checks and gives Codex
 one bounded repair turn with failed-check logs before the lead reviews the final result.
 
-This repository is both the `kaifaty` Claude Code marketplace and the `codex-worker` plugin.
+This repository contains the `codex-worker` command and its thin Claude Code plugin, distributed
+through the `kaifaty` marketplace.
 
 ## Requirements
 
@@ -30,7 +31,7 @@ Choose a model per task with `start --model M`, and a separate Codex review mode
 `--review-model M` on `start`, `say`, or `review`. Follow-ups inherit both choices; `say --model default`
 or `--review-model default` restores the corresponding Codex configuration default. Before choosing,
 use `accounts --json` to read account limits as structured data. See
-[task models and account JSON](plugins/codex-worker/skills/codex-worker/references/settings.md#task-models).
+[task models and account JSON](src/codex_worker/docs/settings.md#task-models).
 
 The worker finds Codex in this order:
 
@@ -41,12 +42,19 @@ The worker finds Codex in this order:
 
 ## Install
 
-In Claude Code:
+1. Install the command:
 
-```text
-/plugin marketplace add kaifaty/codex-worker
-/plugin install codex-worker@kaifaty
-```
+   ```sh
+   uv tool install git+https://github.com/kaifaty/codex-worker
+   codex-worker --version
+   ```
+
+2. Add the plugin for Claude Code:
+
+   ```text
+   /plugin marketplace add kaifaty/codex-worker
+   /plugin install codex-worker@kaifaty
+   ```
 
 Invoke the skill with `/codex-worker:codex-worker`, followed by the task. For example:
 
@@ -55,45 +63,26 @@ Invoke the skill with `/codex-worker:codex-worker`, followed by the task. For ex
 Use the existing filters, add a focused test, and open a PR for review.
 ```
 
-For a manual installation, clone the repository and copy the skill into your personal Claude skills:
+The command also works without Claude Code; run `codex-worker --help` for usage.
+Read the lead guide with `codex-worker docs lead-guide`; `codex-worker docs` lists all documents.
+Use `codex-worker path` to find the installed package directory and its standalone helpers.
 
-```sh
-git clone https://github.com/kaifaty/codex-worker.git
-mkdir -p ~/.claude/skills
-cp -R codex-worker/plugins/codex-worker/skills/codex-worker ~/.claude/skills/
-```
-
-The manually installed skill is invoked as `/codex-worker`. Keep its `scripts/` and `references/`
-directories beside `SKILL.md`.
-
-### Command without Claude Code
-
-The plugin remains the main way to use codex-worker. To run the CLI without Claude Code, install the
-`codex-worker` command:
-
-```sh
-uv tool install git+https://github.com/kaifaty/codex-worker
-codex-worker --help
-```
-
-`codex-worker <command>` replaces `python3 -I "$T" <command>`. Leads other than Claude Code have not
-been verified yet.
+Update with `uv tool upgrade codex-worker` when no tasks are running: supervisors run from the same
+installed files, which an upgrade replaces. The plugin checks that the command is version 1.51.0 or newer.
 
 ## Other leads
 
-Another agent or a human can read the [lead guide](plugins/codex-worker/skills/codex-worker/references/lead-guide.md)
+Another agent or a human can read the [lead guide](src/codex_worker/docs/lead-guide.md)
 and call the CLI directly. Other leads have not been verified yet.
 
 ## A short task cycle
 
-The skill handles these commands for the lead. To run them yourself, set `T` to the installed
-`scripts/codex_task.py`. With the manual installation:
+The skill handles these commands for the lead. To run them yourself:
 
 ```sh
-T="$HOME/.claude/skills/codex-worker/scripts/codex_task.py"
-python3 -I "$T" start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --ci --check "python3 -m unittest tests.test_csv_export"
-python3 -I "$T" wait csv-export
-python3 -I "$T" status csv-export
+codex-worker start csv-export --brief brief.md --max-minutes 45 --max-weekly 10 --review --fix-rounds 2 --ci --check "python3 -m unittest tests.test_csv_export"
+codex-worker wait csv-export
+codex-worker status csv-export
 ```
 
 Use a brief with the change, context, measurable completion conditions, focused checks, and boundaries.
@@ -107,7 +96,7 @@ For GitHub repositories, `start --ci` or `"ci": true` enables CI for the task. F
 the setting and repair-round limit (initially 1); `say --ci` enables it, `say --no-ci` disables it,
 and `say --ci-rounds N` changes the limit. The supervisor waits for the published PR's exact HEAD
 and sends failures to Codex for bounded repairs. See
-[CI details](plugins/codex-worker/skills/codex-worker/references/ci.md).
+[CI details](src/codex_worker/docs/ci.md).
 The lead merges only after `CI … passed` and rechecks `gh pr checks <url>` immediately before merging.
 
 Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
@@ -125,18 +114,18 @@ Check the actual diff, latest review, and rejection reasons: the worker's claims
 Send remaining findings through `say` or record issues after the round limit:
 
 ```sh
-python3 -I "$T" say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
-python3 -I "$T" wait csv-export
+codex-worker say csv-export --file fixes.md --max-minutes 30 --review --fix-rounds 2
+codex-worker wait csv-export
 ```
 
-See [turn outcomes](plugins/codex-worker/skills/codex-worker/references/results.md#turn-outcomes)
+See [turn outcomes](src/codex_worker/docs/results.md#turn-outcomes)
 for stop reasons and the next action.
 
 Codex does not merge. After the result has been reviewed and merged under your repository's rules,
 remove the worktree and archive its threads:
 
 ```sh
-python3 -I "$T" clean csv-export
+codex-worker clean csv-export
 ```
 
 ## Read code with a scout
@@ -147,11 +136,11 @@ verified facts, assumptions, relevant tests, and what it did not inspect. Check 
 only the cited lines.
 
 ```sh
-python3 -I "$T" scout csv-path "Where are export filters applied, and which tests cover them?" --repo .
-python3 -I "$T" wait csv-path
-python3 -I "$T" say csv-path "Does the same path handle empty results?"
-python3 -I "$T" wait csv-path
-python3 -I "$T" clean csv-path
+codex-worker scout csv-path "Where are export filters applied, and which tests cover them?" --repo .
+codex-worker wait csv-path
+codex-worker say csv-path "Does the same path handle empty results?"
+codex-worker wait csv-path
+codex-worker clean csv-path
 ```
 
 Use `--file Q.md` instead of a quoted question, and `--effort E` to override reasoning effort.
@@ -162,7 +151,7 @@ the scout's state and logs and archives its threads, leaving the inspected direc
 
 ## Commands
 
-Run all commands as `python3 -I "$T" <command>`.
+Run all commands as `codex-worker <command>`.
 
 | Command | Purpose |
 |---|---|
@@ -209,8 +198,8 @@ Task JSON includes `task_type` plus `models` and `reasoning_efforts` lists in fi
 Use `report --by effort,task-type` to compare task counts, done fractions, and medians of rounds,
 active minutes, and weekly usage. A task appears once in every observed group; each group includes
 its whole task cost. Missing values, including old journal entries, group as `unknown`.
-See [telemetry](plugins/codex-worker/skills/codex-worker/references/telemetry.md) for metadata and grouping details.
-Empty searches with environment assignments bypass the repeat guard; state and `report --json` retain [turn stop history](plugins/codex-worker/skills/codex-worker/references/telemetry.md#the-journal) across follow-ups.
+See [telemetry](src/codex_worker/docs/telemetry.md) for metadata and grouping details.
+Empty searches with environment assignments bypass the repeat guard; state and `report --json` retain [turn stop history](src/codex_worker/docs/telemetry.md#the-journal) across follow-ups.
 
 Ordinary PRs use one review. For large or risky PRs involving processes, concurrency, or security,
 add `--review-angles auto` to `start`, `say`, or `review`. At 400 changed lines across `base..HEAD` and
@@ -241,9 +230,9 @@ of a passing saved check and may run only focused checks for a specific finding,
 `--max-minutes M` on `start` and `say` caps active implementation time across account rotations;
 reviews and scouts use a separate cap. `--max-weekly P` on `start`, `say`, or `review` caps total task
 usage across phases, follow-ups and accounts. Repeated identical command failures also stop a turn.
-See [budgets](plugins/codex-worker/skills/codex-worker/references/budgets.md),
-[weekly accounting](plugins/codex-worker/skills/codex-worker/references/telemetry.md#weekly-usage-accounting),
-and [turn outcomes and wrap-ups](plugins/codex-worker/skills/codex-worker/references/results.md#turn-outcomes)
+See [budgets](src/codex_worker/docs/budgets.md),
+[weekly accounting](src/codex_worker/docs/telemetry.md#weekly-usage-accounting),
+and [turn outcomes and wrap-ups](src/codex_worker/docs/results.md#turn-outcomes)
 for limits, stop behavior and the next action.
 
 ## Checks after each turn
@@ -317,7 +306,7 @@ A minimal configuration is:
 A settings file containing only language or other preferences does **not** enable automatic account
 monitoring or rotation. The `accounts` command remains available to inspect the current login.
 
-English standing rules are in `scripts/codex_worker/rules.md`; Russian rules are in `scripts/codex_worker/rules.ru.md`.
+English standing rules are in `src/codex_worker/rules.md`; Russian rules are in `src/codex_worker/rules.ru.md`.
 If `~/.codex/codex-worker-rules.md` exists, it replaces both. Use this file for other languages or your
 own working rules. The worker substitutes `{branch}` and `{base}` in the selected rules.
 Scouts use their own read-only instructions instead of these task rules. Account status labels are
@@ -398,7 +387,7 @@ go to the task's `notify.log`; a notification failure does not fail the task.
 If you choose to configure it, sign in to each subscription separately:
 
 ```sh
-python3 -I "$T" login second
+codex-worker login second
 ```
 
 The human completes the device-code sign-in, or uses `--browser`. Additional account homes default to
@@ -437,7 +426,7 @@ Authentication errors get one retry, then rotation; `needs login` means run `log
 
 Use `--reviewer claude` on `start`, `say`, or `review` to review through a pool of isolated Claude
 Code CLI accounts; implementation and fixes remain in Codex. The human adds each subscription with
-`python3 -I "$T" claude-login first`, which runs isolated `claude setup-token`, prompts for the token
+`codex-worker claude-login first`, which runs isolated `claude setup-token`, prompts for the token
 through macOS Keychain, and appends to `claude.accounts` in `~/.codex/codex-worker.json`. Defaults are
 `~/.claude-accounts/first` and the `codex-worker-claude-first` Keychain service. Override them with
 `--config-dir DIR` and `--keychain SERVICE`. Tokens stay out of arguments, settings, state and logs.
@@ -473,24 +462,22 @@ the same.
 `accounts` shows each account's name, both window percentages and resets, and its limit marker.
 `claude-limits.json` stores limits by name; an old unnamed cache belongs to `default`. Review state,
 journal rows and `report --json` include the Claude account name. See
-[account setup](plugins/codex-worker/skills/codex-worker/references/accounts.md#claude-account-pool) and
-[settings](plugins/codex-worker/skills/codex-worker/references/settings.md#claude-accounts).
+[account setup](src/codex_worker/docs/accounts.md#claude-account-pool) and
+[settings](src/codex_worker/docs/settings.md#claude-accounts).
 
 ## Optional desktop-app notifications
 
-For threads created in the Codex desktop app, the bundled `wait-turn.py` can wait for completion
-events written by `turn-log.py`. This optional hook is separate from the task notifications above.
+For threads created in the Codex desktop app, the bundled `wait_turn.py` can wait for completion
+events written by `turn_log.py`. This optional hook is separate from the task notifications above.
 
-To enable that optional hook, set `notify` in your `~/.codex/config.toml` to the installed script's
-absolute path. For a manual skill installation, replace `<home>` below with your home directory;
-TOML does not expand `~` or shell variables here:
+To enable that optional hook, run `codex-worker path` and set `notify` in your
+`~/.codex/config.toml` to that directory's `turn_log.py`. Replace `<package-path>` below with the
+printed absolute path; TOML does not expand shell commands, `~` or variables here:
 
 ```toml
-notify = ["python3", "-I", "<home>/.claude/skills/codex-worker/scripts/turn-log.py"]
+notify = ["python3", "-I", "<package-path>/turn_log.py"]
 ```
 
-For a plugin installation, use the absolute path to `scripts/turn-log.py` inside the installed skill.
-In Claude Code, resolve it as `${CLAUDE_SKILL_DIR}/scripts/turn-log.py`; the config needs the expanded path.
 Preserve any existing notify configuration so you can restore it when removing the hook.
 
 Codex supplies the JSON event argument. The hook appends events to `~/.codex/turn-events.jsonl` and
@@ -498,12 +485,11 @@ chains to Codex Computer Use only if its client exists. It does not automaticall
 other notify hooks.
 
 ```sh
-SCRIPTS="$HOME/.claude/skills/codex-worker/scripts"
-python3 -I "$SCRIPTS/wait-turn.py" <thread-id>
-python3 -I "$SCRIPTS/codex_worker/codex_stats.py" <thread-id>
+python3 -I "$(codex-worker path)/wait_turn.py" <thread-id>
+python3 -I "$(codex-worker path)/codex_stats.py" <thread-id>
 ```
 
-Run `wait-turn.py` in the background from Claude Code. Desktop threads belong to the app; the worker's
+Run `wait_turn.py` in the background from Claude Code. Desktop threads belong to the app; the worker's
 `say` and `exec resume` cannot take over its active writer. A CLI that supports `codex queue` can queue
 a message for an open app thread; successful queueing means stored, so check the rollout for delivery.
 On macOS, that command may be available from the ChatGPT.app bundle listed above.

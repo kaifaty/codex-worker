@@ -2,7 +2,7 @@
 """Compare CLI help bytes with a local Git revision, without starting a task.
 
 Run with python3 -I tests/compare_cli_help.py --base origin/main. The baseline
-plugin tree is extracted to a temporary directory and supplies the command list.
+worker tree is extracted to a temporary directory and supplies the command list.
 """
 
 import argparse
@@ -18,13 +18,19 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = Path("plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
+SCRIPT = Path("src/codex_worker/__main__.py")
+LEGACY_SCRIPT = Path("plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
 
 
 def archive_plugins(root, revision, destination):
     destination = destination.resolve()
+    paths = subprocess.run(
+        ["git", "ls-tree", "--name-only", revision, "--", "plugins", "src"],
+        cwd=str(root), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        text=True,
+    ).stdout.splitlines()
     archive = subprocess.run(
-        ["git", "archive", "--format=tar", revision, "--", "plugins/"],
+        ["git", "archive", "--format=tar", revision, "--"] + paths,
         cwd=str(root), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
     )
     with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tree:
@@ -40,6 +46,13 @@ def archive_plugins(root, revision, destination):
         else:
             # Older Python 3.9 builds do not have extraction filters.
             tree.extractall(str(destination))
+
+
+def entrypoint(directory):
+    for path in (SCRIPT, LEGACY_SCRIPT):
+        if (directory / path).is_file():
+            return directory / path
+    raise ValueError("worker entrypoint not found in " + str(directory))
 
 
 def help_environment(directory):
@@ -64,11 +77,22 @@ def help_environment(directory):
 
 def run_help(script, command, environment, directory):
     # -B also keeps future package imports from writing bytecode in plugins/.
-    return subprocess.run(
+    result = subprocess.run(
         [sys.executable, "-I", "-B", str(script)] + list(command) + ["--help"],
         cwd=str(directory), env=environment, stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30,
     )
+    for stream in ("stdout", "stderr"):
+        output = getattr(result, stream)
+        # argparse aligns wrapped usage to the program name. Replacing the
+        # old name also removes its extra column from usage continuations.
+        usage, separator, rest = output.partition(b"\n\n")
+        if b"codex_task.py" in usage:
+            usage = b"\n".join(line[1:] if line.startswith(b" ") else line
+                                for line in usage.split(b"\n"))
+        output = usage + separator + rest
+        setattr(result, stream, output.replace(b"codex_task.py", b"codex-worker"))
+    return result
 
 
 def commands_from_help(output):
@@ -93,7 +117,7 @@ def compare(revision, root=None):
         baseline.mkdir()
         archive_plugins(root, revision, baseline)
         environment = help_environment(directory)
-        original = run_help(baseline / SCRIPT, (), environment, directory)
+        original = run_help(entrypoint(baseline), (), environment, directory)
         if original.returncode:
             raise ValueError("baseline --help exited {}: {!r}".format(
                 original.returncode, original.stderr))
@@ -101,8 +125,8 @@ def compare(revision, root=None):
         differences = []
         for command in commands:
             before = (original if not command else run_help(
-                baseline / SCRIPT, command, environment, directory))
-            after = run_help(root / SCRIPT, command, environment, directory)
+                entrypoint(baseline), command, environment, directory))
+            after = run_help(entrypoint(root), command, environment, directory)
             if (before.stdout, before.stderr, before.returncode) != (
                     after.stdout, after.stderr, after.returncode):
                 differences.append((command, before, after))
@@ -110,7 +134,7 @@ def compare(revision, root=None):
 
 
 def print_difference(command, before, after):
-    label = " ".join(("codex_task.py",) + command + ("--help",))
+    label = " ".join(("codex-worker",) + command + ("--help",))
     print("FAIL: " + label)
     if before.returncode != after.returncode:
         print("exit code: {} -> {}".format(before.returncode, after.returncode))

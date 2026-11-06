@@ -43,16 +43,19 @@ Layer 11:
 Layer 12:
     cli (implemented): argument types, option registry, dispatch, and command table.
 Entrypoints:
-    codex_task.py beside the package starts the plugin; __main__ (implemented)
-    starts the installed codex-worker command. Both import the same modules.
+    __main__ (implemented) starts the installed codex-worker command and runs
+    directly by path with isolated Python.
 Standalone files:
-    rollout.py, task_report.py and codex_stats.py run by path and never import
-    the package; rules.md and rules.ru.md are the standing rules.
+    rollout.py, task_report.py, codex_stats.py, turn_log.py and wait_turn.py
+    run by path and never import the package; rules.md and rules.ru.md are the
+    standing rules.
 
 Import own modules as whole modules at module top, using ``from . import name``
 in the package and ``from codex_worker import name`` in the entrypoints. Access
 owned definitions through their module so patches reach every caller. Lower
 layers never import higher layers, imports remain acyclic, and package modules
 never import an entrypoint. Do not rebind module aliases or use dynamic
-namespaces. Only config.py may use __file__; usage text stays in cli.py.
+namespaces. Only config.py and __main__.py may use __file__; usage text stays in cli.py.
 """
+
+__version__ = "1.51.0"

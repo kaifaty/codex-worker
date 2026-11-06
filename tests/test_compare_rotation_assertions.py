@@ -9,7 +9,7 @@ import unittest
 
 
 COMPARATOR = Path(__file__).with_name("compare_rotation_assertions.py")
-SCRIPTS = Path("plugins/codex-worker/skills/codex-worker/scripts")
+SCRIPTS = Path("src")
 BEFORE = '''\
 class Example:
     def helper(self):

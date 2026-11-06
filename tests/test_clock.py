@@ -18,7 +18,7 @@ from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
+          / "src/codex_worker/__main__.py")
 CHILD = WORKER_BOOTSTRAP + """
 import json
 import sys

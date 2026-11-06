@@ -1,14 +1,14 @@
 """Worker settings, script paths and polling intervals."""
 import datetime
-import importlib.metadata
 import json
 import os
 import re
 import runpy
 import shutil
-import sys
 import time
 from pathlib import Path
+
+import codex_worker
 
 from . import executors, procs, result_schema
 
@@ -19,16 +19,10 @@ CODEX_HOME = Path(os.environ.get("CODEX_TASK_HOME", str(Path.home() / ".codex"))
 TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
 PACKAGE = Path(__file__).absolute().parent
-# The plugin layout keeps the codex_task.py entrypoint beside the package; an
-# installed package starts its own __main__.py and has no plugin directory.
-PLUGIN_LAYOUT = (PACKAGE.parent / "codex_task.py").is_file()
-SCRIPT = PACKAGE.parent / "codex_task.py" if PLUGIN_LAYOUT else PACKAGE / "__main__.py"
+SCRIPT = PACKAGE / "__main__.py"
 SCRIPT_RESOLVED = SCRIPT.resolve()
-# How hints name the command: the plugin script path or the installed console command.
-COMMAND = str(SCRIPT) if PLUGIN_LAYOUT else "codex-worker"
-SKILL = SCRIPT_RESOLVED.parent.parent if PLUGIN_LAYOUT else None
-PLUGIN = SKILL.parent.parent if PLUGIN_LAYOUT else None
-# Standalone helpers and standing rules live in the package directory in both layouts.
+COMMAND = "codex-worker"
+# Standalone helpers and standing rules live in the package directory.
 STATS = PACKAGE.resolve() / "codex_stats.py"
 ROLLOUT = runpy.run_path(str(PACKAGE / "rollout.py"))
 REPORT = PACKAGE / "task_report.py"
@@ -57,48 +51,8 @@ GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 
 
 def plugin_version():
-    """The plugin version, or the installed package version outside the plugin."""
-    if not PLUGIN_LAYOUT:
-        try:
-            return importlib.metadata.version("codex-worker")
-        except importlib.metadata.PackageNotFoundError:
-            return None
-    try:
-        return json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
-    except (OSError, ValueError, KeyError):
-        return None
-
-
-def version_tuple(version):
-    if isinstance(version, str) and re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", version):
-        return tuple(map(int, version.split(".")))
-    return None
-
-
-def warn_plugin_version(task_versions=()):
-    if not PLUGIN_LAYOUT:
-        return
-    current = plugin_version()
-    current_tuple = version_tuple(current)
-    if current_tuple is None or version_tuple(PLUGIN.name) != current_tuple:
-        return
-    latest, script = current, SCRIPT_RESOLVED
-    try:
-        for directory in PLUGIN.parent.iterdir():
-            version = version_tuple(directory.name)
-            candidate = directory / SCRIPT_RESOLVED.relative_to(PLUGIN)
-            if version and version > version_tuple(latest) and candidate.is_file():
-                latest, script = directory.name, candidate
-    except OSError:
-        return
-    if latest != current:
-        print(f"== codex-worker {current} is running, {latest} is installed: T={script}", file=sys.stderr)
-        return
-    for version in task_versions:
-        parsed = version_tuple(version)
-        if parsed and parsed < current_tuple:
-            print(f"== codex-worker task started with {version}, {current} is running: T={script}", file=sys.stderr)
-            return
+    """The package version recorded in the existing task state field."""
+    return codex_worker.__version__
 
 
 def resolve_codex():

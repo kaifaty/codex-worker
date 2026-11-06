@@ -17,7 +17,7 @@ from worker_loader import load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
+          / "src/codex_worker/__main__.py")
 
 
 def literal_mapping_keys(node):
@@ -101,7 +101,7 @@ st[dynamic_key] = 1
         })
 
     def test_registry_matches_every_literal_root_state_key(self):
-        sources = [SCRIPT] + sorted(SCRIPT.with_name("codex_worker").glob("*.py"))
+        sources = sorted(SCRIPT.parent.glob("*.py"))
         used = set().union(*(state_root_keys(ast.parse(path.read_text(encoding="utf-8")))
                              for path in sources))
         registered = set(self.worker.task_state.STATE_FIELDS)

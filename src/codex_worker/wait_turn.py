@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Block until the next Codex turn of one thread finishes, then print its record and exit.
 
-Reads ~/.codex/turn-events.jsonl, written by turn-log.py from Codex's `notify`.
-Usage: wait-turn.py <thread-id> [--follow]
+Reads ~/.codex/turn-events.jsonl, written by turn_log.py from Codex's `notify`.
+Usage: wait_turn.py <thread-id> [--follow]
   default   exit after the first new turn of that thread (for a background Bash command);
   --follow  print every new turn of that thread and never exit (for a Monitor).
 """

@@ -7,7 +7,6 @@ import json
 import os
 import plistlib
 import shlex
-import shutil
 import subprocess
 import sys
 import time
@@ -18,7 +17,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from rotation_support import PYTHON, SCRIPT, RotationTestCase
-from worker_loader import WORKER_BOOTSTRAP
+from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 TEST_TOKEN = "fixture-claude-reviewer-oauth-secret"
@@ -1816,20 +1815,10 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(log.read_text(), "{}\n")
         self.assertEqual(self.cli("duty", "status"), "no duty account: duty.json is absent\n")
 
-        plugin, cache = SCRIPT.parents[3], self.root / "plugin-cache" / "codex-worker"
-        relative = SCRIPT.relative_to(plugin)
-        shutil.copytree(plugin, cache / "1.9.0")
-        stub = ("import json, os, sys\nfrom pathlib import Path\n"
-                "Path(os.environ['CODEX_TASK_HOME'], 'launched.json').write_text(json.dumps("
-                "{'script': __file__, 'argv': sys.argv[1:], 'isolated': sys.flags.isolated}))\n")
-        for version in ("1.10.0", "1.2.0", "2.0", "9.9.9-beta"):
-            (cache / version / relative).parent.mkdir(parents=True)
-            (cache / version / relative).write_text(stub)
-        (cache / "3.0.0").mkdir()
         launchctl = self.root / "launchctl"
         launchctl.write_text("#!/bin/sh\ntouch " + shlex.quote(str(self.root / "launchctl-called")) + "\n")
         launchctl.chmod(0o700)
-        result = subprocess.run([PYTHON, "-I", str(cache / "1.9.0" / relative), "duty", "plist", "--minutes", "15"],
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT), "duty", "plist", "--minutes", "15"],
                                 cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         job = plistlib.loads(result.stdout.encode())
@@ -1840,11 +1829,21 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(environment["CODEX_TASK_HOME"], str(self.home))
         for directory in ("/opt/homebrew/bin", str(home / ".local/bin"), "/usr/bin"):
             self.assertIn(directory, environment["PATH"].split(os.pathsep))
-        launched = subprocess.run(job["ProgramArguments"], cwd=self.root, env=dict(environment, HOME=str(home)),
-                                  text=True, capture_output=True, timeout=30)
-        self.assertEqual(launched.returncode, 0, launched.stderr)
-        self.assertEqual(json.loads((self.home / "launched.json").read_text()), {
-            "script": str(cache / "1.10.0" / relative), "argv": ["duty", "tick"], "isolated": 1})
+        installed = Path(PYTHON).parent / "codex-worker"
+        expected = ([str(installed), "duty", "tick"] if installed.is_file()
+                    else [PYTHON, "-I", str(SCRIPT), "duty", "tick"])
+        self.assertEqual(job["ProgramArguments"], expected)
+        worker = load_worker(self.env, name="duty_plist_worker")
+        interpreter = self.root / "venv" / "bin" / "python"
+        interpreter.parent.mkdir(parents=True)
+        with mock.patch.object(worker.commands.sys, "executable", str(interpreter)):
+            fallback = worker.commands.duty_launchd_plist(15)
+            self.assertEqual(fallback["ProgramArguments"],
+                             [str(interpreter), "-I", str(SCRIPT), "duty", "tick"])
+            installed = interpreter.with_name("codex-worker")
+            installed.write_text("#!/bin/sh\n")
+            stable = worker.commands.duty_launchd_plist(15)
+            self.assertEqual(stable["ProgramArguments"], [str(installed), "duty", "tick"])
         self.assertFalse((self.root / "launchctl-called").exists())
         self.assertFalse((home / "Library").exists())
 

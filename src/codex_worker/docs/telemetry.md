@@ -31,8 +31,8 @@ No prompts or additional command output are stored in the journal.
 to each task. Unknown model or effort values appear as null. Older rows without these fields remain readable.
 
 ```sh
-python3 -I "$T" report --by effort,task-type
-python3 -I "$T" report --by model --since 30d --repo example --json
+codex-worker report --by effort,task-type
+codex-worker report --by model --since 30d --repo example --json
 ```
 
 `--by` accepts `task-type`, `effort`, `model`, `executor`, or `reviewer`, combined with commas. It uses the
@@ -47,8 +47,8 @@ contributes its full cost to each, so group counts and costs are not additive.
 ## Compare executors and reviewers
 
 ```sh
-python3 -I "$T" report --by executor --since 30d
-python3 -I "$T" report --by executor,reviewer,task-type
+codex-worker report --by executor --since 30d
+codex-worker report --by executor,reviewer,task-type
 ```
 
 `executor` is the `provider` of the task's work phases: `claude` for the Claude account pool
@@ -85,8 +85,8 @@ compare weekly percentages only within one provider and plan size.
 ## Lead verdicts
 
 ```sh
-python3 -I "$T" verdict SLUG accepted
-python3 -I "$T" verdict SLUG revised --note "renamed the option"
+codex-worker verdict SLUG accepted
+codex-worker verdict SLUG revised --note "renamed the option"
 ```
 
 Record a verdict when the work is merged or dropped:

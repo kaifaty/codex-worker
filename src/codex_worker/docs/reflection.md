@@ -49,7 +49,7 @@ A task that finished `done` with a passing check and at most P3 findings needs n
 ## Where a lesson goes
 
 - `invariant`, how Codex works in any repository: `~/.codex/AGENTS.md`, or the standing rules
-  (`scripts/codex_worker/rules*.md`) when the supervisor's contract changes.
+  (`src/codex_worker/rules*.md`) when the supervisor's contract changes.
 - `domain`, one repository: its `AGENTS.md`, a skill, a script or a check there.
 - A lesson about one brief only goes nowhere.
 

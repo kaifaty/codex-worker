@@ -19,6 +19,7 @@ from worker_loader import load_worker
 
 ROOT = Path(__file__).resolve().parents[1]
 SKILL = ROOT / "plugins/codex-worker/skills/codex-worker"
+PACKAGE = ROOT / "src/codex_worker"
 
 
 class LeadRoleTests(unittest.TestCase):
@@ -57,7 +58,7 @@ class LeadRoleTests(unittest.TestCase):
                             worker.commands.cmd_start(args)
                             st = worker.task_state.load(slug)
                             task = worker.config.TASKS / slug
-                            rules = SKILL / "scripts/codex_worker" / ("rules.ru.md" if language == "ru" else "rules.md")
+                            rules = PACKAGE / ("rules.ru.md" if language == "ru" else "rules.md")
                             self.assertEqual(worker.sandboxing.rules_path(cfg), rules)
                             work = (task / "brief.md").read_text(encoding="utf-8")
                             self.assertIn("ведущий" if language == "ru" else "the lead", work)
@@ -102,12 +103,12 @@ class LeadRoleTests(unittest.TestCase):
 
     def test_lead_documents_and_relative_links(self):
         skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
-        guide = (SKILL / "references/lead-guide.md").read_text(encoding="utf-8")
+        guide = (PACKAGE / "docs/lead-guide.md").read_text(encoding="utf-8")
         self.assertLessEqual(len(skill.splitlines()), 45)
         self.assertNotIn("CLAUDE_SKILL_DIR", guide)
         self.assertNotIn("/code-review", guide)
-        paths = ([ROOT / "README.md", SKILL / "SKILL.md"] + sorted((SKILL / "references").glob("*.md"))
-                 + sorted((SKILL / "scripts/codex_worker").glob("*.md")))
+        paths = ([ROOT / "README.md", SKILL / "SKILL.md"] + sorted((PACKAGE / "docs").glob("*.md"))
+                 + sorted(PACKAGE.glob("*.md")))
         for path in paths:
             text = path.read_text(encoding="utf-8")
             for target in re.findall(r"\[[^\]\n]+\]\(([^)\s]+)\)", text):

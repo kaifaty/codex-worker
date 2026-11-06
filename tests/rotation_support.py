@@ -25,8 +25,8 @@ from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "plugins" / "codex-worker" / "skills" / "codex-worker"
-SCRIPT = SKILL / "scripts" / "codex_task.py"
+PACKAGE = ROOT / "src" / "codex_worker"
+SCRIPT = PACKAGE / "__main__.py"
 PYTHON = sys.executable
 IMPOSSIBLE_PID = 2 ** 31 - 1
 

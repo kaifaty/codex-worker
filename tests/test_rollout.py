@@ -7,7 +7,7 @@ import unittest
 from pathlib import Path
 
 
-MODULE = Path(__file__).resolve().parents[1] / "plugins/codex-worker/skills/codex-worker/scripts/codex_worker/rollout.py"
+MODULE = Path(__file__).resolve().parents[1] / "src/codex_worker/rollout.py"
 
 
 class RolloutTests(unittest.TestCase):

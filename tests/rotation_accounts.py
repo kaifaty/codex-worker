@@ -70,12 +70,12 @@ class AccountAuthTests(RotationTestCase):
             for arguments in (("claude-login", "second"),
                               ("claude-login", "third", "--config-dir", str(custom),
                                "--keychain", "fixture-custom-service")):
-                with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py"] + list(arguments)):
+                with mock.patch.object(worker.cli.sys, "argv", ["codex-worker"] + list(arguments)):
                     worker.cli.main()
             worker.claude_accounts.mark_limited("second", token_unavailable=True)
             self.assertTrue(worker.claude_accounts.token_marked(worker.claude_accounts.read_limits()["second"]))
             self.assertTrue(worker.claude_accounts.limited(worker.claude_accounts.read_limits()["second"]))
-            with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "second"]):
+            with mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-login", "second"]):
                 worker.cli.main()
         settings = json.loads(path.read_text())
         self.assertEqual(settings["language"], "en")
@@ -116,7 +116,7 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.claude_review, "probe", return_value=None), \
                 mock.patch.object(worker.commands, "open", create=True,
                                   side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
-                mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "second"]), \
+                mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-login", "second"]), \
                 capture_descriptors():
             worker.cli.main()
         self.assertEqual(json.loads(path.read_text())["claude"], {
@@ -355,7 +355,7 @@ class AccountAuthTests(RotationTestCase):
                 mock.patch.object(worker.claude_review.subprocess.Popen, "communicate", new=communicate), \
                 mock.patch.object(worker.claude_review.subprocess, "run",
                                   wraps=worker.claude_review.subprocess.run) as launched, \
-                mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-probe", "probe"]), \
+                mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-probe", "probe"]), \
                 redirect_stdout(output), redirect_stderr(errors), self.assertRaises(SystemExit) as stopped:
             worker.cli.main()
         self.assertEqual(stopped.exception.code, 1)
@@ -381,7 +381,7 @@ class AccountAuthTests(RotationTestCase):
                 with mock.patch.dict(os.environ, self.env, clear=True), \
                         mock.patch.object(worker.commands, "open", create=True,
                                           side_effect=lambda path, mode, **kwargs: terminal.open(mode, **kwargs)), \
-                        mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-login", "probe"]), \
+                        mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-login", "probe"]), \
                         redirect_stdout(output), redirect_stderr(errors):
                     if failure:
                         with self.assertRaises(SystemExit) as stopped:
@@ -1365,7 +1365,7 @@ class AccountAuthTests(RotationTestCase):
         worker.claude_accounts.save_limits("first", limits)
         worker.claude_accounts.save_limits("second", {"status": "rejected", "resetsAt": self.reset})
         before = worker.claude_accounts.read_limits()
-        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-rename", "first", "renamed"]), \
+        with mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-rename", "first", "renamed"]), \
                 mock.patch("builtins.print"):
             worker.cli.main()
         settings["claude"]["accounts"][0] = dict(original, name="renamed")
@@ -1386,7 +1386,7 @@ class AccountAuthTests(RotationTestCase):
                                   ("first", "second", "already exists"),
                                   ("first", "Invalid_Name", "only a-z")):
             with self.subTest(old=old, new=new), \
-                    mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-rename", old, new]), \
+                    mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-rename", old, new]), \
                     self.assertRaisesRegex(SystemExit, message):
                 worker.cli.main()
             self.assertEqual((path.read_text(), limits_path.read_text()), before)
@@ -1401,7 +1401,7 @@ class AccountAuthTests(RotationTestCase):
             "five_hour": {"utilization": 0.5, "resetsAt": self.reset}}}
         worker.config.TASKS.mkdir(parents=True, exist_ok=True)
         (worker.config.TASKS / "claude-limits.json").write_text(json.dumps(limits))
-        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-rename", "default", "renamed"]), \
+        with mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-rename", "default", "renamed"]), \
                 mock.patch("builtins.print"):
             worker.cli.main()
         saved = json.loads(path.read_text())
@@ -1426,7 +1426,7 @@ class AccountAuthTests(RotationTestCase):
         worker.claude_accounts.save_limits("first", {"status": "allowed"})
         worker.claude_accounts.save_limits("second", {"status": "rejected", "resetsAt": self.reset})
         retained_limits = worker.claude_accounts.read_limits()["second"]
-        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "first"]), \
+        with mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-remove", "first"]), \
                 mock.patch.object(worker.commands.subprocess, "run") as launched, \
                 mock.patch.object(worker.commands.subprocess, "Popen") as spawned, \
                 mock.patch("builtins.print") as output:
@@ -1440,7 +1440,7 @@ class AccountAuthTests(RotationTestCase):
         printed = "\n".join(str(call.args[0]) for call in output.call_args_list)
         self.assertIn(str(directory), printed)
         self.assertIn(removed["token_keychain"], printed)
-        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "second"]), \
+        with mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-remove", "second"]), \
                 self.assertRaisesRegex(SystemExit, "switch reviewer to codex"):
             worker.cli.main()
         self.assertEqual(json.loads(path.read_text()), settings)
@@ -1454,7 +1454,7 @@ class AccountAuthTests(RotationTestCase):
         path.write_text(json.dumps(settings))
         worker.claude_accounts.save_limits("default", {"status": "allowed"})
         saved_limits = worker.claude_accounts.read_limits()
-        with mock.patch.object(worker.cli.sys, "argv", ["codex_task.py", "claude-remove", "default"]), \
+        with mock.patch.object(worker.cli.sys, "argv", ["codex-worker", "claude-remove", "default"]), \
                 self.assertRaisesRegex(SystemExit, "switch reviewer to codex"):
             worker.cli.main()
         self.assertEqual(json.loads(path.read_text()), settings)

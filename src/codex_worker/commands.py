@@ -23,7 +23,6 @@ def main_repo(path):
 
 
 def cmd_start(a):
-    config.warn_plugin_version()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
         procs.die("slug: 2-41 chars of a-z, 0-9 and '-'")
     cfg = config.accounts_config()
@@ -117,7 +116,6 @@ def require_idle(st):
 
 
 def cmd_scout(a):
-    config.warn_plugin_version()
     if not re.fullmatch(r"[a-z0-9][a-z0-9-]{1,40}", a.slug):
         procs.die("slug: 2-41 chars of a-z, 0-9 and '-'")
     cfg = config.accounts_config()
@@ -148,7 +146,6 @@ def cmd_scout(a):
 
 
 def cmd_say(a):
-    config.warn_plugin_version()
     st = task_state.load(a.slug)
     scouting = st.get("kind") == "scout"
     angles = getattr(a, "review_angles", None)
@@ -211,7 +208,6 @@ def cmd_say(a):
 
 
 def cmd_review(a):
-    config.warn_plugin_version()
     st = task_state.load(a.slug)
     if st.get("kind") == "scout":
         procs.die("scout is read-only; review is not supported")
@@ -279,7 +275,6 @@ def describe(st, detail):
 def cmd_status(a):
     states = ([task_state.load(a.slug)] if a.slug else
               [task_state.load(p.parent.name) for p in sorted(config.TASKS.glob("*/state.json"))])
-    config.warn_plugin_version(st.get("plugin_version") for st in states)
     for st in states:
         print(describe(st, bool(a.slug)))
 
@@ -547,22 +542,6 @@ def print_accounts(infos, cfg, duty_record=None):
 
 
 DUTY_LAUNCHD_LABEL = "codex-worker.duty"
-# Runs the newest installed plugin version at every start, so the job survives updates.
-DUTY_LAUNCHER = r"""import os, re, sys
-parent, relative, fallback = sys.argv[1:4]
-newest, script = None, fallback
-try:
-    names = os.listdir(parent)
-except OSError:
-    names = []
-for name in names:
-    candidate = os.path.join(parent, name, relative)
-    if re.fullmatch(r"[0-9]+[.][0-9]+[.][0-9]+", name) and os.path.isfile(candidate):
-        version = tuple(int(part) for part in name.split("."))
-        if newest is None or version > newest:
-            newest, script = version, candidate
-os.execv(sys.executable, [sys.executable, "-I", script, "duty", "tick"])
-"""
 
 
 def duty_launchd_plist(minutes):
@@ -574,11 +553,10 @@ def duty_launchd_plist(minutes):
         if os.environ.get(key):
             environment[key] = os.environ[key]
     log = str(config.CODEX_HOME / "duty-launchd.log")
-    if config.PLUGIN_LAYOUT:
-        program = ["/usr/bin/env", "python3", "-I", "-c", DUTY_LAUNCHER, str(config.PLUGIN.parent),
-                   str(config.SCRIPT_RESOLVED.relative_to(config.PLUGIN)), str(config.SCRIPT_RESOLVED)]
+    command = Path(sys.executable).parent / "codex-worker"
+    if command.is_file():
+        program = [str(command), "duty", "tick"]
     else:
-        # An installed package runs its own interpreter and entrypoint directly.
         program = [sys.executable, "-I", str(config.SCRIPT_RESOLVED), "duty", "tick"]
     return {"Label": DUTY_LAUNCHD_LABEL,
             "ProgramArguments": program,
@@ -810,3 +788,18 @@ def cmd_claude_login(a):
     claude_accounts.clear_limits(a.name)
     print(f"Claude account {a.name} saved")
     cmd_claude_probe(a)
+
+
+def cmd_docs(a):
+    directory = config.PACKAGE / "docs"
+    names = sorted(path.stem for path in directory.glob("*.md"))
+    if a.name is None:
+        print("\n".join(names))
+    elif a.name in names:
+        sys.stdout.write((directory / (a.name + ".md")).read_text(encoding="utf-8"))
+    else:
+        procs.die(f"unknown document {a.name!r}; run codex-worker docs to list documents")
+
+
+def cmd_path(a):
+    print(config.PACKAGE)

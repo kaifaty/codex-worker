@@ -8,7 +8,7 @@ from unittest import mock
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
+          / "src/codex_worker/__main__.py")
 LOADER_PATH = Path(__file__).resolve()
 # run_path works in isolated subprocesses, where tests is absent from sys.path.
 WORKER_BOOTSTRAP = ("import runpy\nload_worker = runpy.run_path(" + repr(str(LOADER_PATH))
