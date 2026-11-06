@@ -1,5 +1,6 @@
 """Worker settings, script paths and polling intervals."""
 import datetime
+import importlib.metadata
 import json
 import os
 import re
@@ -17,13 +18,20 @@ CODEX = {"path": os.environ.get("CODEX_TASK_CODEX")}
 CODEX_HOME = Path(os.environ.get("CODEX_TASK_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
 TASKS = CODEX_HOME / "claude-tasks"
 WORKTREES = CODEX_HOME / "worktrees"
-SCRIPT = Path(__file__).absolute().parent.parent / "codex_task.py"
+PACKAGE = Path(__file__).absolute().parent
+# The plugin layout keeps the codex_task.py entrypoint beside the package; an
+# installed package starts its own __main__.py and has no plugin directory.
+PLUGIN_LAYOUT = (PACKAGE.parent / "codex_task.py").is_file()
+SCRIPT = PACKAGE.parent / "codex_task.py" if PLUGIN_LAYOUT else PACKAGE / "__main__.py"
 SCRIPT_RESOLVED = SCRIPT.resolve()
-SKILL = SCRIPT_RESOLVED.parent.parent
-PLUGIN = SKILL.parent.parent
-STATS = SCRIPT_RESOLVED.parent / "codex-stats.py"
-ROLLOUT = runpy.run_path(str(SCRIPT.with_name("rollout.py")))
-REPORT = SCRIPT.with_name("task_report.py")
+# How hints name the command: the plugin script path or the installed console command.
+COMMAND = str(SCRIPT) if PLUGIN_LAYOUT else "codex-worker"
+SKILL = SCRIPT_RESOLVED.parent.parent if PLUGIN_LAYOUT else None
+PLUGIN = SKILL.parent.parent if PLUGIN_LAYOUT else None
+# Standalone helpers and standing rules live in the package directory in both layouts.
+STATS = PACKAGE.resolve() / "codex_stats.py"
+ROLLOUT = runpy.run_path(str(PACKAGE / "rollout.py"))
+REPORT = PACKAGE / "task_report.py"
 # Tests can shorten polling without changing the default CLI intervals.
 RATE_POLL_SECONDS = float(os.environ.get("CODEX_TASK_RATE_POLL_SECONDS", "30"))
 ROLLOUT_SEARCH_SECONDS = float(os.environ.get("CODEX_TASK_ROLLOUT_SEARCH_SECONDS", "5"))
@@ -49,6 +57,12 @@ GIT = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
 
 
 def plugin_version():
+    """The plugin version, or the installed package version outside the plugin."""
+    if not PLUGIN_LAYOUT:
+        try:
+            return importlib.metadata.version("codex-worker")
+        except importlib.metadata.PackageNotFoundError:
+            return None
     try:
         return json.loads((PLUGIN / ".claude-plugin/plugin.json").read_text(encoding="utf-8"))["version"]
     except (OSError, ValueError, KeyError):
@@ -62,6 +76,8 @@ def version_tuple(version):
 
 
 def warn_plugin_version(task_versions=()):
+    if not PLUGIN_LAYOUT:
+        return
     current = plugin_version()
     current_tuple = version_tuple(current)
     if current_tuple is None or version_tuple(PLUGIN.name) != current_tuple:

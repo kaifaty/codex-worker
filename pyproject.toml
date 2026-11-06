@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "codex-worker"
+# Keep equal to plugins/codex-worker/.claude-plugin/plugin.json.
+version = "1.50.0"
+description = "Run Codex or Claude work turns in isolated git worktrees, with review, checks and subscription rotation."
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [{name = "kaifaty"}]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/kaifaty/codex-worker"
+
+[project.scripts]
+codex-worker = "codex_worker.__main__:cli.main"
+
+[tool.setuptools]
+# The plugin installs from its own folder, so the package stays inside it.
+package-dir = {"codex_worker" = "plugins/codex-worker/skills/codex-worker/scripts/codex_worker"}
+packages = ["codex_worker"]
+
+[tool.setuptools.package-data]
+codex_worker = ["rules.md", "rules.ru.md"]

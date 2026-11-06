@@ -27,4 +27,4 @@ Worker prompts and `references/lead-guide.md` do not name the lead Claude.
 
 ## Releases
 
-- Bump `version` in `plugins/codex-worker/.claude-plugin/plugin.json` in every PR that changes the plugin: minor for new behavior, patch for fixes and documentation.
+- Bump `version` in both `plugins/codex-worker/.claude-plugin/plugin.json` and `pyproject.toml` in every PR that changes the plugin, keeping them equal: minor for new behavior, patch for fixes and documentation.

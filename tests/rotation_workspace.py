@@ -662,7 +662,7 @@ class WorkspaceTests(RotationTestCase):
                 self.assertIn("== PR created " + state["publish"]["pr"], output)
 
     def test_pr_rules_delegate_publication_and_forbid_description_attribution(self):
-        rules = (SKILL / "references" / "rules.md").read_text()
+        rules = (SKILL / "scripts/codex_worker" / "rules.md").read_text()
         self.assertIn("push the branch; do not open or edit PRs yourself", rules)
         self.assertIn("pr_title", rules)
         self.assertIn("pr_body", rules)
@@ -680,7 +680,7 @@ class WorkspaceTests(RotationTestCase):
                  "если из «Готово, когда» не выполнены только такие пункты, ставь `done` и не пиши их в `remaining`. ",
                  "`status`: `done` — все пункты «Готово, когда» выполнены;")):
             with self.subTest(rules=filename):
-                text = (SKILL / "references" / filename).read_text()
+                text = (SKILL / "scripts/codex_worker" / filename).read_text()
                 self.assertIn(first + publication + status, text)
 
     def test_pr_standalone_review_preserves_receipt_without_replaying_publication(self):

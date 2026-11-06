@@ -57,7 +57,7 @@ class LeadRoleTests(unittest.TestCase):
                             worker.commands.cmd_start(args)
                             st = worker.task_state.load(slug)
                             task = worker.config.TASKS / slug
-                            rules = SKILL / "references" / ("rules.ru.md" if language == "ru" else "rules.md")
+                            rules = SKILL / "scripts/codex_worker" / ("rules.ru.md" if language == "ru" else "rules.md")
                             self.assertEqual(worker.sandboxing.rules_path(cfg), rules)
                             work = (task / "brief.md").read_text(encoding="utf-8")
                             self.assertIn("ведущий" if language == "ru" else "the lead", work)
@@ -106,7 +106,8 @@ class LeadRoleTests(unittest.TestCase):
         self.assertLessEqual(len(skill.splitlines()), 45)
         self.assertNotIn("CLAUDE_SKILL_DIR", guide)
         self.assertNotIn("/code-review", guide)
-        paths = [ROOT / "README.md", SKILL / "SKILL.md"] + sorted((SKILL / "references").glob("*.md"))
+        paths = ([ROOT / "README.md", SKILL / "SKILL.md"] + sorted((SKILL / "references").glob("*.md"))
+                 + sorted((SKILL / "scripts/codex_worker").glob("*.md")))
         for path in paths:
             text = path.read_text(encoding="utf-8")
             for target in re.findall(r"\[[^\]\n]+\]\(([^)\s]+)\)", text):

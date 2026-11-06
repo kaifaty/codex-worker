@@ -560,7 +560,7 @@ class ResultScoutConfigTests(RotationTestCase):
                     (self.home / "codex-worker.json").write_text('{"language":"ru"}')
                 cfg = worker.config.accounts_config()
                 self.assertEqual(cfg["language"], language)
-                expected = SKILL / "references" / ("rules.ru.md" if language == "ru" else "rules.md")
+                expected = SKILL / "scripts/codex_worker" / ("rules.ru.md" if language == "ru" else "rules.md")
                 self.assertEqual(worker.sandboxing.rules_path(), expected)
                 self.assertEqual(worker.sandboxing.rules_text(), expected.read_text())
                 prompt = worker.threads.handoff(st)
@@ -589,7 +589,7 @@ class ResultScoutConfigTests(RotationTestCase):
                     override.write_text("Custom instructions for {branch}, targeting {base}.\n")
                 else:
                     override.unlink(missing_ok=True)
-                rules = override if custom else SKILL / "references" / (
+                rules = override if custom else SKILL / "scripts/codex_worker" / (
                     "rules.ru.md" if language == "ru" else "rules.md")
                 self.assertEqual(worker.sandboxing.rules_path(), rules)
                 self.assertEqual(worker.sandboxing.rules_text(), rules.read_text())
@@ -618,7 +618,7 @@ class ResultScoutConfigTests(RotationTestCase):
         worker = self.worker()
         self.assertEqual(self.invocations()[1]["prompt"], worker.prompts.review_prompt(
             self.state("single-account"), worker.config.accounts_config()))
-        self.assertIn((SKILL / "references" / "rules.md").read_text().splitlines()[0],
+        self.assertIn((SKILL / "scripts/codex_worker" / "rules.md").read_text().splitlines()[0],
                       self.invocations()[0]["prompt"])
         self.notification("single-account", "turn_finished")
 
@@ -703,7 +703,7 @@ class ResultScoutConfigTests(RotationTestCase):
             {"timestamp": "2026-01-01T00:01:00Z", "type": "event_msg", "payload": {"type": "task_complete"}},
         ]
         rollout.write_text("\n".join(json.dumps(event) for event in events))
-        result = subprocess.run([PYTHON, "-I", str(SCRIPT.with_name("codex-stats.py")), str(rollout), "--json"],
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT.parent / "codex_worker/codex_stats.py"), str(rollout), "--json"],
                                 text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         totals = json.loads(result.stdout)["totals"]
@@ -737,7 +737,7 @@ class ResultScoutConfigTests(RotationTestCase):
                      "payload": {"type": "task_complete"}},
                 ]
                 rollout.write_text("\n".join(json.dumps(event) for event in events))
-                command = [PYTHON, "-I", str(SCRIPT.with_name("codex-stats.py")), str(rollout)]
+                command = [PYTHON, "-I", str(SCRIPT.parent / "codex_worker/codex_stats.py"), str(rollout)]
                 result = subprocess.run(command + ["--json"], text=True, capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 turn = json.loads(result.stdout)["turns"][0]
