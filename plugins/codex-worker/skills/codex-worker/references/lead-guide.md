@@ -158,7 +158,7 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
    such tasks, run `wait` as an ordinary command or check `status`. Add `--review-angles auto` for large or risky PRs (processes, concurrency,
    security), `--base-check` when behavior must stay the same (refactoring, optimization), and `--guard`
    for test files the check reaches only through `sh -c`. Tell the user in a line what went to Codex and
-   that you will report back.
+   that you will report back; don't sit and poll.
 2. When `wait` returns, follow the [turn outcome table](results.md#turn-outcomes), then read
    `result`:
    - `needs_decision`: decide yourself if the decision is within the task, otherwise ask the user; send

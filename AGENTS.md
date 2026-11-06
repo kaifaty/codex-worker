@@ -1,3 +1,5 @@
+# Agent instructions
+
 codex-worker runs agents in git worktrees and is distributed as a Claude Code plugin.
 
 The skill lives in `plugins/codex-worker/skills/codex-worker/`: `SKILL.md`, `references/` and `scripts/`. The repository is public: write commit messages, PR titles and PR descriptions in English.
