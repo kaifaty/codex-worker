@@ -21,7 +21,7 @@ Existing data, login homes and Keychain service names stay the same.
 
 1. Wait until no tasks are running.
 2. `uv tool uninstall codex-worker`
-3. `uv tool install git+https://github.com/kaifaty/codex-worker`
+3. `uv tool install git+https://github.com/kaifaty/teamster`
 4. `claude plugin uninstall codex-worker@kaifaty`
 5. `claude plugin marketplace update kaifaty`
 6. `claude plugin install teamster@kaifaty`
@@ -57,14 +57,14 @@ The worker finds Codex in this order:
 1. Install the command:
 
    ```sh
-   uv tool install git+https://github.com/kaifaty/codex-worker
+   uv tool install git+https://github.com/kaifaty/teamster
    teamster --version
    ```
 
 2. Add the plugin for Claude Code:
 
    ```text
-   /plugin marketplace add kaifaty/codex-worker
+   /plugin marketplace add kaifaty/teamster
    /plugin install teamster@kaifaty
    ```
 

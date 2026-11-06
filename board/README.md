@@ -67,7 +67,7 @@ environment into the job. Logs go to `<data home>/board-server.log`.
 1. Clone the repository to a permanent place outside working directories, then build and sync:
 
    ```sh
-   git clone https://github.com/kaifaty/codex-worker.git ~/teamster-board
+   git clone https://github.com/kaifaty/teamster.git ~/teamster-board
    cd ~/teamster-board
    npm --prefix board/web ci && npm --prefix board/web run build
    uv sync --project board/server --no-dev

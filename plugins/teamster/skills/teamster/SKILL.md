@@ -11,7 +11,7 @@ Claude Code is a supported lead.
 
 First run `teamster --version`; version 1.51.0 or newer is required.
 If the command is missing or older, tell the user to run
-`uv tool install git+https://github.com/kaifaty/codex-worker` or
+`uv tool install git+https://github.com/kaifaty/teamster` or
 `uv tool upgrade teamster`, respectively. Do not install or upgrade it yourself.
 
 Before the first task in a session, read `teamster docs lead-guide`.
