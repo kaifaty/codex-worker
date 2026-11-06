@@ -72,6 +72,20 @@ def test_plist_names_the_data_home_by_layout(tmp_path, monkeypatch, capsys, vari
     assert job["StandardOutPath"] == str(data / "board-server.log")
 
 
+def test_plist_resolves_a_relative_data_home(tmp_path, monkeypatch, capsys):
+    """launchd starts the job in WorkingDirectory, so a relative TEAMSTER_HOME must become absolute."""
+    clean_environment(monkeypatch, "codex")
+    monkeypatch.setenv("TEAMSTER_HOME", "data")
+    monkeypatch.chdir(tmp_path)
+    board_main.main(["plist"])
+    job = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
+    environment = job["EnvironmentVariables"]
+    for directory in (tmp_path, job["WorkingDirectory"]):
+        assert Path(directory, environment["TEAMSTER_HOME"]) == tmp_path / "data"
+        assert Path(directory, environment["CODEX_TASK_HOME"]) == tmp_path / "codex"
+    assert job["StandardOutPath"] == job["StandardErrorPath"] == str(tmp_path / "data/board-server.log")
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

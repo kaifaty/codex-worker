@@ -4,7 +4,9 @@ import io
 import json
 import os
 import plistlib
+import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -13,7 +15,7 @@ from unittest import mock
 # Isolated Python omits the script directory from its import path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from rotation_support import RotationTestCase
+from rotation_support import PYTHON, SCRIPT, RotationTestCase
 from worker_loader import load_worker
 
 
@@ -149,6 +151,13 @@ class DataHomeTests(RotationTestCase):
         self.assertEqual(ours & set(os.listdir(self.home)), set())
         self.assertTrue({"sessions", "exec-count"} <= set(os.listdir(self.home)) - codex_before)
         self.assertEqual({"config.toml", "fixture.json", "sessions", "exec-count"} & set(os.listdir(data)), set())
+        # launchd runs the job from another directory, so the plist holds absolute homes and logs.
+        job = plistlib.loads(self.cli("duty", "plist").encode())
+        environment = job["EnvironmentVariables"]
+        for directory in (self.repo, job.get("WorkingDirectory", "/")):
+            self.assertEqual(Path(directory, environment["TEAMSTER_HOME"]), data)
+            self.assertEqual(Path(directory, environment["CODEX_TASK_HOME"]), self.home)
+        self.assertEqual(job["StandardOutPath"], str(data / "duty-launchd.log"))
 
     def test_migrate_home_refusals_change_nothing(self):
         user = self.root / "user"
@@ -253,6 +262,34 @@ class DataHomeTests(RotationTestCase):
                 actual = {name: value.replace(str(user).encode(), b"<user>") if isinstance(value, bytes)
                           else value.replace(str(user), "<user>") for name, value in tree(user).items()}
                 self.assertEqual(actual, expected)
+
+    def test_start_waiting_for_the_migration_lock_stops(self):
+        """A start that resolved the legacy home before the move must not write there after it."""
+        self.legacy_user_home()
+        lock = self.home / "codex-worker.lock"
+        command = [PYTHON, "-I", str(SCRIPT), "start", "late", "--brief", str(self.brief), "--repo", str(self.repo)]
+        started = []
+        real_rename = os.rename
+
+        def first_move_waits_for_start(source, target):
+            if not started:
+                # The migration holds the settings lock now; start resolves the legacy home and waits on it.
+                started.append(subprocess.Popen(command, cwd=self.repo, env=self.env, text=True,
+                                                stdout=subprocess.PIPE, stderr=subprocess.PIPE))
+                pid = str(started[0].pid)
+                self.until(lambda: str(lock) in subprocess.run(["lsof", "-p", pid], capture_output=True,
+                                                               text=True).stdout, timeout=30)
+                self.assertIsNone(started[0].poll())
+            return real_rename(source, target)
+
+        with mock.patch.object(os, "rename", side_effect=first_move_waits_for_start):
+            self.migrate(self.user)
+        stdout, stderr = started[0].communicate(timeout=30)
+        self.assertNotEqual(started[0].returncode, 0, stdout)
+        self.assertIn("the data home moved after this command started; run codex-worker again", stderr)
+        self.assertFalse((self.home / "claude-tasks").exists())
+        self.assertFalse((self.user / ".teamster/tasks/late").exists())
+        self.assertFalse((self.home / "worktrees/claude-late").exists())
 
     def test_migrate_home_end_to_end_keeps_tasks_working(self):
         self.legacy_user_home()

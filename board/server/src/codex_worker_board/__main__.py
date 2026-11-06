@@ -16,6 +16,8 @@ DEFAULT_PORT = 8787
 def launchd_plist(host, port):
     """A launchd job that keeps the board running; printing it never installs or loads anything."""
     task_home, layout = resolve_data_home()
+    # launchd starts the job in WorkingDirectory: relative homes must not change meaning there.
+    task_home = Path(os.path.abspath(task_home))
     environment = {"PATH": os.pathsep.join(["/opt/homebrew/bin", "/usr/local/bin", str(Path.home() / ".local/bin"),
                                             "/usr/bin", "/bin", "/usr/sbin", "/sbin"])}
     if layout == "legacy":
@@ -24,7 +26,7 @@ def launchd_plist(host, port):
         environment["TEAMSTER_HOME"] = str(task_home)
         if os.environ.get("CODEX_TASK_HOME"):
             # The accounts command the board runs still needs a non-default Codex home.
-            environment["CODEX_TASK_HOME"] = os.environ["CODEX_TASK_HOME"]
+            environment["CODEX_TASK_HOME"] = os.path.abspath(Path(os.environ["CODEX_TASK_HOME"]).expanduser())
     environment.update((key, value) for key, value in os.environ.items() if key.startswith("BOARD_"))
     # The venv interpreter is a symlink; its own directory holds the console script.
     command = Path(sys.executable).parent / "codex-worker-board"

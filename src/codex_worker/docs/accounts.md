@@ -13,7 +13,7 @@ them.
 ## Adding a subscription
 
 For another subscription, have the user run `codex-worker login second`. Its separate `CODEX_HOME`
-is `~/.codex-accounts/second`, and login writes the new `~/.codex/codex-worker.json`. Never copy
+is `~/.codex-accounts/second`, and login writes the settings file (`~/.teamster/config.json`, see [settings.md](settings.md#data-home)). Never copy
 `auth.json` between homes: each subscription needs its own sign-in. When the user has chosen multiple
 subscriptions, the settings can contain:
 
