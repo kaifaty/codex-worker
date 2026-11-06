@@ -16,14 +16,14 @@ AUTO_REVIEW_ANGLES = ["correctness", "concurrency", "tests"]
 def scout_prompt(question, cfg=None):
     cfg = config.accounts_config() if cfg is None else cfg
     if cfg.get("language", "en") == "ru":
-        rules = ("Ты разведчик: изучи код и ответь на вопрос Claude.\n"
+        rules = ("Ты разведчик: изучи код и ответь на вопрос ведущего.\n"
                  "Файлы не меняй, ничего не коммить и не пушь.\n"
                  "Ответ — примерно до 300 слов, если вопрос не просит иного; без вступления.\n"
                  "Каждый факт подкрепи ссылкой файл:строка. "
                  "Отдельно отметь, что проверено, а что предположение.\n"
                  "Назови тесты, которые покрывают эту область. Скажи, чего не смотрел.")
     else:
-        rules = ("You are a scout: investigate the code and answer Claude's question.\n"
+        rules = ("You are a scout: investigate the code and answer the lead's question.\n"
                  "Do not change files, commit, or push.\n"
                  "Keep the answer to about 300 words unless the question asks otherwise; no introduction.\n"
                  "Cite file:line for every fact. Separate verified findings from assumptions.\n"
@@ -36,13 +36,13 @@ def review_prompt(st, cfg=None):
     brief = config.TASKS / st["slug"] / "brief.md"
     ru = cfg.get("language", "en") == "ru"
     amendments = ""
-    if any(message.get("source") == "claude" for message in threads.followup_messages(st)):
+    if any(message.get("source") in ("lead", "claude") for message in threads.followup_messages(st)):
         messages = brief.with_name("messages.jsonl")
-        amendments = ((f"Поправки к брифу — в файле {messages}. Прочитай его: записи с source `claude` — "
-                       "поправки Claude к брифу; более поздние записи `claude` важнее брифа и более ранних поправок. "
+        amendments = ((f"Поправки к брифу — в файле {messages}. Прочитай его: записи с source `lead` или `claude` — "
+                       "поправки ведущего к брифу; более поздние записи `lead` или `claude` важнее брифа и более ранних поправок. "
                        "Записи с source `review` и `ci` — запросы исправлений от надзирателя, а не требования задачи.\n") if ru else
-                      (f"Read the brief amendments at {messages}: entries with source `claude` are Claude's "
-                       "amendments to the brief; later `claude` entries take precedence over the brief and earlier "
+                      (f"Read the brief amendments at {messages}: entries with source `lead` or `claude` are the lead's "
+                       "amendments to the brief; later `lead` or `claude` entries take precedence over the brief and earlier "
                        "amendments. Entries with source `review` or `ci` are supervisor fix requests, not task requirements.\n"))
     context = ""
     if any(entry.get("review") is not None for entry in st.get("rounds", [])):

@@ -65,9 +65,9 @@ class PromptTests(unittest.TestCase):
             "ru": "Теперь база задачи — origin/main; используй её вместо origin/stacked.",
         }
         parts = {
-            "en": ("## Continuation", "Messages from Claude and review, in order:",
+            "en": ("## Continuation", "Messages from the lead and review, in order:",
                    "Current message — carry it out", "First inspect git status and git diff $(git merge-base origin/main HEAD)"),
-            "ru": ("## Продолжение", "Сообщения от Claude и ревью по порядку:",
+            "ru": ("## Продолжение", "Сообщения от ведущего и ревью по порядку:",
                    "Текущее сообщение — выполни его", "Сначала посмотри git status и git diff $(git merge-base origin/main HEAD)"),
         }
         message = "Continue with the requested follow-up."
@@ -439,17 +439,17 @@ class PromptTests(unittest.TestCase):
         messages = self.task / "messages.jsonl"
         expected = {
             "en": (f"Read the task brief at {self.task / 'brief.md'} and check its acceptance criteria.",
-                   f"Read the brief amendments at {messages}: entries with source `claude` are Claude's "
-                   "amendments to the brief; later `claude` entries take precedence over the brief and earlier "
+                   f"Read the brief amendments at {messages}: entries with source `lead` or `claude` are the lead's "
+                   "amendments to the brief; later `lead` or `claude` entries take precedence over the brief and earlier "
                    "amendments. Entries with source `review` or `ci` are supervisor fix requests, not task requirements."),
             "ru": (f"Бриф задачи — в файле {self.task / 'brief.md'}. Прочитай его и сверяйся с разделом «Готово, когда».",
-                   f"Поправки к брифу — в файле {messages}. Прочитай его: записи с source `claude` — поправки "
-                   "Claude к брифу; более поздние записи `claude` важнее брифа и более ранних поправок. "
+                   f"Поправки к брифу — в файле {messages}. Прочитай его: записи с source `lead` или `claude` — поправки "
+                   "ведущего к брифу; более поздние записи `lead` или `claude` важнее брифа и более ранних поправок. "
                    "Записи с source `review` и `ci` — запросы исправлений от надзирателя, а не требования задачи."),
         }
         st = dict(self.st, thread="existing-thread")
         self.worker.threads.followup_prompt(st, "Verify the previous fix.", {}, source="review")
-        self.worker.threads.followup_prompt(st, "Replace the original wording with the shorter version.", {})
+        self.worker.threads.followup_prompt(st, "Replace the original wording with the shorter version.", {}, source="claude")
         self.worker.threads.followup_prompt(st, "Fix the failed check.", {}, source="ci")
         for language, (brief_line, amendment_line) in expected.items():
             with self.subTest(language=language):
@@ -476,8 +476,8 @@ class PromptTests(unittest.TestCase):
                     with mock.patch.object(self.worker.checking, "guarded_changes", return_value=[]):
                         prompt = self.worker.prompts.review_prompt(self.st, {"language": language})
                     self.assertNotIn(str(messages), prompt)
-                    self.assertNotIn("entries with source `claude`", prompt)
-                    self.assertNotIn("записи с source `claude`", prompt)
+                    self.assertNotIn("entries with source `lead` or `claude`", prompt)
+                    self.assertNotIn("записи с source `lead` или `claude`", prompt)
 
     def test_review_prompt_diff_excludes_new_base_commits_in_both_languages(self):
         repo = self.root / "repo"
@@ -518,11 +518,11 @@ class PromptTests(unittest.TestCase):
 
     def test_scout_prompt_text_in_both_languages(self):
         parts = {
-            "en": ("You are a scout: investigate the code and answer Claude's question.",
+            "en": ("You are a scout: investigate the code and answer the lead's question.",
                    "Do not change files, commit, or push.", "about 300 words unless the question asks otherwise",
                    "no introduction", "Cite file:line for every fact.", "Separate verified findings from assumptions.",
                    "Name the tests covering this area.", "State what you did not inspect."),
-            "ru": ("Ты разведчик: изучи код и ответь на вопрос Claude.",
+            "ru": ("Ты разведчик: изучи код и ответь на вопрос ведущего.",
                    "Файлы не меняй, ничего не коммить и не пушь.", "до 300 слов, если вопрос не просит иного",
                    "без вступления", "Каждый факт подкрепи ссылкой файл:строка.",
                    "Отдельно отметь, что проверено, а что предположение.",
