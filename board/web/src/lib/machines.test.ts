@@ -6,6 +6,7 @@ import {
   cpuLevel,
   cpuLoadLevel,
   cpuLoadText,
+  cpuAverageText,
   cpuMeter,
   dataAge,
   diskLevel,
@@ -96,6 +97,11 @@ describe("CPU", () => {
     expect(cpuMeter(cpu)).toMatchObject({ label: "CPU", value: "36 %", percent: 36.4, level: "ok" });
     expect(cpuLoadText(cpu)).toBe("нагрузка 124 за 1 мин, 111 за 5 мин, ядер 10");
     expect(cpuMeter({ ...cpu, percent: 90 }).level).toBe("bad");
+    // The tile and the status follow the average; a spike alone changes neither.
+    expect(cpuMeter({ ...cpu, percent: 100, average_percent: 40 })).toMatchObject({ value: "40 %", percent: 40, level: "ok" });
+    expect(cpuAverageText({ ...cpu, percent: 100, average_percent: 40 })).toBe("сейчас 100 %, в среднем за 2,5 мин 40 %");
+    expect(cpuAverageText(cpu)).toBeNull();
+    expect(cpuMeter({ ...cpu, average_percent: null }).value).toBe("36 %");
   });
 
   it("falls back to load average when the percentage is unknown", () => {

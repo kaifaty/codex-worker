@@ -19,6 +19,8 @@ HISTORY_LIMIT = 120
 STRING_LIMIT = 200
 CPU_PERCENT_BUSY = 70
 CPU_PERCENT_OVERLOADED = 90
+# One-second samples jump, so the status follows their mean over this window.
+CPU_AVERAGE_SECONDS = 150
 # Load average only decides when the busy percentage is unknown; on macOS it is no measure of use.
 CPU_LOAD_BUSY = 0.7
 CPU_LOAD_OVERLOADED = 1.5
@@ -43,7 +45,8 @@ def machine_status(metrics, failures):
     cpu = metrics["cpu"]
     if cpu:
         if cpu.get("percent") is not None:
-            share, busy_at, overloaded_at = cpu["percent"], CPU_PERCENT_BUSY, CPU_PERCENT_OVERLOADED
+            share = cpu["percent"] if cpu.get("average_percent") is None else cpu["average_percent"]
+            busy_at, overloaded_at = CPU_PERCENT_BUSY, CPU_PERCENT_OVERLOADED
         else:
             share, busy_at, overloaded_at = cpu["load1"] / cpu["cores"], CPU_LOAD_BUSY, CPU_LOAD_OVERLOADED
         if share >= busy_at:
@@ -102,6 +105,8 @@ def _cpu(value):
               "load1": _number(value["load1"]), "load5": _number(value["load5"])}
     # An older probe has no percent: the field is then null.
     result["percent"] = _optional_number(value.get("percent"), maximum=100)
+    # Only the server fills this in, from the machine's history; a probe's value is ignored.
+    result["average_percent"] = None
     return result
 
 
@@ -298,6 +303,15 @@ def _history(metrics, at):
             "gpu_percent": max(gpu_loads) if gpu_loads else None}
 
 
+def _with_cpu_average(metrics, history, now):
+    """Copy of the metrics with the mean busy percentage over the window; hosts keep no history."""
+    if not metrics["cpu"] or metrics["cpu"]["percent"] is None:
+        return metrics
+    recent = [point["cpu_percent"] for point in history
+              if now - point["at"] <= CPU_AVERAGE_SECONDS and point["cpu_percent"] is not None]
+    return {**metrics, "cpu": {**metrics["cpu"], "average_percent": round(sum(recent) / len(recent), 2)}}
+
+
 class Machines:
     def __init__(self, path, ssh_command="ssh"):
         self.path = path
@@ -360,11 +374,16 @@ class Machines:
             return
         now = time.time()
         self._failures[config["id"]] = self._failures[config["id"]] + 1 if error else 0
-        metrics = metrics if not error else item["metrics"]
+        history = item["history"]
+        if error:
+            metrics = item["metrics"]
+        else:
+            history = (history + [_history(metrics, now)])[-HISTORY_LIMIT:]
+            metrics = _with_cpu_average(metrics, history, now)
         status, reasons = machine_status(metrics, self._failures[config["id"]])
         self._replace(config["id"], checked_at=now, sampled_at=item["sampled_at"] if error else now,
                       error=error, metrics=metrics, status=status, reasons=reasons,
-                      history=item["history"] if error else (item["history"] + [_history(metrics, now)])[-HISTORY_LIMIT:])
+                      history=history)
 
     async def refresh(self):
         async with self._lock:

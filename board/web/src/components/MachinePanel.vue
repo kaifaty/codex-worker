@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { Machine } from "../types";
 import { formatAge, formatFullTime } from "../lib/format";
 import {
+  cpuAverageText,
   cpuLoadText,
   cpuMeter,
   dataAge,
@@ -116,6 +117,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
                 <span class="bar" aria-hidden="true"><span :class="cpuMeter(metrics.cpu).level" :style="{ width: `${cpuMeter(metrics.cpu).percent}%` }"></span></span>
                 <span class="num" :class="{ big: hasPercent(metrics.cpu) }">{{ cpuMeter(metrics.cpu).value }}</span>
               </div>
+              <p v-if="cpuAverageText(metrics.cpu)" class="sub num indent">{{ cpuAverageText(metrics.cpu) }}</p>
               <p class="sub num indent">{{ cpuLoadText(metrics.cpu) }}</p>
             </template>
             <div v-if="metrics.memory" class="meter labelled" :title="memoryMeter(metrics.memory).title">
