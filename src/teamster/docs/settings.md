@@ -235,7 +235,7 @@ Existing data, login homes and Keychain service names stay the same.
 
 1. Wait until no tasks are running.
 2. `uv tool uninstall codex-worker`
-3. `uv tool install git+https://github.com/kaifaty/codex-worker`
+3. `uv tool install git+https://github.com/kaifaty/teamster`
 4. `claude plugin uninstall codex-worker@kaifaty`
 5. `claude plugin marketplace update kaifaty`
 6. `claude plugin install teamster@kaifaty`

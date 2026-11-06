@@ -59,4 +59,4 @@ never import an entrypoint. Do not rebind module aliases or use dynamic
 namespaces. Only config.py and __main__.py may use __file__; usage text stays in cli.py.
 """
 
-__version__ = "1.53.0"
+__version__ = "1.53.1"

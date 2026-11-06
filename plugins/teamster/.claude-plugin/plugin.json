@@ -1,13 +1,13 @@
 {
   "name": "teamster",
-  "version": "1.53.0",
+  "version": "1.53.1",
   "description": "Let Claude plan and review while Codex implements in an isolated git worktree, with optional subscription rotation and reset waiting.",
   "author": {
     "name": "kaifaty"
   },
   "license": "MIT",
-  "homepage": "https://github.com/kaifaty/codex-worker",
-  "repository": "https://github.com/kaifaty/codex-worker",
+  "homepage": "https://github.com/kaifaty/teamster",
+  "repository": "https://github.com/kaifaty/teamster",
   "keywords": [
     "codex",
     "claude-code",

@@ -13,7 +13,7 @@ authors = [{name = "kaifaty"}]
 dependencies = []
 
 [project.urls]
-Homepage = "https://github.com/kaifaty/codex-worker"
+Homepage = "https://github.com/kaifaty/teamster"
 
 [project.scripts]
 teamster = "teamster.__main__:cli.main"
