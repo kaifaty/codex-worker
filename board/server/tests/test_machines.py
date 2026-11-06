@@ -17,7 +17,7 @@ from codex_worker_board.machines import Machines, machine_status, normalize_metr
 def metrics():
     return {
         "os": "linux",
-        "cpu": {"cores": 4, "load1": 0, "load5": 0, "percent": None},
+        "cpu": {"cores": 4, "load1": 0, "load5": 0, "percent": None, "average_percent": None},
         "memory": {"total_bytes": 1000, "available_bytes": 1000},
         "gpus": [],
         "disks": [{"mount": "/", "total_bytes": 1000, "free_bytes": 1000}],
@@ -120,7 +120,7 @@ def test_untrusted_metrics_are_projected_coerced_and_bounded():
     sample["private"] = "discard"
     clean = normalize_metrics(sample)
     assert set(clean) == {"os", "cpu", "memory", "gpus", "disks"}
-    assert clean["cpu"] == {"cores": 4, "load1": 2.5, "load5": 1.5, "percent": None}
+    assert clean["cpu"] == {"cores": 4, "load1": 2.5, "load5": 1.5, "percent": None, "average_percent": None}
     assert normalize_metrics(dict(metrics(), cpu={"cores": 4, "load1": 1, "load5": 1, "percent": "36.5"}))[
         "cpu"]["percent"] == 36.5
     assert clean["memory"] == {"total_bytes": 1000, "available_bytes": 500}
@@ -302,6 +302,54 @@ def test_timeout_kills_and_reaps_without_blocking_fast_machine(tmp_path, monkeyp
             os.kill(int(pid_path.read_text()), 0)
 
     asyncio.run(check())
+
+
+def test_status_follows_the_cpu_average_over_the_window(tmp_path, monkeypatch):
+    path = tmp_path / "machines.json"
+    write_config(path, [{"id": "local", "name": "Local", "local": True}])
+    samples = iter([100, 35, 35, 95, 95, 95, 95, 95, 10])
+    clock = 1000.0
+
+    async def sample(config, ssh_command, host=False):
+        value = metrics()
+        value["cpu"].update(cores=10, load1=124, percent=next(samples))
+        return value, None
+
+    monkeypatch.setattr(machines_module, "run_probe", sample)
+    monkeypatch.setattr(machines_module.time, "time", lambda: clock)
+
+    async def check():
+        nonlocal clock
+        machines = Machines(path)
+
+        async def step():
+            nonlocal clock
+            await machines.refresh()
+            item = machines.value["items"][0]
+            clock += 30
+            return item["status"], item["metrics"]["cpu"]["percent"], item["metrics"]["cpu"]["average_percent"]
+
+        assert await step() == ("overloaded", 100, 100)  # no history yet: the sample itself
+        assert await step() == ("free", 35, 67.5)  # a spike no longer decides alone
+        assert await step() == ("free", 35, 56.67)
+        assert (await step())[2] == 66.25
+        for _ in range(4):
+            result = await step()
+        # 150 s holds six samples at 30 s: 100 and the first 35 have left the window.
+        assert result == ("busy", 95, 85)
+        assert (await step()) == ("busy", 10, 80.83)
+
+    asyncio.run(check())
+
+
+def test_cpu_average_is_not_taken_from_the_probe_and_stays_null_for_hosts():
+    sample = metrics()
+    sample["cpu"].update(percent=20, average_percent=99)
+    assert normalize_metrics(sample)["cpu"]["average_percent"] is None
+    sample["cpu"].update(cores=10, percent=20, average_percent=80, load1=0)
+    assert machine_status(sample, 0) == ("busy", ["cpu"])
+    sample["cpu"]["average_percent"] = None
+    assert machine_status(sample, 0) == ("free", [])
 
 
 def test_history_keeps_120_latest_successes_and_cpu_percent(tmp_path, monkeypatch):

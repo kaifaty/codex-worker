@@ -122,12 +122,20 @@ export function cpuLoadText(cpu: NonNullable<Metrics["cpu"]>): string {
   return `нагрузка ${formatNumber(cpu.load1)} за 1 мин, ${formatNumber(cpu.load5)} за 5 мин, ядер ${cpu.cores}`;
 }
 
+/** "сейчас 35 %, в среднем за 2,5 мин 67 %" for a machine with an average that differs from the sample. */
+export function cpuAverageText(cpu: NonNullable<Metrics["cpu"]>): string | null {
+  const { percent, average_percent: average } = cpu;
+  if (percent === null || average === null || average === undefined) return null;
+  return `сейчас ${Math.round(percent)} %, в среднем за 2,5 мин ${Math.round(average)} %`;
+}
+
 /**
- * The busy percentage when the probe reports it: "36 %". Load average is no measure of use on macOS,
+ * The busy percentage when the probe reports it, averaged by the server when it can: "36 %". Load average is no measure of use on macOS,
  * so it only stands in when the percentage is unknown: "нагрузка 1,2 / 32".
  */
 export function cpuMeter(cpu: NonNullable<Metrics["cpu"]>): Meter {
-  const busy = cpu.percent ?? null;
+  const known = cpu.percent ?? null;
+  const busy = known === null ? null : (cpu.average_percent ?? known);
   if (busy !== null) {
     return {
       key: "cpu",
@@ -135,7 +143,7 @@ export function cpuMeter(cpu: NonNullable<Metrics["cpu"]>): Meter {
       percent: clamp(busy),
       level: cpuLevel(busy),
       value: `${Math.round(busy)} %`,
-      title: `CPU занят на ${Math.round(busy)} %; ${cpuLoadText(cpu)}`,
+      title: `${cpuAverageText(cpu) ?? `CPU занят на ${Math.round(busy)} %`}; ${cpuLoadText(cpu)}`,
     };
   }
   const percent = cpu.cores > 0 ? (cpu.load1 / cpu.cores) * 100 : 0;

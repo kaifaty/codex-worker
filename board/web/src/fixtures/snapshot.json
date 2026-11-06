@@ -786,7 +786,8 @@
             "cores": 10,
             "load1": 124.1,
             "load5": 111.2,
-            "percent": 36.4
+            "percent": 36.4,
+            "average_percent": 52.1
           },
           "memory": {
             "total_bytes": 38654705664,

@@ -107,6 +107,7 @@ interface Metrics {
     load1: number;
     load5: number;
     percent: number | null; // busy share of all cores over about 1 s, 0–100; null when unknown
+    average_percent: number | null; // mean of percent over the last 150 s; set by the server, null for hosts
   } | null;
   memory: { total_bytes: number; available_bytes: number } | null;
   gpus: Gpu[];
@@ -221,14 +222,15 @@ condition at that severity or above, including all applicable disk mounts.
 
 | Condition | `busy` threshold | `overloaded` threshold | Reason |
 | --- | --- | --- | --- |
-| CPU `percent` | ≥ 70% | ≥ 90% | `cpu` |
+| CPU `average_percent` (or `percent` before it exists) | ≥ 70% | ≥ 90% | `cpu` |
 | CPU load1 / cores, only when `percent` is `null` | ≥ 0.7 | ≥ 1.5 | `cpu` |
 | Available memory / total | < 25% | < 10% | `memory` |
 | GPU utilization | ≥ 70% | — | `gpu` |
 | GPU used memory / total | ≥ 60% | — | `gpu_memory` |
 | Disk free space / total | < 15% | < 5% | `disk:<mount>` |
 
-Otherwise status is `free`. History retains at most 120 samples in memory and is reset on server
+Otherwise status is `free`. One-second CPU samples jump, so the status follows their mean over the last
+150 seconds, which is about six samples at the default interval. History retains at most 120 samples in memory and is reset on server
 restart. A successful machine probe appends one point; failed probes retain history without adding
 a point. Unknown percentages are `null`. `cpu_percent` is the busy percentage, or load1 / cores × 100
 capped at 100 when the percentage is unknown, so every history value is between 0 and 100.

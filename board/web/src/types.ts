@@ -68,6 +68,7 @@ export interface Metrics {
     load1: number;
     load5: number;
     percent: number | null; // busy share of all cores over about 1 s, 0–100; null when unknown
+    average_percent?: number | null; // mean of percent over the last 150 s, the status follows it; null for hosts
   } | null;
   memory: { total_bytes: number; available_bytes: number } | null;
   gpus: Gpu[];
