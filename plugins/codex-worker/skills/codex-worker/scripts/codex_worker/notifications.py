@@ -4,7 +4,7 @@ import signal
 import subprocess
 import sys
 
-from . import clock, config
+from . import clock, config, executors
 
 
 NOTIFY_PROCESSES = []
@@ -21,7 +21,7 @@ def current_turn_account(st):
             return None
         reviews = st.get("reviews", [])[st.get("review_start", 0):]
         return st.get("review_account") or (reviews[-1]["account"] if reviews else st["account"])
-    return st.get("claude_account") if st.get("executor") == "claude" else st["account"]
+    return executors.from_state(st).account(st)
 
 
 def unblock_notification_signals():

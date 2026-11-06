@@ -9,7 +9,7 @@ import sys
 import time
 from pathlib import Path
 
-from . import procs, result_schema
+from . import executors, procs, result_schema
 
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
@@ -144,8 +144,10 @@ def accounts_config():
     cfg.setdefault("capacity_retry_minutes", [1, 5, 15, 30])
     cfg.setdefault("sandbox", "off")
     cfg.setdefault("writable_dirs", [])
-    if cfg["executor"] not in ("codex", "claude"):
-        procs.die('executor must be "codex" or "claude"')
+    try:
+        executors.from_state(cfg)
+    except (KeyError, TypeError):
+        procs.die("executor must be " + " or ".join('"' + name + '"' for name in executors.names()))
     if cfg["reviewer"] not in ("codex", "claude"):
         procs.die('reviewer must be "codex" or "claude"')
     claude = cfg["claude"]

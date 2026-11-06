@@ -2,7 +2,7 @@
 import json
 import time
 
-from . import account_rotation, checking, ci_runs, clock, config, procs, result_schema, sandboxing, task_state, threads, turn_monitor
+from . import account_rotation, checking, ci_runs, clock, config, executors, procs, result_schema, sandboxing, task_state, threads, turn_monitor
 
 
 def wait_rotation_lines(st):
@@ -75,7 +75,7 @@ def wait_turn_lines(st, slug):
     if (st.get("kind") != "review" or st.get("work_completed")) and not (
             st.get("outcome") == "refused" and st.get("kind") != "review"):
         last = config.TASKS / slug / "last.md"
-        if ((st.get("exhausted") or sleeping) and st.get("executor") != "claude"
+        if ((st.get("exhausted") or sleeping) and executors.from_state(st).event_log
                 and len(threads.events(st)) == st.get("event_start", 0)):
             # Paused before any exec: the thread's last message belongs to an earlier turn.
             yield "(Codex did not run this turn)"

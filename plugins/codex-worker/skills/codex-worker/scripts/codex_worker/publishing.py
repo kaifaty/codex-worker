@@ -6,7 +6,7 @@ import subprocess
 import tempfile
 import urllib.parse
 
-from . import clock, config, result_schema, sandboxing, task_state, threads
+from . import clock, config, executors, result_schema, sandboxing, task_state
 
 
 def completed_work_turn(st):
@@ -142,13 +142,11 @@ def publish_pr(st, stopped):
             if pr["state"] in ("CLOSED", "MERGED"):
                 skip("pr " + pr["state"].lower())
                 return
-        if not pr or st.get("executor") == "claude":
+        executor = executors.from_state(st)
+        if not pr or executor.inherit_pr_text:
             if not title or not body:
                 stage = "PR text history"
-                messages = (threads.claude_messages(st) if st.get("executor") == "claude" else
-                            [(event.get("item") or {}).get("text", "") for event in threads.events(st)
-                             if event.get("type") == "item.completed"
-                             and (event.get("item") or {}).get("type") == "agent_message"])
+                messages = executor.call("pr_messages", st)
                 for message in reversed(messages):
                     previous = result_schema.parse_result(message)
                     if previous is not None:
