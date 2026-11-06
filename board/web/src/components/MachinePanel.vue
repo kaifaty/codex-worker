@@ -160,9 +160,9 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 
         <section class="sec">
           <h3>За час</h3>
-          <MachineChart :history="shown.history" field="cpu_percent" title="CPU занят" :now="now" />
-          <MachineChart :history="shown.history" field="memory_percent" title="Память занята" :now="now" />
-          <MachineChart v-if="hasGpu" :history="shown.history" field="gpu_percent" title="GPU" :now="now" />
+          <MachineChart :history="shown.history" field="cpu_percent" title="CPU занят" :now="now" :stale-age="age" />
+          <MachineChart :history="shown.history" field="memory_percent" title="Память занята" :now="now" :stale-age="age" />
+          <MachineChart v-if="hasGpu" :history="shown.history" field="gpu_percent" title="GPU" :now="now" :stale-age="age" />
         </section>
 
         <section v-if="shown.host" class="host" aria-labelledby="host-title">

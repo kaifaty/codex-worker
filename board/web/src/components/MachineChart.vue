@@ -4,7 +4,7 @@ import type { HistoryPoint } from "../types";
 import { formatAge } from "../lib/format";
 import { CHART_WINDOW, chart, chartPath, formatNumber, type HistoryKey } from "../lib/machines";
 
-const props = defineProps<{ history: HistoryPoint[]; field: HistoryKey; title: string; now: number }>();
+const props = defineProps<{ history: HistoryPoint[]; field: HistoryKey; title: string; now: number; staleAge?: string | null }>();
 
 const W = 300;
 const H = 60;
@@ -40,7 +40,7 @@ const hoverY = computed(() =>
     <p v-else-if="data.empty" class="c-note">за час данных нет</p>
     <template v-else>
       <div class="plot" @pointermove="onMove" @pointerleave="hover = null">
-        <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" role="img" :aria-label="`${title} за час, сейчас ${percent(data.current)}`">
+        <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" role="img" :aria-label="`${title} за час, ${staleAge ?? "сейчас"} ${percent(data.current)}`">
           <line class="grid" x1="0" :x2="W" y1="0" y2="0" vector-effect="non-scaling-stroke" />
           <line class="grid base" x1="0" :x2="W" :y1="H" :y2="H" vector-effect="non-scaling-stroke" />
           <path class="line" :d="path" vector-effect="non-scaling-stroke" />
@@ -55,7 +55,7 @@ const hoverY = computed(() =>
       </div>
       <div class="c-axis">
         <span>час назад</span>
-        <span class="num c-now">сейчас {{ percent(data.current) }}</span>
+        <span class="num c-now">{{ staleAge ?? "сейчас" }} {{ percent(data.current) }}</span>
       </div>
     </template>
   </figure>

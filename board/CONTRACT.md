@@ -190,8 +190,8 @@ CPU uses `os.cpu_count` and `os.getloadavg`. `percent` is the busy share of all 
 second: on Linux, two reads of the aggregate `cpu` line of `/proc/stat` one second apart, with
 `idle + iowait` as idle time; on macOS, the last `CPU usage: … % idle` line of `top -l 2 -n 0 -s 1`
 (the first sample counts since boot), as `100 − idle`. A failed or unparsable sample gives `null`.
-Host probes collect `percent` too. Load average is reported but is no measure of use on macOS, where
-it counts threads waiting on I/O and can exceed the core count many times on an idle machine.
+Host probes collect `percent` too. Load average is reported but is no measure of use on macOS: it has been
+seen at twelve times the core count while the CPU was 64% idle.
 The server accepts `percent` from 0 to 100; a probe without the field gives `null`. Linux memory uses `/proc/meminfo` (`MemTotal` and
 `MemAvailable`), while macOS uses `sysctl -n hw.memsize` and the final system-wide free percentage
 from `memory_pressure`. Available macOS memory is that fraction of total memory. Disks use
