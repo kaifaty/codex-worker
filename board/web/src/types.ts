@@ -63,7 +63,12 @@ export interface Gpu {
 
 export interface Metrics {
   os: string;
-  cpu: { cores: number; load1: number; load5: number } | null;
+  cpu: {
+    cores: number;
+    load1: number;
+    load5: number;
+    percent: number | null; // busy share of all cores over about 1 s, 0–100; null when unknown
+  } | null;
   memory: { total_bytes: number; available_bytes: number } | null;
   gpus: Gpu[];
   disks: { mount: string; total_bytes: number; free_bytes: number }[];
@@ -82,7 +87,7 @@ export interface HostView {
 
 export interface HistoryPoint {
   at: number;
-  load_percent: number | null;
+  cpu_percent: number | null; // cpu.percent, else load1 / cores × 100 capped at 100
   memory_percent: number | null;
   gpu_percent: number | null;
 }

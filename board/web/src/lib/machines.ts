@@ -56,7 +56,10 @@ export function statusLevel(status: MachineStatus): Level | null {
 // The server's thresholds, in percent of the resource in use.
 const level = (percent: number, warn: number, bad = Infinity): Level =>
   percent >= bad ? "bad" : percent >= warn ? "warn" : "ok";
-export const cpuLevel = (percent: number) => level(percent, 70, 150);
+/** CPU busy percentage, the measure the status uses when the probe reports it. */
+export const cpuLevel = (percent: number) => level(percent, 70, 90);
+/** load1 / cores in percent; only used when the busy percentage is unknown. */
+export const cpuLoadLevel = (percent: number) => level(percent, 70, 150);
 export const memoryLevel = (percent: number) => level(percent, 75, 90);
 export const gpuLevel = (percent: number) => level(percent, 70);
 export const vramLevel = (percent: number) => level(percent, 60);
@@ -114,15 +117,35 @@ export interface Meter {
 
 const clamp = (percent: number) => Math.min(100, Math.max(0, percent));
 
+/** "нагрузка 124 за 1 мин, 111 за 5 мин, ядер 10". */
+export function cpuLoadText(cpu: NonNullable<Metrics["cpu"]>): string {
+  return `нагрузка ${formatNumber(cpu.load1)} за 1 мин, ${formatNumber(cpu.load5)} за 5 мин, ядер ${cpu.cores}`;
+}
+
+/**
+ * The busy percentage when the probe reports it: "36 %". Load average is no measure of use on macOS,
+ * so it only stands in when the percentage is unknown: "нагрузка 1,2 / 32".
+ */
 export function cpuMeter(cpu: NonNullable<Metrics["cpu"]>): Meter {
+  const busy = cpu.percent ?? null;
+  if (busy !== null) {
+    return {
+      key: "cpu",
+      label: "CPU",
+      percent: clamp(busy),
+      level: cpuLevel(busy),
+      value: `${Math.round(busy)} %`,
+      title: `CPU занят на ${Math.round(busy)} %; ${cpuLoadText(cpu)}`,
+    };
+  }
   const percent = cpu.cores > 0 ? (cpu.load1 / cpu.cores) * 100 : 0;
   return {
     key: "cpu",
     label: "CPU",
     percent: clamp(percent),
-    level: cpuLevel(percent),
+    level: cpuLoadLevel(percent),
     value: `нагрузка ${formatNumber(cpu.load1)} / ${cpu.cores}`,
-    title: `Нагрузка за минуту ${formatNumber(cpu.load1)} на ${cpu.cores} ядер (${Math.round(percent)} %)`,
+    title: `Занятость CPU неизвестна; нагрузка за минуту ${formatNumber(cpu.load1)} на ${cpu.cores} ядер (${Math.round(percent)} %)`,
   };
 }
 
@@ -251,7 +274,7 @@ export function freeSummary(machines: Machine[]): string {
   return `${free} ${word} из ${machines.length}`;
 }
 
-export type HistoryKey = "load_percent" | "memory_percent" | "gpu_percent";
+export type HistoryKey = "cpu_percent" | "memory_percent" | "gpu_percent";
 
 export interface ChartPoint {
   /** 0 = an hour before the last point, 1 = the last point. */
@@ -262,8 +285,6 @@ export interface ChartPoint {
 export interface Chart {
   /** Runs of consecutive known values; a null or a missing sample starts a new run. */
   segments: ChartPoint[][];
-  /** Top of the scale: 100, or more for a CPU load above 100 %. */
-  max: number;
   /** The value of the last point, null when it is unknown. */
   current: number | null;
   /** Fewer than two points: the history is still being collected. */
@@ -283,7 +304,6 @@ export function chart(history: HistoryPoint[], key: HistoryKey): Chart {
   const segments: ChartPoint[][] = [];
   let run: ChartPoint[] = [];
   let previousAt: number | null = null;
-  let top = 0;
   for (const point of points) {
     const value = point[key];
     const gap = previousAt !== null && point.at - previousAt > CHART_GAP;
@@ -293,14 +313,12 @@ export function chart(history: HistoryPoint[], key: HistoryKey): Chart {
     }
     if (value !== null && end - point.at <= CHART_WINDOW) {
       run.push({ x: 1 - (end - point.at) / CHART_WINDOW, value });
-      top = Math.max(top, value);
     }
     previousAt = point.at;
   }
   if (run.length) segments.push(run);
   return {
     segments,
-    max: key === "load_percent" && top > 100 ? Math.ceil(top / 50) * 50 : 100,
     current: last ? last[key] : null,
     collecting: points.length < 2,
     empty: segments.length === 0,
@@ -309,7 +327,8 @@ export function chart(history: HistoryPoint[], key: HistoryKey): Chart {
 
 /** SVG path data of the segments in a `width` × `height` box; a lone point becomes a dot-sized dash. */
 export function chartPath(data: Chart, width: number, height: number): string {
-  const y = (value: number) => height - (Math.min(value, data.max) / data.max) * height;
+  // Every history value is a share from 0 to 100.
+  const y = (value: number) => height - (Math.min(Math.max(value, 0), 100) / 100) * height;
   return data.segments
     .map((segment) => {
       const parts = segment.map((point, index) => `${index ? "L" : "M"}${(point.x * width).toFixed(1)},${y(point.value).toFixed(1)}`);

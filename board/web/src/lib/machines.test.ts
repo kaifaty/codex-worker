@@ -4,6 +4,9 @@ import {
   chart,
   chartPath,
   cpuLevel,
+  cpuLoadLevel,
+  cpuLoadText,
+  cpuMeter,
   dataAge,
   diskLevel,
   formatBytes,
@@ -22,7 +25,7 @@ const machine = (extra: Partial<Machine> = {}): Machine => ({
   id: "m", name: "m", role: null, status: "free", reasons: [], checked_at: 1000, sampled_at: 1000, error: null,
   metrics: {
     os: "Linux",
-    cpu: { cores: 10, load1: 3.8, load5: 3 },
+    cpu: { cores: 10, load1: 3.8, load5: 3, percent: null },
     memory: { total_bytes: 31.4 * G, available_bytes: 19.2 * G },
     gpus: [],
     disks: [{ mount: "/", total_bytes: 228 * G, free_bytes: 68 * G }],
@@ -70,7 +73,7 @@ describe("tile", () => {
       ["Диск", "68 ГБ из 228"],
     ]);
     expect(meters[0]?.percent).toBeCloseTo(38);
-    const hot = tileMeters({ ...machine().metrics!, cpu: { cores: 10, load1: 38, load5: 30 } });
+    const hot = tileMeters({ ...machine().metrics!, cpu: { cores: 10, load1: 38, load5: 30, percent: null } });
     expect(hot[0]).toMatchObject({ value: "нагрузка 38 / 10", percent: 100, level: "bad" });
     expect(tileMeters(null)).toEqual([]);
   });
@@ -87,9 +90,26 @@ describe("tile", () => {
   });
 });
 
+describe("CPU", () => {
+  it("shows the busy percentage instead of load average when the probe reports it", () => {
+    const cpu = { cores: 10, load1: 124, load5: 111, percent: 36.4 };
+    expect(cpuMeter(cpu)).toMatchObject({ label: "CPU", value: "36 %", percent: 36.4, level: "ok" });
+    expect(cpuLoadText(cpu)).toBe("нагрузка 124 за 1 мин, 111 за 5 мин, ядер 10");
+    expect(cpuMeter({ ...cpu, percent: 90 }).level).toBe("bad");
+  });
+
+  it("falls back to load average when the percentage is unknown", () => {
+    expect(cpuMeter({ cores: 32, load1: 1.2, load5: 1, percent: null })).toMatchObject({
+      value: "нагрузка 1,2 / 32",
+      level: "ok",
+    });
+  });
+});
+
 describe("levels at the thresholds", () => {
   it.each([
-    [cpuLevel, 69.9, "ok"], [cpuLevel, 70, "warn"], [cpuLevel, 149.9, "warn"], [cpuLevel, 150, "bad"],
+    [cpuLevel, 69.9, "ok"], [cpuLevel, 70, "warn"], [cpuLevel, 89.9, "warn"], [cpuLevel, 90, "bad"],
+    [cpuLoadLevel, 69.9, "ok"], [cpuLoadLevel, 70, "warn"], [cpuLoadLevel, 149.9, "warn"], [cpuLoadLevel, 150, "bad"],
     [memoryLevel, 74.9, "ok"], [memoryLevel, 75, "warn"], [memoryLevel, 90, "bad"],
     [gpuLevel, 69.9, "ok"], [gpuLevel, 70, "warn"], [gpuLevel, 100, "warn"],
     [vramLevel, 59.9, "ok"], [vramLevel, 60, "warn"],
@@ -122,10 +142,10 @@ describe("formatBytes", () => {
 });
 
 describe("history chart", () => {
-  const point = (at: number, load: number | null): HistoryPoint => ({ at, load_percent: load, memory_percent: 50, gpu_percent: null });
+  const point = (at: number, load: number | null): HistoryPoint => ({ at, cpu_percent: load, memory_percent: 50, gpu_percent: null });
 
   it("breaks the line at a null and at a missing sample instead of drawing zero", () => {
-    const data = chart([point(0, 10), point(30, 20), point(60, null), point(90, 30), point(120, 40), point(300, 50)], "load_percent");
+    const data = chart([point(0, 10), point(30, 20), point(60, null), point(90, 30), point(120, 40), point(300, 50)], "cpu_percent");
     expect(data.segments.map((s) => s.map((p) => p.value))).toEqual([[10, 20], [30, 40], [50]]);
     expect(data.current).toBe(50);
     const path = chartPath(data, 300, 60);
@@ -133,14 +153,9 @@ describe("history chart", () => {
     expect(path).not.toContain(",60.0"); // no point at the zero line
   });
 
-  it("widens the CPU scale above 100 % only", () => {
-    expect(chart([point(0, 40), point(30, 163)], "load_percent").max).toBe(200);
-    expect(chart([point(0, 40), point(30, 90)], "load_percent").max).toBe(100);
-  });
-
   it("is still collecting with fewer than two points, and empty without known values", () => {
-    expect(chart([point(0, 10)], "load_percent").collecting).toBe(true);
-    expect(chart([], "load_percent").collecting).toBe(true);
+    expect(chart([point(0, 10)], "cpu_percent").collecting).toBe(true);
+    expect(chart([], "cpu_percent").collecting).toBe(true);
     const gpu = chart([point(0, 10), point(30, 20)], "gpu_percent");
     expect(gpu).toMatchObject({ collecting: false, empty: true, current: null });
   });

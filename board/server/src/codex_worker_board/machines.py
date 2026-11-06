@@ -17,8 +17,11 @@ PROBE_TIMEOUT = 15
 OUTPUT_LIMIT = 1024 * 1024
 HISTORY_LIMIT = 120
 STRING_LIMIT = 200
-CPU_BUSY = 0.7
-CPU_OVERLOADED = 1.5
+CPU_PERCENT_BUSY = 70
+CPU_PERCENT_OVERLOADED = 90
+# Load average only decides when the busy percentage is unknown; on macOS it is no measure of use.
+CPU_LOAD_BUSY = 0.7
+CPU_LOAD_OVERLOADED = 1.5
 MEMORY_BUSY = 0.25
 MEMORY_OVERLOADED = 0.10
 DISK_BUSY = 0.15
@@ -38,10 +41,15 @@ def machine_status(metrics, failures):
         return "offline", []
     busy, overloaded = [], []
     cpu = metrics["cpu"]
-    if cpu and cpu["load1"] / cpu["cores"] >= CPU_BUSY:
-        busy.append("cpu")
-        if cpu["load1"] / cpu["cores"] >= CPU_OVERLOADED:
-            overloaded.append("cpu")
+    if cpu:
+        if cpu.get("percent") is not None:
+            share, busy_at, overloaded_at = cpu["percent"], CPU_PERCENT_BUSY, CPU_PERCENT_OVERLOADED
+        else:
+            share, busy_at, overloaded_at = cpu["load1"] / cpu["cores"], CPU_LOAD_BUSY, CPU_LOAD_OVERLOADED
+        if share >= busy_at:
+            busy.append("cpu")
+            if share >= overloaded_at:
+                overloaded.append("cpu")
     memory = metrics["memory"]
     if memory:
         available = memory["available_bytes"] / memory["total_bytes"]
@@ -90,8 +98,11 @@ def _optional_number(value, **kwargs):
 def _cpu(value):
     if value is None:
         return None
-    return {"cores": _number(value["cores"], minimum=1, integer=True),
-            "load1": _number(value["load1"]), "load5": _number(value["load5"])}
+    result = {"cores": _number(value["cores"], minimum=1, integer=True),
+              "load1": _number(value["load1"]), "load5": _number(value["load5"])}
+    # An older probe has no percent: the field is then null.
+    result["percent"] = _optional_number(value.get("percent"), maximum=100)
+    return result
 
 
 def _memory(value):
@@ -276,7 +287,13 @@ def _history(metrics, at):
     cpu, memory = metrics["cpu"], metrics["memory"]
     gpu_loads = [gpu["utilization_percent"] for gpu in metrics["gpus"]
                  if gpu["utilization_percent"] is not None]
-    return {"at": at, "load_percent": cpu["load1"] / cpu["cores"] * 100 if cpu else None,
+    if not cpu:
+        cpu_share = None
+    elif cpu["percent"] is not None:
+        cpu_share = cpu["percent"]
+    else:
+        cpu_share = min(100.0, cpu["load1"] / cpu["cores"] * 100)
+    return {"at": at, "cpu_percent": cpu_share,
             "memory_percent": (1 - memory["available_bytes"] / memory["total_bytes"]) * 100 if memory else None,
             "gpu_percent": max(gpu_loads) if gpu_loads else None}
 

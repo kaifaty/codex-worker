@@ -26,7 +26,7 @@ function onMove(event: PointerEvent) {
 const hoverX = computed(() => (hover.value ? (1 - (lastAt.value - hover.value.at) / CHART_WINDOW) * 100 : 0));
 const hoverValue = computed(() => (hover.value ? hover.value[props.field] : null));
 const hoverY = computed(() =>
-  hoverValue.value === null ? null : 100 - (Math.min(hoverValue.value, data.value.max) / data.value.max) * 100,
+  hoverValue.value === null ? null : 100 - Math.min(Math.max(hoverValue.value, 0), 100),
 );
 </script>
 
@@ -34,14 +34,14 @@ const hoverY = computed(() =>
   <figure class="chart">
     <figcaption class="c-head">
       <span class="c-title">{{ title }}</span>
-      <span v-if="!data.collecting && !data.empty" class="c-scale num">шкала 0–{{ data.max }} %</span>
+      <span v-if="!data.collecting && !data.empty" class="c-scale num">шкала 0–100 %</span>
     </figcaption>
     <p v-if="data.collecting" class="c-note">история собирается</p>
     <p v-else-if="data.empty" class="c-note">за час данных нет</p>
     <template v-else>
       <div class="plot" @pointermove="onMove" @pointerleave="hover = null">
         <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" role="img" :aria-label="`${title} за час, сейчас ${percent(data.current)}`">
-          <line class="grid" x1="0" :x2="W" :y1="H - (100 / data.max) * H" :y2="H - (100 / data.max) * H" vector-effect="non-scaling-stroke" />
+          <line class="grid" x1="0" :x2="W" y1="0" y2="0" vector-effect="non-scaling-stroke" />
           <line class="grid base" x1="0" :x2="W" :y1="H" :y2="H" vector-effect="non-scaling-stroke" />
           <path class="line" :d="path" vector-effect="non-scaling-stroke" />
         </svg>

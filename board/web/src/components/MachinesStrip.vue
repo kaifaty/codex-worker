@@ -5,7 +5,9 @@ import { formatFullTime } from "../lib/format";
 import { STATUS, dataAge, errorLabel, freeSummary, statusLevel, statusText, tileMeters } from "../lib/machines";
 
 const props = defineProps<{ machines: Machines | null; now: number; collapsed: boolean; selected: string | null }>();
-const emit = defineEmits<{ toggle: []; open: [id: string] }>();
+const emit = defineEmits<{ toggle: []; open: [id: string, opener: HTMLElement | null] }>();
+// The button that opened the card gets the focus back when it closes, tile or folded chip alike.
+const open = (id: string, event: Event) => emit("open", id, event.currentTarget as HTMLElement | null);
 
 const items = computed(() => props.machines?.items ?? []);
 const shown = computed(() => items.value.length > 0 || !!props.machines?.config_error);
@@ -36,8 +38,8 @@ const tiles = computed(() =>
       <span v-if="items.length" class="faint num">{{ freeSummary(items) }}</span>
       <!-- Collapsed: still one line that tells which machine is free. -->
       <ul v-if="collapsed && items.length" class="mini">
-        <li v-for="tile in tiles" :key="tile.machine.id">
-          <button type="button" class="mini-btn" :class="tile.machine.status" :title="tile.status" @click="emit('open', tile.machine.id)">
+        <li v-for="tile in tiles" :key="tile.machine.id" :data-machine="tile.machine.id">
+          <button type="button" class="mini-btn" :class="tile.machine.status" :title="tile.status" @click="open(tile.machine.id, $event)">
             <span class="t-status" :class="tile.level"><span class="dot" aria-hidden="true"></span></span>
             <span class="ellipsis">{{ tile.machine.name }}</span>
             <span class="mini-word" :class="tile.level">{{ STATUS[tile.machine.status] }}</span>
@@ -56,7 +58,7 @@ const tiles = computed(() =>
           class="tile"
           :class="[tile.machine.status, { selected: selected === tile.machine.id }]"
           :aria-pressed="selected === tile.machine.id"
-          @click="emit('open', tile.machine.id)"
+          @click="open(tile.machine.id, $event)"
         >
           <span class="t-line">
             <span class="t-name ellipsis" :title="tile.machine.name">{{ tile.machine.name }}</span>

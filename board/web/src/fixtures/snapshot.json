@@ -774,7 +774,6 @@
         "role": "ноутбук",
         "status": "overloaded",
         "reasons": [
-          "cpu",
           "memory",
           "gpu"
         ],
@@ -784,9 +783,10 @@
         "metrics": {
           "os": "macOS 16.1",
           "cpu": {
-            "cores": 12,
-            "load1": 19.6,
-            "load5": 17.2
+            "cores": 10,
+            "load1": 124.1,
+            "load5": 111.2,
+            "percent": 36.4
           },
           "memory": {
             "total_bytes": 38654705664,
@@ -818,721 +818,721 @@
         "history": [
           {
             "at": 1793996426,
-            "load_percent": 149.3,
+            "cpu_percent": 37.1,
             "memory_percent": 91.8,
             "gpu_percent": 85.5
           },
           {
             "at": 1793996456,
-            "load_percent": 149.3,
+            "cpu_percent": 36.4,
             "memory_percent": 92.0,
             "gpu_percent": 86.4
           },
           {
             "at": 1793996486,
-            "load_percent": 159.9,
+            "cpu_percent": 42.5,
             "memory_percent": 91.3,
             "gpu_percent": 81.7
           },
           {
             "at": 1793996516,
-            "load_percent": 153.2,
+            "cpu_percent": 37.7,
             "memory_percent": 93.0,
             "gpu_percent": 89.5
           },
           {
             "at": 1793996546,
-            "load_percent": 163.0,
+            "cpu_percent": 43.3,
             "memory_percent": 91.5,
             "gpu_percent": 81.2
           },
           {
             "at": 1793996576,
-            "load_percent": 162.5,
+            "cpu_percent": 42.5,
             "memory_percent": 91.6,
             "gpu_percent": 80.6
           },
           {
             "at": 1793996606,
-            "load_percent": 159.6,
+            "cpu_percent": 40.2,
             "memory_percent": 92.1,
             "gpu_percent": 80.1
           },
           {
             "at": 1793996636,
-            "load_percent": 168.6,
+            "cpu_percent": 45.5,
             "memory_percent": 92.0,
             "gpu_percent": 81.9
           },
           {
             "at": 1793996666,
-            "load_percent": 162.8,
+            "cpu_percent": 41.4,
             "memory_percent": 92.5,
             "gpu_percent": 73.9
           },
           {
             "at": 1793996696,
-            "load_percent": 170.5,
+            "cpu_percent": 46.0,
             "memory_percent": 91.6,
             "gpu_percent": 77.7
           },
           {
             "at": 1793996726,
-            "load_percent": 165.9,
+            "cpu_percent": 42.8,
             "memory_percent": 91.5,
             "gpu_percent": 70.5
           },
           {
             "at": 1793996756,
-            "load_percent": 167.2,
+            "cpu_percent": 43.4,
             "memory_percent": 91.8,
             "gpu_percent": 68.7
           },
           {
             "at": 1793996786,
-            "load_percent": 173.2,
+            "cpu_percent": 47.0,
             "memory_percent": 91.6,
             "gpu_percent": 66.5
           },
           {
             "at": 1793996816,
-            "load_percent": 180.1,
+            "cpu_percent": 51.2,
             "memory_percent": 92.3,
             "gpu_percent": 58.5
           },
           {
             "at": 1793996846,
-            "load_percent": 169.0,
+            "cpu_percent": 44.2,
             "memory_percent": 91.1,
             "gpu_percent": 61.6
           },
           {
             "at": 1793996876,
-            "load_percent": 170.5,
+            "cpu_percent": 45.2,
             "memory_percent": 93.5,
             "gpu_percent": 56.9
           },
           {
             "at": 1793996906,
-            "load_percent": 176.6,
+            "cpu_percent": 49.1,
             "memory_percent": 92.5,
             "gpu_percent": 53.2
           },
           {
             "at": 1793996936,
-            "load_percent": 181.1,
+            "cpu_percent": 52.1,
             "memory_percent": 90.9,
             "gpu_percent": 61.4
           },
           {
             "at": 1793996966,
-            "load_percent": 174.3,
+            "cpu_percent": 48.0,
             "memory_percent": 91.0,
             "gpu_percent": 52.8
           },
           {
             "at": 1793996996,
-            "load_percent": 170.3,
+            "cpu_percent": 45.8,
             "memory_percent": 91.0,
             "gpu_percent": 55.6
           },
           {
             "at": 1793997026,
-            "load_percent": 178.3,
+            "cpu_percent": 51.0,
             "memory_percent": 90.8,
             "gpu_percent": 58.0
           },
           {
             "at": 1793997056,
-            "load_percent": 161.8,
+            "cpu_percent": 41.1,
             "memory_percent": 89.8,
             "gpu_percent": 55.7
           },
           {
             "at": 1793997086,
-            "load_percent": 173.0,
+            "cpu_percent": 48.5,
             "memory_percent": 91.7,
             "gpu_percent": 52.9
           },
           {
             "at": 1793997116,
-            "load_percent": 161.9,
+            "cpu_percent": 42.0,
             "memory_percent": 91.8,
             "gpu_percent": 55.5
           },
           {
             "at": 1793997146,
-            "load_percent": 157.4,
+            "cpu_percent": 39.7,
             "memory_percent": 89.9,
             "gpu_percent": 56.5
           },
           {
             "at": 1793997176,
-            "load_percent": 154.7,
+            "cpu_percent": 38.5,
             "memory_percent": 89.6,
             "gpu_percent": 60.0
           },
           {
             "at": 1793997206,
-            "load_percent": 155.2,
+            "cpu_percent": 39.4,
             "memory_percent": 88.0,
             "gpu_percent": 52.9
           },
           {
             "at": 1793997236,
-            "load_percent": 160.8,
+            "cpu_percent": 43.4,
             "memory_percent": 87.7,
             "gpu_percent": 59.6
           },
           {
             "at": 1793997266,
-            "load_percent": 147.9,
+            "cpu_percent": 36.0,
             "memory_percent": 88.0,
             "gpu_percent": 57.4
           },
           {
             "at": 1793997296,
-            "load_percent": 151.5,
+            "cpu_percent": 38.9,
             "memory_percent": 87.4,
             "gpu_percent": 59.4
           },
           {
             "at": 1793997326,
-            "load_percent": 149.5,
+            "cpu_percent": 38.3,
             "memory_percent": 88.7,
             "gpu_percent": 67.2
           },
           {
             "at": 1793997356,
-            "load_percent": 142.4,
+            "cpu_percent": 34.5,
             "memory_percent": 86.4,
             "gpu_percent": 66.0
           },
           {
             "at": 1793997386,
-            "load_percent": 142.3,
+            "cpu_percent": 35.1,
             "memory_percent": 85.6,
             "gpu_percent": 68.7
           },
           {
             "at": 1793997416,
-            "load_percent": 131.6,
+            "cpu_percent": 29.1,
             "memory_percent": 88.0,
             "gpu_percent": 73.2
           },
           {
             "at": 1793997446,
-            "load_percent": 128.7,
+            "cpu_percent": 27.9,
             "memory_percent": 86.3,
             "gpu_percent": 77.3
           },
           {
             "at": 1793997476,
-            "load_percent": 128.2,
+            "cpu_percent": 28.2,
             "memory_percent": 84.8,
             "gpu_percent": 73.8
           },
           {
             "at": 1793997506,
-            "load_percent": 133.0,
+            "cpu_percent": 31.9,
             "memory_percent": 85.6,
             "gpu_percent": 78.0
           },
           {
             "at": 1793997536,
-            "load_percent": 126.3,
+            "cpu_percent": 28.3,
             "memory_percent": 83.7,
             "gpu_percent": 78.8
           },
           {
             "at": 1793997566,
-            "load_percent": 122.0,
+            "cpu_percent": 26.1,
             "memory_percent": 84.9,
             "gpu_percent": 80.9
           },
           {
             "at": 1793997596,
-            "load_percent": 124.0,
+            "cpu_percent": 27.9,
             "memory_percent": 85.9,
             "gpu_percent": 84.9
           },
           {
             "at": 1793997626,
-            "load_percent": 119.6,
+            "cpu_percent": 25.7,
             "memory_percent": 85.3,
             "gpu_percent": 83.8
           },
           {
             "at": 1793997656,
-            "load_percent": 115.1,
+            "cpu_percent": 23.3,
             "memory_percent": 84.5,
             "gpu_percent": 86.3
           },
           {
             "at": 1793997686,
-            "load_percent": 121.2,
+            "cpu_percent": 27.5,
             "memory_percent": 82.9,
             "gpu_percent": 86.9
           },
           {
             "at": 1793997716,
-            "load_percent": 118.0,
+            "cpu_percent": 25.9,
             "memory_percent": 82.9,
             "gpu_percent": 93.6
           },
           {
             "at": 1793997746,
-            "load_percent": 109.3,
+            "cpu_percent": 20.8,
             "memory_percent": 82.1,
             "gpu_percent": 91.5
           },
           {
             "at": 1793997776,
-            "load_percent": 113.4,
+            "cpu_percent": 23.6,
             "memory_percent": 83.7,
             "gpu_percent": 94.2
           },
           {
             "at": 1793997806,
-            "load_percent": 111.7,
+            "cpu_percent": 22.8,
             "memory_percent": 82.8,
             "gpu_percent": 95.3
           },
           {
             "at": 1793997836,
-            "load_percent": 116.6,
+            "cpu_percent": 26.0,
             "memory_percent": 83.3,
             "gpu_percent": 87.1
           },
           {
             "at": 1793997866,
-            "load_percent": 113.8,
+            "cpu_percent": 24.4,
             "memory_percent": 81.8,
             "gpu_percent": 90.4
           },
           {
             "at": 1793997896,
-            "load_percent": 106.6,
+            "cpu_percent": 19.9,
             "memory_percent": 81.4,
             "gpu_percent": 94.5
           },
           {
             "at": 1793997926,
-            "load_percent": 117.8,
+            "cpu_percent": 26.8,
             "memory_percent": 83.1,
             "gpu_percent": 92.5
           },
           {
             "at": 1793997956,
-            "load_percent": 104.3,
+            "cpu_percent": 18.4,
             "memory_percent": 83.5,
             "gpu_percent": 83.0
           },
           {
             "at": 1793997986,
-            "load_percent": 109.7,
+            "cpu_percent": 21.6,
             "memory_percent": 83.1,
             "gpu_percent": 81.6
           },
           {
             "at": 1793998016,
-            "load_percent": 116.0,
+            "cpu_percent": 25.3,
             "memory_percent": 82.9,
             "gpu_percent": 83.9
           },
           {
             "at": 1793998046,
-            "load_percent": 107.5,
+            "cpu_percent": 19.7,
             "memory_percent": 83.0,
             "gpu_percent": 77.8
           },
           {
             "at": 1793998076,
-            "load_percent": 114.2,
+            "cpu_percent": 23.6,
             "memory_percent": 82.8,
             "gpu_percent": 78.0
           },
           {
             "at": 1793998106,
-            "load_percent": 108.6,
+            "cpu_percent": 19.8,
             "memory_percent": 81.3,
             "gpu_percent": 74.0
           },
           {
             "at": 1793998136,
-            "load_percent": 120.4,
+            "cpu_percent": 26.8,
             "memory_percent": 82.2,
             "gpu_percent": 79.1
           },
           {
             "at": 1793998166,
-            "load_percent": 123.9,
+            "cpu_percent": 28.5,
             "memory_percent": 81.9,
             "gpu_percent": 78.3
           },
           {
             "at": 1793998196,
-            "load_percent": 123.0,
+            "cpu_percent": 27.5,
             "memory_percent": 81.0,
             "gpu_percent": 77.5
           },
           {
             "at": 1793998226,
-            "load_percent": 130.2,
+            "cpu_percent": 31.4,
             "memory_percent": 81.2,
             "gpu_percent": 66.3
           },
           {
             "at": 1793998256,
-            "load_percent": 123.7,
+            "cpu_percent": 26.8,
             "memory_percent": 82.1,
             "gpu_percent": 70.9
           },
           {
             "at": 1793998286,
-            "load_percent": 132.4,
+            "cpu_percent": 31.7,
             "memory_percent": 82.3,
             "gpu_percent": 68.2
           },
           {
             "at": 1793998316,
-            "load_percent": 133.5,
+            "cpu_percent": 31.8,
             "memory_percent": 83.8,
             "gpu_percent": 59.9
           },
           {
             "at": 1793998346,
-            "load_percent": 136.1,
+            "cpu_percent": 32.7,
             "memory_percent": 84.9,
             "gpu_percent": 67.0
           },
           {
             "at": 1793998376,
-            "load_percent": 137.0,
+            "cpu_percent": 32.6,
             "memory_percent": 83.6,
             "gpu_percent": 66.3
           },
           {
             "at": 1793998406,
-            "load_percent": 146.0,
+            "cpu_percent": 37.6,
             "memory_percent": 85.4,
             "gpu_percent": 55.8
           },
           {
             "at": 1793998436,
-            "load_percent": 150.6,
+            "cpu_percent": 39.8,
             "memory_percent": 85.8,
             "gpu_percent": 63.3
           },
           {
             "at": 1793998466,
-            "load_percent": 146.0,
+            "cpu_percent": 36.3,
             "memory_percent": 86.1,
             "gpu_percent": 55.5
           },
           {
             "at": 1793998496,
-            "load_percent": 151.9,
+            "cpu_percent": 39.4,
             "memory_percent": 84.6,
             "gpu_percent": 55.8
           },
           {
             "at": 1793998526,
-            "load_percent": 145.1,
+            "cpu_percent": 34.4,
             "memory_percent": 84.5,
             "gpu_percent": 61.2
           },
           {
             "at": 1793998556,
-            "load_percent": 158.1,
+            "cpu_percent": 42.0,
             "memory_percent": 84.9,
             "gpu_percent": 59.0
           },
           {
             "at": 1793998586,
-            "load_percent": 159.8,
+            "cpu_percent": 42.5,
             "memory_percent": 85.2,
             "gpu_percent": 51.0
           },
           {
             "at": 1793998616,
-            "load_percent": 167.9,
+            "cpu_percent": 46.9,
             "memory_percent": 85.6,
             "gpu_percent": 54.5
           },
           {
             "at": 1793998646,
-            "load_percent": 167.6,
+            "cpu_percent": 46.2,
             "memory_percent": 87.2,
             "gpu_percent": 56.0
           },
           {
             "at": 1793998676,
-            "load_percent": 161.2,
+            "cpu_percent": 41.7,
             "memory_percent": 88.4,
             "gpu_percent": 54.7
           },
           {
             "at": 1793998706,
-            "load_percent": 164.8,
+            "cpu_percent": 43.5,
             "memory_percent": 88.6,
             "gpu_percent": 54.0
           },
           {
             "at": 1793998736,
-            "load_percent": 171.2,
+            "cpu_percent": 47.1,
             "memory_percent": 87.9,
             "gpu_percent": 56.7
           },
           {
             "at": 1793998766,
-            "load_percent": 162.5,
+            "cpu_percent": 41.3,
             "memory_percent": 88.8,
             "gpu_percent": 63.1
           },
           {
             "at": 1793998796,
-            "load_percent": 171.0,
+            "cpu_percent": 46.2,
             "memory_percent": 89.7,
             "gpu_percent": 56.3
           },
           {
             "at": 1793998826,
-            "load_percent": 167.5,
+            "cpu_percent": 43.8,
             "memory_percent": 87.9,
             "gpu_percent": 64.6
           },
           {
             "at": 1793998856,
-            "load_percent": 167.6,
+            "cpu_percent": 43.7,
             "memory_percent": 90.0,
             "gpu_percent": 65.2
           },
           {
             "at": 1793998886,
-            "load_percent": 167.3,
+            "cpu_percent": 43.3,
             "memory_percent": 91.1,
             "gpu_percent": 62.2
           },
           {
             "at": 1793998916,
-            "load_percent": 179.1,
+            "cpu_percent": 50.6,
             "memory_percent": 91.0,
             "gpu_percent": 68.1
           },
           {
             "at": 1793998946,
-            "load_percent": 169.1,
+            "cpu_percent": 44.3,
             "memory_percent": 91.3,
             "gpu_percent": 73.8
           },
           {
             "at": 1793998976,
-            "load_percent": 170.9,
+            "cpu_percent": 45.4,
             "memory_percent": 90.8,
             "gpu_percent": 74.7
           },
           {
             "at": 1793999006,
-            "load_percent": 172.8,
+            "cpu_percent": 46.7,
             "memory_percent": 90.2,
             "gpu_percent": 71.4
           },
           {
             "at": 1793999036,
-            "load_percent": 179.9,
+            "cpu_percent": 51.3,
             "memory_percent": 92.3,
             "gpu_percent": 84.6
           },
           {
             "at": 1793999066,
-            "load_percent": 166.4,
+            "cpu_percent": 43.0,
             "memory_percent": 91.2,
             "gpu_percent": 84.2
           },
           {
             "at": 1793999096,
-            "load_percent": 171.2,
+            "cpu_percent": 46.3,
             "memory_percent": 92.8,
             "gpu_percent": 88.3
           },
           {
             "at": 1793999126,
-            "load_percent": 171.4,
+            "cpu_percent": 46.7,
             "memory_percent": 93.5,
             "gpu_percent": 79.6
           },
           {
             "at": 1793999156,
-            "load_percent": 175.2,
+            "cpu_percent": 49.5,
             "memory_percent": 92.0,
             "gpu_percent": 83.1
           },
           {
             "at": 1793999186,
-            "load_percent": 172.4,
+            "cpu_percent": 48.1,
             "memory_percent": 92.2,
             "gpu_percent": 81.7
           },
           {
             "at": 1793999216,
-            "load_percent": 171.1,
+            "cpu_percent": 47.8,
             "memory_percent": 94.0,
             "gpu_percent": 91.6
           },
           {
             "at": 1793999246,
-            "load_percent": 159.6,
+            "cpu_percent": 41.0,
             "memory_percent": 93.4,
             "gpu_percent": 86.3
           },
           {
             "at": 1793999276,
-            "load_percent": 159.4,
+            "cpu_percent": 41.5,
             "memory_percent": 91.9,
             "gpu_percent": 85.2
           },
           {
             "at": 1793999306,
-            "load_percent": 156.0,
+            "cpu_percent": 39.9,
             "memory_percent": 91.8,
             "gpu_percent": 89.0
           },
           {
             "at": 1793999336,
-            "load_percent": 161.8,
+            "cpu_percent": 44.1,
             "memory_percent": 91.9,
             "gpu_percent": 94.9
           },
           {
             "at": 1793999366,
-            "load_percent": 160.3,
+            "cpu_percent": 43.8,
             "memory_percent": 94.2,
             "gpu_percent": 93.6
           },
           {
             "at": 1793999396,
-            "load_percent": 144.6,
+            "cpu_percent": 34.6,
             "memory_percent": 93.9,
             "gpu_percent": 86.3
           },
           {
             "at": 1793999426,
-            "load_percent": 142.1,
+            "cpu_percent": 33.7,
             "memory_percent": 91.9,
             "gpu_percent": 84.2
           },
           {
             "at": 1793999456,
-            "load_percent": 140.1,
+            "cpu_percent": 33.1,
             "memory_percent": 93.9,
             "gpu_percent": 92.4
           },
           {
             "at": 1793999486,
-            "load_percent": 137.2,
+            "cpu_percent": 31.9,
             "memory_percent": 94.2,
             "gpu_percent": 86.9
           },
           {
             "at": 1793999516,
-            "load_percent": 138.4,
+            "cpu_percent": 33.3,
             "memory_percent": 93.2,
             "gpu_percent": 87.0
           },
           {
             "at": 1793999546,
-            "load_percent": 137.1,
+            "cpu_percent": 33.2,
             "memory_percent": 92.1,
             "gpu_percent": 78.0
           },
           {
             "at": 1793999576,
-            "load_percent": 129.1,
+            "cpu_percent": 28.8,
             "memory_percent": 92.5,
             "gpu_percent": 75.8
           },
           {
             "at": 1793999606,
-            "load_percent": 122.2,
+            "cpu_percent": 25.1,
             "memory_percent": 91.1,
             "gpu_percent": 81.4
           },
           {
             "at": 1793999636,
-            "load_percent": 126.2,
+            "cpu_percent": 28.2,
             "memory_percent": 90.5,
             "gpu_percent": 76.1
           },
           {
             "at": 1793999666,
-            "load_percent": 122.9,
+            "cpu_percent": 26.7,
             "memory_percent": 93.2,
             "gpu_percent": 69.7
           },
           {
             "at": 1793999696,
-            "load_percent": 123.7,
+            "cpu_percent": 27.7,
             "memory_percent": 92.0,
             "gpu_percent": 77.9
           },
           {
             "at": 1793999726,
-            "load_percent": 127.6,
+            "cpu_percent": 30.7,
             "memory_percent": 91.3,
             "gpu_percent": 72.1
           },
           {
             "at": 1793999756,
-            "load_percent": 121.4,
+            "cpu_percent": 27.2,
             "memory_percent": 92.2,
             "gpu_percent": 71.9
           },
           {
             "at": 1793999786,
-            "load_percent": 116.7,
+            "cpu_percent": 24.7,
             "memory_percent": 90.4,
             "gpu_percent": 61.2
           },
           {
             "at": 1793999816,
-            "load_percent": 116.7,
+            "cpu_percent": 25.1,
             "memory_percent": 91.4,
             "gpu_percent": 68.5
           },
           {
             "at": 1793999846,
-            "load_percent": 116.2,
+            "cpu_percent": 25.1,
             "memory_percent": 91.0,
             "gpu_percent": 57.2
           },
           {
             "at": 1793999876,
-            "load_percent": 105.1,
+            "cpu_percent": 18.4,
             "memory_percent": 88.8,
             "gpu_percent": 65.0
           },
           {
             "at": 1793999906,
-            "load_percent": 117.7,
+            "cpu_percent": 26.5,
             "memory_percent": 88.5,
             "gpu_percent": 58.6
           },
           {
             "at": 1793999936,
-            "load_percent": 115.1,
+            "cpu_percent": 25.0,
             "memory_percent": 88.3,
             "gpu_percent": 55.9
           },
           {
             "at": 1793999966,
-            "load_percent": 116.2,
+            "cpu_percent": 25.8,
             "memory_percent": 87.7,
             "gpu_percent": 57.4
           },
           {
             "at": 1793999996,
-            "load_percent": 163.3,
+            "cpu_percent": 36.4,
             "memory_percent": 92.8,
             "gpu_percent": 86
           }
@@ -1552,7 +1552,8 @@
           "cpu": {
             "cores": 32,
             "load1": 3.1,
-            "load5": 4.4
+            "load5": 4.4,
+            "percent": 8.2
           },
           "memory": {
             "total_bytes": 137438953472,
@@ -1609,721 +1610,721 @@
         "history": [
           {
             "at": 1793996419,
-            "load_percent": 12.6,
+            "cpu_percent": 12.6,
             "memory_percent": 15.9,
             "gpu_percent": 12.2
           },
           {
             "at": 1793996449,
-            "load_percent": 12.6,
+            "cpu_percent": 12.6,
             "memory_percent": 15.3,
             "gpu_percent": 12.5
           },
           {
             "at": 1793996479,
-            "load_percent": 15.8,
+            "cpu_percent": 15.8,
             "memory_percent": 16.2,
             "gpu_percent": 12.8
           },
           {
             "at": 1793996509,
-            "load_percent": 14.9,
+            "cpu_percent": 14.9,
             "memory_percent": 15.7,
             "gpu_percent": 15.6
           },
           {
             "at": 1793996539,
-            "load_percent": 14.9,
+            "cpu_percent": 14.9,
             "memory_percent": 15.6,
             "gpu_percent": 13.8
           },
           {
             "at": 1793996569,
-            "load_percent": 16.0,
+            "cpu_percent": 16.0,
             "memory_percent": 15.9,
             "gpu_percent": 12.3
           },
           {
             "at": 1793996599,
-            "load_percent": 16.0,
+            "cpu_percent": 16.0,
             "memory_percent": 16.6,
             "gpu_percent": 14.5
           },
           {
             "at": 1793996629,
-            "load_percent": 17.6,
+            "cpu_percent": 17.6,
             "memory_percent": 16.1,
             "gpu_percent": 14.2
           },
           {
             "at": 1793996659,
-            "load_percent": 18.8,
+            "cpu_percent": 18.8,
             "memory_percent": 16.8,
             "gpu_percent": 11.2
           },
           {
             "at": 1793996689,
-            "load_percent": 19.3,
+            "cpu_percent": 19.3,
             "memory_percent": 17.1,
             "gpu_percent": 9.1
           },
           {
             "at": 1793996719,
-            "load_percent": 22.5,
+            "cpu_percent": 22.5,
             "memory_percent": 16.6,
             "gpu_percent": 8.3
           },
           {
             "at": 1793996749,
-            "load_percent": 20.0,
+            "cpu_percent": 20.0,
             "memory_percent": 16.6,
             "gpu_percent": 6.8
           },
           {
             "at": 1793996779,
-            "load_percent": 21.6,
+            "cpu_percent": 21.6,
             "memory_percent": 16.7,
             "gpu_percent": 6.8
           },
           {
             "at": 1793996809,
-            "load_percent": 19.9,
+            "cpu_percent": 19.9,
             "memory_percent": 17.0,
             "gpu_percent": 4.7
           },
           {
             "at": 1793996839,
-            "load_percent": 21.0,
+            "cpu_percent": 21.0,
             "memory_percent": 17.2,
             "gpu_percent": 4.2
           },
           {
             "at": 1793996869,
-            "load_percent": 19.1,
+            "cpu_percent": 19.1,
             "memory_percent": 17.0,
             "gpu_percent": 3.2
           },
           {
             "at": 1793996899,
-            "load_percent": 20.5,
+            "cpu_percent": 20.5,
             "memory_percent": 17.1,
             "gpu_percent": 3.5
           },
           {
             "at": 1793996929,
-            "load_percent": 18.9,
+            "cpu_percent": 18.9,
             "memory_percent": 16.5,
             "gpu_percent": 3.9
           },
           {
             "at": 1793996959,
-            "load_percent": 23.0,
+            "cpu_percent": 23.0,
             "memory_percent": 16.6,
             "gpu_percent": 2.6
           },
           {
             "at": 1793996989,
-            "load_percent": 21.6,
+            "cpu_percent": 21.6,
             "memory_percent": 16.7,
             "gpu_percent": 0.6
           },
           {
             "at": 1793997019,
-            "load_percent": 19.1,
+            "cpu_percent": 19.1,
             "memory_percent": 17.3,
             "gpu_percent": 0.1
           },
           {
             "at": 1793997049,
-            "load_percent": 20.3,
+            "cpu_percent": 20.3,
             "memory_percent": 16.8,
             "gpu_percent": 0.3
           },
           {
             "at": 1793997079,
-            "load_percent": 22.6,
+            "cpu_percent": 22.6,
             "memory_percent": 17.1,
             "gpu_percent": 0
           },
           {
             "at": 1793997109,
-            "load_percent": 17.0,
+            "cpu_percent": 17.0,
             "memory_percent": 16.4,
             "gpu_percent": 0
           },
           {
             "at": 1793997139,
-            "load_percent": 20.6,
+            "cpu_percent": 20.6,
             "memory_percent": 16.4,
             "gpu_percent": 0
           },
           {
             "at": 1793997169,
-            "load_percent": 17.6,
+            "cpu_percent": 17.6,
             "memory_percent": 16.7,
             "gpu_percent": 0
           },
           {
             "at": 1793997199,
-            "load_percent": 17.2,
+            "cpu_percent": 17.2,
             "memory_percent": 17.1,
             "gpu_percent": 3.0
           },
           {
             "at": 1793997229,
-            "load_percent": 18.5,
+            "cpu_percent": 18.5,
             "memory_percent": 17.1,
             "gpu_percent": 0.3
           },
           {
             "at": 1793997259,
-            "load_percent": 15.0,
+            "cpu_percent": 15.0,
             "memory_percent": 17.0,
             "gpu_percent": 2.6
           },
           {
             "at": 1793997289,
-            "load_percent": 14.9,
+            "cpu_percent": 14.9,
             "memory_percent": 16.5,
             "gpu_percent": 4.0
           },
           {
             "at": 1793997319,
-            "load_percent": 15.1,
+            "cpu_percent": 15.1,
             "memory_percent": 16.7,
             "gpu_percent": 5.9
           },
           {
             "at": 1793997349,
-            "load_percent": 16.1,
+            "cpu_percent": 16.1,
             "memory_percent": 16.6,
             "gpu_percent": 4.4
           },
           {
             "at": 1793997379,
-            "load_percent": 11.4,
+            "cpu_percent": 11.4,
             "memory_percent": 16.5,
             "gpu_percent": 5.7
           },
           {
             "at": 1793997409,
-            "load_percent": 13.5,
+            "cpu_percent": 13.5,
             "memory_percent": 16.0,
             "gpu_percent": 6.7
           },
           {
             "at": 1793997439,
-            "load_percent": 12.0,
+            "cpu_percent": 12.0,
             "memory_percent": 16.9,
             "gpu_percent": 8.4
           },
           {
             "at": 1793997469,
-            "load_percent": 10.8,
+            "cpu_percent": 10.8,
             "memory_percent": 15.9,
             "gpu_percent": 9.6
           },
           {
             "at": 1793997499,
-            "load_percent": 8.7,
+            "cpu_percent": 8.7,
             "memory_percent": 16.8,
             "gpu_percent": 12.6
           },
           {
             "at": 1793997529,
-            "load_percent": 7.7,
+            "cpu_percent": 7.7,
             "memory_percent": 16.6,
             "gpu_percent": 13.1
           },
           {
             "at": 1793997559,
-            "load_percent": 5.4,
+            "cpu_percent": 5.4,
             "memory_percent": 15.4,
             "gpu_percent": 13.9
           },
           {
             "at": 1793997589,
-            "load_percent": 5.3,
+            "cpu_percent": 5.3,
             "memory_percent": 15.9,
             "gpu_percent": 11.1
           },
           {
             "at": 1793997619,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793997649,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793997679,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793997709,
-            "load_percent": 4.2,
+            "cpu_percent": 4.2,
             "memory_percent": 15.2,
             "gpu_percent": 13.9
           },
           {
             "at": 1793997739,
-            "load_percent": 3.6,
+            "cpu_percent": 3.6,
             "memory_percent": 15.0,
             "gpu_percent": 14.1
           },
           {
             "at": 1793997769,
-            "load_percent": 8.0,
+            "cpu_percent": 8.0,
             "memory_percent": 15.7,
             "gpu_percent": 11.4
           },
           {
             "at": 1793997799,
-            "load_percent": 8.3,
+            "cpu_percent": 8.3,
             "memory_percent": 14.7,
             "gpu_percent": 12.5
           },
           {
             "at": 1793997829,
-            "load_percent": 7.2,
+            "cpu_percent": 7.2,
             "memory_percent": 15.0,
             "gpu_percent": 13.9
           },
           {
             "at": 1793997859,
-            "load_percent": 5.1,
+            "cpu_percent": 5.1,
             "memory_percent": 14.4,
             "gpu_percent": 12.7
           },
           {
             "at": 1793997889,
-            "load_percent": 5.1,
+            "cpu_percent": 5.1,
             "memory_percent": 14.7,
             "gpu_percent": 11.9
           },
           {
             "at": 1793997919,
-            "load_percent": 5.8,
+            "cpu_percent": 5.8,
             "memory_percent": 15.1,
             "gpu_percent": 11.4
           },
           {
             "at": 1793997949,
-            "load_percent": 7.3,
+            "cpu_percent": 7.3,
             "memory_percent": 14.0,
             "gpu_percent": 7.5
           },
           {
             "at": 1793997979,
-            "load_percent": 6.0,
+            "cpu_percent": 6.0,
             "memory_percent": 14.7,
             "gpu_percent": 5.8
           },
           {
             "at": 1793998009,
-            "load_percent": 8.3,
+            "cpu_percent": 8.3,
             "memory_percent": 14.2,
             "gpu_percent": 4.9
           },
           {
             "at": 1793998039,
-            "load_percent": 7.9,
+            "cpu_percent": 7.9,
             "memory_percent": 14.5,
             "gpu_percent": 5.3
           },
           {
             "at": 1793998069,
-            "load_percent": 12.8,
+            "cpu_percent": 12.8,
             "memory_percent": 14.2,
             "gpu_percent": 4.9
           },
           {
             "at": 1793998099,
-            "load_percent": 13.6,
+            "cpu_percent": 13.6,
             "memory_percent": 13.5,
             "gpu_percent": 5.0
           },
           {
             "at": 1793998129,
-            "load_percent": 11.8,
+            "cpu_percent": 11.8,
             "memory_percent": 14.1,
             "gpu_percent": 3.2
           },
           {
             "at": 1793998159,
-            "load_percent": 10.8,
+            "cpu_percent": 10.8,
             "memory_percent": 13.5,
             "gpu_percent": 2.2
           },
           {
             "at": 1793998189,
-            "load_percent": 16.0,
+            "cpu_percent": 16.0,
             "memory_percent": 12.8,
             "gpu_percent": 2.0
           },
           {
             "at": 1793998219,
-            "load_percent": 12.9,
+            "cpu_percent": 12.9,
             "memory_percent": 12.7,
             "gpu_percent": 0.3
           },
           {
             "at": 1793998249,
-            "load_percent": 14.0,
+            "cpu_percent": 14.0,
             "memory_percent": 13.2,
             "gpu_percent": 0.4
           },
           {
             "at": 1793998279,
-            "load_percent": 12.7,
+            "cpu_percent": 12.7,
             "memory_percent": 13.0,
             "gpu_percent": 0
           },
           {
             "at": 1793998309,
-            "load_percent": 15.8,
+            "cpu_percent": 15.8,
             "memory_percent": 12.7,
             "gpu_percent": 1.2
           },
           {
             "at": 1793998339,
-            "load_percent": 17.1,
+            "cpu_percent": 17.1,
             "memory_percent": 12.4,
             "gpu_percent": 0
           },
           {
             "at": 1793998369,
-            "load_percent": 18.0,
+            "cpu_percent": 18.0,
             "memory_percent": 12.6,
             "gpu_percent": 2.3
           },
           {
             "at": 1793998399,
-            "load_percent": 16.9,
+            "cpu_percent": 16.9,
             "memory_percent": 12.5,
             "gpu_percent": 1.7
           },
           {
             "at": 1793998429,
-            "load_percent": 19.4,
+            "cpu_percent": 19.4,
             "memory_percent": 13.0,
             "gpu_percent": 1.0
           },
           {
             "at": 1793998459,
-            "load_percent": 17.0,
+            "cpu_percent": 17.0,
             "memory_percent": 11.9,
             "gpu_percent": 1.1
           },
           {
             "at": 1793998489,
-            "load_percent": 19.1,
+            "cpu_percent": 19.1,
             "memory_percent": 12.7,
             "gpu_percent": 2.5
           },
           {
             "at": 1793998519,
-            "load_percent": 18.5,
+            "cpu_percent": 18.5,
             "memory_percent": 12.8,
             "gpu_percent": 5.0
           },
           {
             "at": 1793998549,
-            "load_percent": 20.7,
+            "cpu_percent": 20.7,
             "memory_percent": 11.8,
             "gpu_percent": 6.3
           },
           {
             "at": 1793998579,
-            "load_percent": 18.9,
+            "cpu_percent": 18.9,
             "memory_percent": 12.8,
             "gpu_percent": 5.1
           },
           {
             "at": 1793998609,
-            "load_percent": 19.0,
+            "cpu_percent": 19.0,
             "memory_percent": 12.4,
             "gpu_percent": 6.0
           },
           {
             "at": 1793998639,
-            "load_percent": 20.8,
+            "cpu_percent": 20.8,
             "memory_percent": 12.6,
             "gpu_percent": 8.9
           },
           {
             "at": 1793998669,
-            "load_percent": 20.4,
+            "cpu_percent": 20.4,
             "memory_percent": 11.8,
             "gpu_percent": 10.2
           },
           {
             "at": 1793998699,
-            "load_percent": 22.5,
+            "cpu_percent": 22.5,
             "memory_percent": 11.9,
             "gpu_percent": 10.3
           },
           {
             "at": 1793998729,
-            "load_percent": 22.0,
+            "cpu_percent": 22.0,
             "memory_percent": 11.9,
             "gpu_percent": 10.6
           },
           {
             "at": 1793998759,
-            "load_percent": 23.1,
+            "cpu_percent": 23.1,
             "memory_percent": 12.6,
             "gpu_percent": 12.8
           },
           {
             "at": 1793998789,
-            "load_percent": 22.3,
+            "cpu_percent": 22.3,
             "memory_percent": 12.1,
             "gpu_percent": 11.1
           },
           {
             "at": 1793998819,
-            "load_percent": 22.2,
+            "cpu_percent": 22.2,
             "memory_percent": 11.8,
             "gpu_percent": 12.7
           },
           {
             "at": 1793998849,
-            "load_percent": 22.7,
+            "cpu_percent": 22.7,
             "memory_percent": 11.9,
             "gpu_percent": 13.7
           },
           {
             "at": 1793998879,
-            "load_percent": 19.3,
+            "cpu_percent": 19.3,
             "memory_percent": 11.7,
             "gpu_percent": 15.8
           },
           {
             "at": 1793998909,
-            "load_percent": 18.3,
+            "cpu_percent": 18.3,
             "memory_percent": 11.5,
             "gpu_percent": 14.5
           },
           {
             "at": 1793998939,
-            "load_percent": 21.6,
+            "cpu_percent": 21.6,
             "memory_percent": 11.6,
             "gpu_percent": 15.3
           },
           {
             "at": 1793998969,
-            "load_percent": 15.9,
+            "cpu_percent": 15.9,
             "memory_percent": 12.5,
             "gpu_percent": 13.3
           },
           {
             "at": 1793998999,
-            "load_percent": 18.6,
+            "cpu_percent": 18.6,
             "memory_percent": 11.8,
             "gpu_percent": 11.8
           },
           {
             "at": 1793999029,
-            "load_percent": 17.3,
+            "cpu_percent": 17.3,
             "memory_percent": 12.7,
             "gpu_percent": 11.2
           },
           {
             "at": 1793999059,
-            "load_percent": 12.9,
+            "cpu_percent": 12.9,
             "memory_percent": 11.9,
             "gpu_percent": 13.3
           },
           {
             "at": 1793999089,
-            "load_percent": 16.8,
+            "cpu_percent": 16.8,
             "memory_percent": 12.0,
             "gpu_percent": 11.3
           },
           {
             "at": 1793999119,
-            "load_percent": 16.4,
+            "cpu_percent": 16.4,
             "memory_percent": 12.3,
             "gpu_percent": 8.8
           },
           {
             "at": 1793999149,
-            "load_percent": 13.9,
+            "cpu_percent": 13.9,
             "memory_percent": 12.0,
             "gpu_percent": 6.6
           },
           {
             "at": 1793999179,
-            "load_percent": 13.7,
+            "cpu_percent": 13.7,
             "memory_percent": 12.3,
             "gpu_percent": 7.4
           },
           {
             "at": 1793999209,
-            "load_percent": 13.4,
+            "cpu_percent": 13.4,
             "memory_percent": 13.1,
             "gpu_percent": 7.0
           },
           {
             "at": 1793999239,
-            "load_percent": 8.6,
+            "cpu_percent": 8.6,
             "memory_percent": 13.1,
             "gpu_percent": 4.9
           },
           {
             "at": 1793999269,
-            "load_percent": 10.1,
+            "cpu_percent": 10.1,
             "memory_percent": 13.1,
             "gpu_percent": 3.2
           },
           {
             "at": 1793999299,
-            "load_percent": 9.3,
+            "cpu_percent": 9.3,
             "memory_percent": 12.9,
             "gpu_percent": 3.9
           },
           {
             "at": 1793999329,
-            "load_percent": 10.7,
+            "cpu_percent": 10.7,
             "memory_percent": 13.4,
             "gpu_percent": 4.0
           },
           {
             "at": 1793999359,
-            "load_percent": 9.9,
+            "cpu_percent": 9.9,
             "memory_percent": 13.5,
             "gpu_percent": 0.5
           },
           {
             "at": 1793999389,
-            "load_percent": 9.5,
+            "cpu_percent": 9.5,
             "memory_percent": 13.1,
             "gpu_percent": 0
           },
           {
             "at": 1793999419,
-            "load_percent": 7.6,
+            "cpu_percent": 7.6,
             "memory_percent": 13.5,
             "gpu_percent": 0
           },
           {
             "at": 1793999449,
-            "load_percent": 9.0,
+            "cpu_percent": 9.0,
             "memory_percent": 12.8,
             "gpu_percent": 0
           },
           {
             "at": 1793999479,
-            "load_percent": 7.5,
+            "cpu_percent": 7.5,
             "memory_percent": 13.7,
             "gpu_percent": 0.7
           },
           {
             "at": 1793999509,
-            "load_percent": 7.3,
+            "cpu_percent": 7.3,
             "memory_percent": 13.5,
             "gpu_percent": 0
           },
           {
             "at": 1793999539,
-            "load_percent": 4.4,
+            "cpu_percent": 4.4,
             "memory_percent": 14.0,
             "gpu_percent": 1.4
           },
           {
             "at": 1793999569,
-            "load_percent": 3.2,
+            "cpu_percent": 3.2,
             "memory_percent": 14.0,
             "gpu_percent": 1.5
           },
           {
             "at": 1793999599,
-            "load_percent": 3.8,
+            "cpu_percent": 3.8,
             "memory_percent": 13.7,
             "gpu_percent": 1.1
           },
           {
             "at": 1793999629,
-            "load_percent": 5.3,
+            "cpu_percent": 5.3,
             "memory_percent": 13.5,
             "gpu_percent": 0.6
           },
           {
             "at": 1793999659,
-            "load_percent": 4.0,
+            "cpu_percent": 4.0,
             "memory_percent": 14.7,
             "gpu_percent": 4.5
           },
           {
             "at": 1793999689,
-            "load_percent": 8.7,
+            "cpu_percent": 8.7,
             "memory_percent": 13.9,
             "gpu_percent": 2.7
           },
           {
             "at": 1793999719,
-            "load_percent": 7.4,
+            "cpu_percent": 7.4,
             "memory_percent": 14.4,
             "gpu_percent": 5.7
           },
           {
             "at": 1793999749,
-            "load_percent": 8.3,
+            "cpu_percent": 8.3,
             "memory_percent": 14.4,
             "gpu_percent": 4.4
           },
           {
             "at": 1793999779,
-            "load_percent": 8.8,
+            "cpu_percent": 8.8,
             "memory_percent": 14.5,
             "gpu_percent": 5.5
           },
           {
             "at": 1793999809,
-            "load_percent": 9.7,
+            "cpu_percent": 9.7,
             "memory_percent": 15.1,
             "gpu_percent": 8.7
           },
           {
             "at": 1793999839,
-            "load_percent": 9.2,
+            "cpu_percent": 9.2,
             "memory_percent": 15.5,
             "gpu_percent": 8.0
           },
           {
             "at": 1793999869,
-            "load_percent": 7.0,
+            "cpu_percent": 7.0,
             "memory_percent": 14.8,
             "gpu_percent": 11.6
           },
           {
             "at": 1793999899,
-            "load_percent": 12.5,
+            "cpu_percent": 12.5,
             "memory_percent": 15.4,
             "gpu_percent": 10.8
           },
           {
             "at": 1793999929,
-            "load_percent": 13.0,
+            "cpu_percent": 13.0,
             "memory_percent": 15.1,
             "gpu_percent": 10.4
           },
           {
             "at": 1793999959,
-            "load_percent": 12.4,
+            "cpu_percent": 12.4,
             "memory_percent": 15.5,
             "gpu_percent": 11.3
           },
           {
             "at": 1793999989,
-            "load_percent": 9.7,
+            "cpu_percent": 8.2,
             "memory_percent": 14.5,
             "gpu_percent": 6
           }
@@ -2345,7 +2346,8 @@
           "cpu": {
             "cores": 16,
             "load1": 6.2,
-            "load5": 5.8
+            "load5": 5.8,
+            "percent": 41.0
           },
           "memory": {
             "total_bytes": 68719476736,
@@ -2374,6 +2376,16 @@
               "mount": "/",
               "total_bytes": 244813135872,
               "free_bytes": 73014444032
+            },
+            {
+              "mount": "/srv/assistant",
+              "total_bytes": 983547510784,
+              "free_bytes": 431644213248
+            },
+            {
+              "mount": "/srv/assistant/checkpoints/archive",
+              "total_bytes": 3958241859993,
+              "free_bytes": 2418925581107
             }
           ]
         },
@@ -2382,7 +2394,8 @@
           "cpu": {
             "cores": 64,
             "load1": 41.5,
-            "load5": 39.0
+            "load5": 39.0,
+            "percent": 58.3
           },
           "memory": {
             "total_bytes": 549755813888,
@@ -2393,721 +2406,721 @@
         "history": [
           {
             "at": 1793996423,
-            "load_percent": 46.4,
+            "cpu_percent": 46.4,
             "memory_percent": 53.0,
             "gpu_percent": 35.5
           },
           {
             "at": 1793996453,
-            "load_percent": 48.6,
+            "cpu_percent": 48.6,
             "memory_percent": 54.4,
             "gpu_percent": 42.3
           },
           {
             "at": 1793996483,
-            "load_percent": 44.2,
+            "cpu_percent": 44.2,
             "memory_percent": 54.1,
             "gpu_percent": 45.7
           },
           {
             "at": 1793996513,
-            "load_percent": 46.1,
+            "cpu_percent": 46.1,
             "memory_percent": 53.9,
             "gpu_percent": 39.9
           },
           {
             "at": 1793996543,
-            "load_percent": 45.4,
+            "cpu_percent": 45.4,
             "memory_percent": 54.1,
             "gpu_percent": 49.0
           },
           {
             "at": 1793996573,
-            "load_percent": 50.2,
+            "cpu_percent": 50.2,
             "memory_percent": 55.3,
             "gpu_percent": 42.8
           },
           {
             "at": 1793996603,
-            "load_percent": 45.5,
+            "cpu_percent": 45.5,
             "memory_percent": 54.6,
             "gpu_percent": 48.3
           },
           {
             "at": 1793996633,
-            "load_percent": 45.1,
+            "cpu_percent": 45.1,
             "memory_percent": 54.4,
             "gpu_percent": 48.3
           },
           {
             "at": 1793996663,
-            "load_percent": 45.3,
+            "cpu_percent": 45.3,
             "memory_percent": 55.4,
             "gpu_percent": 49.3
           },
           {
             "at": 1793996693,
-            "load_percent": 47.3,
+            "cpu_percent": 47.3,
             "memory_percent": 55.3,
             "gpu_percent": 46.0
           },
           {
             "at": 1793996723,
-            "load_percent": 50.4,
+            "cpu_percent": 50.4,
             "memory_percent": 56.0,
             "gpu_percent": 46.9
           },
           {
             "at": 1793996753,
-            "load_percent": 50.3,
+            "cpu_percent": 50.3,
             "memory_percent": 54.7,
             "gpu_percent": 48.0
           },
           {
             "at": 1793996783,
-            "load_percent": 49.3,
+            "cpu_percent": 49.3,
             "memory_percent": 55.4,
             "gpu_percent": 45.6
           },
           {
             "at": 1793996813,
-            "load_percent": 50.7,
+            "cpu_percent": 50.7,
             "memory_percent": 56.1,
             "gpu_percent": 47.0
           },
           {
             "at": 1793996843,
-            "load_percent": 50.1,
+            "cpu_percent": 50.1,
             "memory_percent": 56.2,
             "gpu_percent": 43.7
           },
           {
             "at": 1793996873,
-            "load_percent": 46.2,
+            "cpu_percent": 46.2,
             "memory_percent": 56.4,
             "gpu_percent": 42.2
           },
           {
             "at": 1793996903,
-            "load_percent": 45.1,
+            "cpu_percent": 45.1,
             "memory_percent": 55.1,
             "gpu_percent": 36.6
           },
           {
             "at": 1793996933,
-            "load_percent": 49.2,
+            "cpu_percent": 49.2,
             "memory_percent": 55.5,
             "gpu_percent": 40.9
           },
           {
             "at": 1793996963,
-            "load_percent": 47.7,
+            "cpu_percent": 47.7,
             "memory_percent": 55.3,
             "gpu_percent": 37.8
           },
           {
             "at": 1793996993,
-            "load_percent": 42.9,
+            "cpu_percent": 42.9,
             "memory_percent": 55.5,
             "gpu_percent": 33.5
           },
           {
             "at": 1793997023,
-            "load_percent": 46.3,
+            "cpu_percent": 46.3,
             "memory_percent": 56.7,
             "gpu_percent": 37.0
           },
           {
             "at": 1793997053,
-            "load_percent": 44.0,
+            "cpu_percent": 44.0,
             "memory_percent": 56.1,
             "gpu_percent": 35.3
           },
           {
             "at": 1793997083,
-            "load_percent": 43.4,
+            "cpu_percent": 43.4,
             "memory_percent": 56.7,
             "gpu_percent": 30.4
           },
           {
             "at": 1793997113,
-            "load_percent": 42.6,
+            "cpu_percent": 42.6,
             "memory_percent": 55.8,
             "gpu_percent": 25.9
           },
           {
             "at": 1793997143,
-            "load_percent": 41.0,
+            "cpu_percent": 41.0,
             "memory_percent": 56.6,
             "gpu_percent": 27.3
           },
           {
             "at": 1793997173,
-            "load_percent": 39.3,
+            "cpu_percent": 39.3,
             "memory_percent": 55.9,
             "gpu_percent": 22.2
           },
           {
             "at": 1793997203,
-            "load_percent": 40.3,
+            "cpu_percent": 40.3,
             "memory_percent": 55.5,
             "gpu_percent": 21.2
           },
           {
             "at": 1793997233,
-            "load_percent": 40.1,
+            "cpu_percent": 40.1,
             "memory_percent": 56.3,
             "gpu_percent": 23.2
           },
           {
             "at": 1793997263,
-            "load_percent": 43.0,
+            "cpu_percent": 43.0,
             "memory_percent": 56.5,
             "gpu_percent": 19.0
           },
           {
             "at": 1793997293,
-            "load_percent": 37.3,
+            "cpu_percent": 37.3,
             "memory_percent": 55.1,
             "gpu_percent": 21.9
           },
           {
             "at": 1793997323,
-            "load_percent": 41.7,
+            "cpu_percent": 41.7,
             "memory_percent": 55.8,
             "gpu_percent": 22.2
           },
           {
             "at": 1793997353,
-            "load_percent": 36.4,
+            "cpu_percent": 36.4,
             "memory_percent": 55.7,
             "gpu_percent": 17.4
           },
           {
             "at": 1793997383,
-            "load_percent": 36.6,
+            "cpu_percent": 36.6,
             "memory_percent": 55.0,
             "gpu_percent": 23.5
           },
           {
             "at": 1793997413,
-            "load_percent": 38.7,
+            "cpu_percent": 38.7,
             "memory_percent": 55.1,
             "gpu_percent": 18.4
           },
           {
             "at": 1793997443,
-            "load_percent": 38.0,
+            "cpu_percent": 38.0,
             "memory_percent": 54.6,
             "gpu_percent": 25.5
           },
           {
             "at": 1793997473,
-            "load_percent": 35.0,
+            "cpu_percent": 35.0,
             "memory_percent": 54.6,
             "gpu_percent": 26.9
           },
           {
             "at": 1793997503,
-            "load_percent": 32.1,
+            "cpu_percent": 32.1,
             "memory_percent": 54.5,
             "gpu_percent": 25.3
           },
           {
             "at": 1793997533,
-            "load_percent": 34.0,
+            "cpu_percent": 34.0,
             "memory_percent": 54.9,
             "gpu_percent": 22.0
           },
           {
             "at": 1793997563,
-            "load_percent": 32.8,
+            "cpu_percent": 32.8,
             "memory_percent": 54.8,
             "gpu_percent": 27.9
           },
           {
             "at": 1793997593,
-            "load_percent": 35.6,
+            "cpu_percent": 35.6,
             "memory_percent": 53.9,
             "gpu_percent": 28.3
           },
           {
             "at": 1793997623,
-            "load_percent": 30.7,
+            "cpu_percent": 30.7,
             "memory_percent": 53.5,
             "gpu_percent": 35.7
           },
           {
             "at": 1793997653,
-            "load_percent": 31.3,
+            "cpu_percent": 31.3,
             "memory_percent": 53.8,
             "gpu_percent": 29.3
           },
           {
             "at": 1793997683,
-            "load_percent": 34.0,
+            "cpu_percent": 34.0,
             "memory_percent": 54.2,
             "gpu_percent": 38.3
           },
           {
             "at": 1793997713,
-            "load_percent": 28.4,
+            "cpu_percent": 28.4,
             "memory_percent": 53.2,
             "gpu_percent": 41.5
           },
           {
             "at": 1793997743,
-            "load_percent": 30.4,
+            "cpu_percent": 30.4,
             "memory_percent": 53.2,
             "gpu_percent": 40.7
           },
           {
             "at": 1793997773,
-            "load_percent": 32.5,
+            "cpu_percent": 32.5,
             "memory_percent": 52.9,
             "gpu_percent": 43.2
           },
           {
             "at": 1793997803,
-            "load_percent": 32.0,
+            "cpu_percent": 32.0,
             "memory_percent": 53.6,
             "gpu_percent": 38.6
           },
           {
             "at": 1793997833,
-            "load_percent": 27.5,
+            "cpu_percent": 27.5,
             "memory_percent": 53.0,
             "gpu_percent": 48.0
           },
           {
             "at": 1793997863,
-            "load_percent": 27.3,
+            "cpu_percent": 27.3,
             "memory_percent": 52.1,
             "gpu_percent": 44.4
           },
           {
             "at": 1793997893,
-            "load_percent": 27.4,
+            "cpu_percent": 27.4,
             "memory_percent": 52.0,
             "gpu_percent": 50.2
           },
           {
             "at": 1793997923,
-            "load_percent": 32.5,
+            "cpu_percent": 32.5,
             "memory_percent": 52.2,
             "gpu_percent": 50.7
           },
           {
             "at": 1793997953,
-            "load_percent": 28.6,
+            "cpu_percent": 28.6,
             "memory_percent": 52.3,
             "gpu_percent": 43.9
           },
           {
             "at": 1793997983,
-            "load_percent": 31.6,
+            "cpu_percent": 31.6,
             "memory_percent": 52.3,
             "gpu_percent": 50.6
           },
           {
             "at": 1793998013,
-            "load_percent": 32.7,
+            "cpu_percent": 32.7,
             "memory_percent": 51.2,
             "gpu_percent": 52.3
           },
           {
             "at": 1793998043,
-            "load_percent": 29.5,
+            "cpu_percent": 29.5,
             "memory_percent": 51.2,
             "gpu_percent": 43.6
           },
           {
             "at": 1793998073,
-            "load_percent": 29.4,
+            "cpu_percent": 29.4,
             "memory_percent": 51.8,
             "gpu_percent": 46.2
           },
           {
             "at": 1793998103,
-            "load_percent": 33.8,
+            "cpu_percent": 33.8,
             "memory_percent": 51.2,
             "gpu_percent": 49.7
           },
           {
             "at": 1793998133,
-            "load_percent": 32.1,
+            "cpu_percent": 32.1,
             "memory_percent": 50.9,
             "gpu_percent": 43.0
           },
           {
             "at": 1793998163,
-            "load_percent": 30.4,
+            "cpu_percent": 30.4,
             "memory_percent": 50.8,
             "gpu_percent": 49.4
           },
           {
             "at": 1793998193,
-            "load_percent": 33.5,
+            "cpu_percent": 33.5,
             "memory_percent": 51.6,
             "gpu_percent": 42.0
           },
           {
             "at": 1793998223,
-            "load_percent": 31.6,
+            "cpu_percent": 31.6,
             "memory_percent": 50.5,
             "gpu_percent": 46.0
           },
           {
             "at": 1793998253,
-            "load_percent": 31.9,
+            "cpu_percent": 31.9,
             "memory_percent": 50.8,
             "gpu_percent": 37.8
           },
           {
             "at": 1793998283,
-            "load_percent": 30.8,
+            "cpu_percent": 30.8,
             "memory_percent": 50.3,
             "gpu_percent": 39.7
           },
           {
             "at": 1793998313,
-            "load_percent": 35.9,
+            "cpu_percent": 35.9,
             "memory_percent": 50.3,
             "gpu_percent": 42.1
           },
           {
             "at": 1793998343,
-            "load_percent": 37.5,
+            "cpu_percent": 37.5,
             "memory_percent": 50.9,
             "gpu_percent": 33.2
           },
           {
             "at": 1793998373,
-            "load_percent": 36.5,
+            "cpu_percent": 36.5,
             "memory_percent": 51.1,
             "gpu_percent": 32.0
           },
           {
             "at": 1793998403,
-            "load_percent": 39.0,
+            "cpu_percent": 39.0,
             "memory_percent": 50.0,
             "gpu_percent": 32.6
           },
           {
             "at": 1793998433,
-            "load_percent": 34.2,
+            "cpu_percent": 34.2,
             "memory_percent": 49.7,
             "gpu_percent": 29.0
           },
           {
             "at": 1793998463,
-            "load_percent": 36.1,
+            "cpu_percent": 36.1,
             "memory_percent": 50.5,
             "gpu_percent": 24.5
           },
           {
             "at": 1793998493,
-            "load_percent": 38.3,
+            "cpu_percent": 38.3,
             "memory_percent": 49.6,
             "gpu_percent": 24.4
           },
           {
             "at": 1793998523,
-            "load_percent": 41.9,
+            "cpu_percent": 41.9,
             "memory_percent": 49.2,
             "gpu_percent": 22.8
           },
           {
             "at": 1793998553,
-            "load_percent": 42.6,
+            "cpu_percent": 42.6,
             "memory_percent": 50.6,
             "gpu_percent": 29.3
           },
           {
             "at": 1793998583,
-            "load_percent": 39.9,
+            "cpu_percent": 39.9,
             "memory_percent": 49.9,
             "gpu_percent": 25.7
           },
           {
             "at": 1793998613,
-            "load_percent": 39.7,
+            "cpu_percent": 39.7,
             "memory_percent": 50.5,
             "gpu_percent": 27.0
           },
           {
             "at": 1793998643,
-            "load_percent": 41.5,
+            "cpu_percent": 41.5,
             "memory_percent": 49.9,
             "gpu_percent": 19.1
           },
           {
             "at": 1793998673,
-            "load_percent": 42.5,
+            "cpu_percent": 42.5,
             "memory_percent": 50.7,
             "gpu_percent": 24.9
           },
           {
             "at": 1793998703,
-            "load_percent": 45.8,
+            "cpu_percent": 45.8,
             "memory_percent": 50.0,
             "gpu_percent": 18.2
           },
           {
             "at": 1793998733,
-            "load_percent": 41.9,
+            "cpu_percent": 41.9,
             "memory_percent": 49.6,
             "gpu_percent": 22.5
           },
           {
             "at": 1793998763,
-            "load_percent": 46.2,
+            "cpu_percent": 46.2,
             "memory_percent": 49.4,
             "gpu_percent": 23.9
           },
           {
             "at": 1793998793,
-            "load_percent": 46.4,
+            "cpu_percent": 46.4,
             "memory_percent": 50.4,
             "gpu_percent": 21.8
           },
           {
             "at": 1793998823,
-            "load_percent": 47.4,
+            "cpu_percent": 47.4,
             "memory_percent": 50.6,
             "gpu_percent": 27.8
           },
           {
             "at": 1793998853,
-            "load_percent": 47.6,
+            "cpu_percent": 47.6,
             "memory_percent": 51.1,
             "gpu_percent": 25.7
           },
           {
             "at": 1793998883,
-            "load_percent": 47.0,
+            "cpu_percent": 47.0,
             "memory_percent": 49.9,
             "gpu_percent": 27.3
           },
           {
             "at": 1793998913,
-            "load_percent": 45.7,
+            "cpu_percent": 45.7,
             "memory_percent": 50.9,
             "gpu_percent": 31.7
           },
           {
             "at": 1793998943,
-            "load_percent": 46.0,
+            "cpu_percent": 46.0,
             "memory_percent": 50.6,
             "gpu_percent": 25.5
           },
           {
             "at": 1793998973,
-            "load_percent": 46.5,
+            "cpu_percent": 46.5,
             "memory_percent": 51.0,
             "gpu_percent": 36.1
           },
           {
             "at": 1793999003,
-            "load_percent": 49.3,
+            "cpu_percent": 49.3,
             "memory_percent": 50.5,
             "gpu_percent": 34.2
           },
           {
             "at": 1793999033,
-            "load_percent": 45.3,
+            "cpu_percent": 45.3,
             "memory_percent": 50.9,
             "gpu_percent": 33.7
           },
           {
             "at": 1793999063,
-            "load_percent": 46.1,
+            "cpu_percent": 46.1,
             "memory_percent": 51.5,
             "gpu_percent": 39.5
           },
           {
             "at": 1793999093,
-            "load_percent": 49.5,
+            "cpu_percent": 49.5,
             "memory_percent": 52.3,
             "gpu_percent": 36.0
           },
           {
             "at": 1793999123,
-            "load_percent": 46.5,
+            "cpu_percent": 46.5,
             "memory_percent": 51.1,
             "gpu_percent": 45.0
           },
           {
             "at": 1793999153,
-            "load_percent": 45.3,
+            "cpu_percent": 45.3,
             "memory_percent": 51.9,
             "gpu_percent": 42.5
           },
           {
             "at": 1793999183,
-            "load_percent": 45.1,
+            "cpu_percent": 45.1,
             "memory_percent": 52.6,
             "gpu_percent": 41.8
           },
           {
             "at": 1793999213,
-            "load_percent": 48.0,
+            "cpu_percent": 48.0,
             "memory_percent": 53.0,
             "gpu_percent": 47.1
           },
           {
             "at": 1793999243,
-            "load_percent": 46.5,
+            "cpu_percent": 46.5,
             "memory_percent": 52.0,
             "gpu_percent": 45.1
           },
           {
             "at": 1793999273,
-            "load_percent": 50.1,
+            "cpu_percent": 50.1,
             "memory_percent": 52.1,
             "gpu_percent": 43.3
           },
           {
             "at": 1793999303,
-            "load_percent": 49.3,
+            "cpu_percent": 49.3,
             "memory_percent": 53.6,
             "gpu_percent": 49.7
           },
           {
             "at": 1793999333,
-            "load_percent": 49.5,
+            "cpu_percent": 49.5,
             "memory_percent": 53.8,
             "gpu_percent": 43.2
           },
           {
             "at": 1793999363,
-            "load_percent": 44.8,
+            "cpu_percent": 44.8,
             "memory_percent": 53.2,
             "gpu_percent": 51.2
           },
           {
             "at": 1793999393,
-            "load_percent": 43.3,
+            "cpu_percent": 43.3,
             "memory_percent": 52.7,
             "gpu_percent": 45.5
           },
           {
             "at": 1793999423,
-            "load_percent": 42.8,
+            "cpu_percent": 42.8,
             "memory_percent": 54.3,
             "gpu_percent": 49.1
           },
           {
             "at": 1793999453,
-            "load_percent": 44.7,
+            "cpu_percent": 44.7,
             "memory_percent": 53.6,
             "gpu_percent": 52.0
           },
           {
             "at": 1793999483,
-            "load_percent": 45.4,
+            "cpu_percent": 45.4,
             "memory_percent": 54.6,
             "gpu_percent": 47.2
           },
           {
             "at": 1793999513,
-            "load_percent": 43.3,
+            "cpu_percent": 43.3,
             "memory_percent": 54.3,
             "gpu_percent": 47.0
           },
           {
             "at": 1793999543,
-            "load_percent": 41.4,
+            "cpu_percent": 41.4,
             "memory_percent": 54.8,
             "gpu_percent": 42.3
           },
           {
             "at": 1793999573,
-            "load_percent": 41.8,
+            "cpu_percent": 41.8,
             "memory_percent": 53.9,
             "gpu_percent": 37.9
           },
           {
             "at": 1793999603,
-            "load_percent": 42.4,
+            "cpu_percent": 42.4,
             "memory_percent": 55.1,
             "gpu_percent": 36.7
           },
           {
             "at": 1793999633,
-            "load_percent": 42.0,
+            "cpu_percent": 42.0,
             "memory_percent": 54.3,
             "gpu_percent": 36.2
           },
           {
             "at": 1793999663,
-            "load_percent": 41.8,
+            "cpu_percent": 41.8,
             "memory_percent": 54.8,
             "gpu_percent": 39.1
           },
           {
             "at": 1793999693,
-            "load_percent": 41.7,
+            "cpu_percent": 41.7,
             "memory_percent": 55.6,
             "gpu_percent": 35.5
           },
           {
             "at": 1793999723,
-            "load_percent": 39.9,
+            "cpu_percent": 39.9,
             "memory_percent": 55.7,
             "gpu_percent": 34.5
           },
           {
             "at": 1793999753,
-            "load_percent": 35.9,
+            "cpu_percent": 35.9,
             "memory_percent": 54.8,
             "gpu_percent": 36.5
           },
           {
             "at": 1793999783,
-            "load_percent": 39.5,
+            "cpu_percent": 39.5,
             "memory_percent": 55.0,
             "gpu_percent": 27.1
           },
           {
             "at": 1793999813,
-            "load_percent": 35.5,
+            "cpu_percent": 35.5,
             "memory_percent": 55.4,
             "gpu_percent": 26.4
           },
           {
             "at": 1793999843,
-            "load_percent": 36.5,
+            "cpu_percent": 36.5,
             "memory_percent": 55.7,
             "gpu_percent": 29.1
           },
           {
             "at": 1793999873,
-            "load_percent": 34.7,
+            "cpu_percent": 34.7,
             "memory_percent": 55.5,
             "gpu_percent": 21.4
           },
           {
             "at": 1793999903,
-            "load_percent": 36.2,
+            "cpu_percent": 36.2,
             "memory_percent": 55.2,
             "gpu_percent": 19.9
           },
           {
             "at": 1793999933,
-            "load_percent": 32.4,
+            "cpu_percent": 32.4,
             "memory_percent": 55.5,
             "gpu_percent": 22.4
           },
           {
             "at": 1793999963,
-            "load_percent": 32.1,
+            "cpu_percent": 32.1,
             "memory_percent": 56.3,
             "gpu_percent": 19.1
           },
           {
             "at": 1793999993,
-            "load_percent": 38.8,
+            "cpu_percent": 41.0,
             "memory_percent": 54.1,
             "gpu_percent": 38
           }
@@ -3127,7 +3140,8 @@
           "cpu": {
             "cores": 8,
             "load1": 7.1,
-            "load5": 6.6
+            "load5": 6.6,
+            "percent": null
           },
           "memory": {
             "total_bytes": 17179869184,
@@ -3146,721 +3160,721 @@
         "history": [
           {
             "at": 1793996412,
-            "load_percent": 74.2,
+            "cpu_percent": 74.2,
             "memory_percent": 77.2,
             "gpu_percent": null
           },
           {
             "at": 1793996442,
-            "load_percent": 82.1,
+            "cpu_percent": 82.1,
             "memory_percent": 78.0,
             "gpu_percent": null
           },
           {
             "at": 1793996472,
-            "load_percent": 85.7,
+            "cpu_percent": 85.7,
             "memory_percent": 76.1,
             "gpu_percent": null
           },
           {
             "at": 1793996502,
-            "load_percent": 84.2,
+            "cpu_percent": 84.2,
             "memory_percent": 77.0,
             "gpu_percent": null
           },
           {
             "at": 1793996532,
-            "load_percent": 92.0,
+            "cpu_percent": 92.0,
             "memory_percent": 77.3,
             "gpu_percent": null
           },
           {
             "at": 1793996562,
-            "load_percent": 92.4,
+            "cpu_percent": 92.4,
             "memory_percent": 77.6,
             "gpu_percent": null
           },
           {
             "at": 1793996592,
-            "load_percent": 89.8,
+            "cpu_percent": 89.8,
             "memory_percent": 80.6,
             "gpu_percent": null
           },
           {
             "at": 1793996622,
-            "load_percent": 100.1,
+            "cpu_percent": 100,
             "memory_percent": 81.0,
             "gpu_percent": null
           },
           {
             "at": 1793996652,
-            "load_percent": 91.8,
+            "cpu_percent": 91.8,
             "memory_percent": 80.9,
             "gpu_percent": null
           },
           {
             "at": 1793996682,
-            "load_percent": 89.9,
+            "cpu_percent": 89.9,
             "memory_percent": 81.8,
             "gpu_percent": null
           },
           {
             "at": 1793996712,
-            "load_percent": 87.8,
+            "cpu_percent": 87.8,
             "memory_percent": 81.6,
             "gpu_percent": null
           },
           {
             "at": 1793996742,
-            "load_percent": 92.2,
+            "cpu_percent": 92.2,
             "memory_percent": 80.8,
             "gpu_percent": null
           },
           {
             "at": 1793996772,
-            "load_percent": 92.2,
+            "cpu_percent": 92.2,
             "memory_percent": 80.5,
             "gpu_percent": null
           },
           {
             "at": 1793996802,
-            "load_percent": 88.0,
+            "cpu_percent": 88.0,
             "memory_percent": 80.7,
             "gpu_percent": null
           },
           {
             "at": 1793996832,
-            "load_percent": 80.0,
+            "cpu_percent": 80.0,
             "memory_percent": 82.7,
             "gpu_percent": null
           },
           {
             "at": 1793996862,
-            "load_percent": 74.7,
+            "cpu_percent": 74.7,
             "memory_percent": 81.1,
             "gpu_percent": null
           },
           {
             "at": 1793996892,
-            "load_percent": 68.0,
+            "cpu_percent": 68.0,
             "memory_percent": 81.4,
             "gpu_percent": null
           },
           {
             "at": 1793996922,
-            "load_percent": 72.1,
+            "cpu_percent": 72.1,
             "memory_percent": 81.6,
             "gpu_percent": null
           },
           {
             "at": 1793996952,
-            "load_percent": 68.0,
+            "cpu_percent": 68.0,
             "memory_percent": 80.3,
             "gpu_percent": null
           },
           {
             "at": 1793996982,
-            "load_percent": 62.7,
+            "cpu_percent": 62.7,
             "memory_percent": 80.8,
             "gpu_percent": null
           },
           {
             "at": 1793997012,
-            "load_percent": 64.1,
+            "cpu_percent": 64.1,
             "memory_percent": 80.5,
             "gpu_percent": null
           },
           {
             "at": 1793997042,
-            "load_percent": 60.2,
+            "cpu_percent": 60.2,
             "memory_percent": 81.5,
             "gpu_percent": null
           },
           {
             "at": 1793997072,
-            "load_percent": 65.3,
+            "cpu_percent": 65.3,
             "memory_percent": 80.1,
             "gpu_percent": null
           },
           {
             "at": 1793997102,
-            "load_percent": 62.9,
+            "cpu_percent": 62.9,
             "memory_percent": 79.5,
             "gpu_percent": null
           },
           {
             "at": 1793997132,
-            "load_percent": 57.8,
+            "cpu_percent": 57.8,
             "memory_percent": 80.9,
             "gpu_percent": null
           },
           {
             "at": 1793997162,
-            "load_percent": 67.2,
+            "cpu_percent": 67.2,
             "memory_percent": 79.0,
             "gpu_percent": null
           },
           {
             "at": 1793997192,
-            "load_percent": 59.0,
+            "cpu_percent": 59.0,
             "memory_percent": 79.5,
             "gpu_percent": null
           },
           {
             "at": 1793997222,
-            "load_percent": 67.6,
+            "cpu_percent": 67.6,
             "memory_percent": 78.2,
             "gpu_percent": null
           },
           {
             "at": 1793997252,
-            "load_percent": 69.3,
+            "cpu_percent": 69.3,
             "memory_percent": 75.8,
             "gpu_percent": null
           },
           {
             "at": 1793997282,
-            "load_percent": 70.7,
+            "cpu_percent": 70.7,
             "memory_percent": 76.4,
             "gpu_percent": null
           },
           {
             "at": 1793997312,
-            "load_percent": 72.2,
+            "cpu_percent": 72.2,
             "memory_percent": 75.8,
             "gpu_percent": null
           },
           {
             "at": 1793997342,
-            "load_percent": 84.5,
+            "cpu_percent": 84.5,
             "memory_percent": 76.2,
             "gpu_percent": null
           },
           {
             "at": 1793997372,
-            "load_percent": 78.8,
+            "cpu_percent": 78.8,
             "memory_percent": 74.3,
             "gpu_percent": null
           },
           {
             "at": 1793997402,
-            "load_percent": 88.4,
+            "cpu_percent": 88.4,
             "memory_percent": 74.8,
             "gpu_percent": null
           },
           {
             "at": 1793997432,
-            "load_percent": 95.8,
+            "cpu_percent": 95.8,
             "memory_percent": 73.7,
             "gpu_percent": null
           },
           {
             "at": 1793997462,
-            "load_percent": 88.4,
+            "cpu_percent": 88.4,
             "memory_percent": 72.1,
             "gpu_percent": null
           },
           {
             "at": 1793997492,
-            "load_percent": 90.5,
+            "cpu_percent": 90.5,
             "memory_percent": 73.6,
             "gpu_percent": null
           },
           {
             "at": 1793997522,
-            "load_percent": 96.2,
+            "cpu_percent": 96.2,
             "memory_percent": 70.8,
             "gpu_percent": null
           },
           {
             "at": 1793997552,
-            "load_percent": 95.0,
+            "cpu_percent": 95.0,
             "memory_percent": 72.5,
             "gpu_percent": null
           },
           {
             "at": 1793997582,
-            "load_percent": 95.8,
+            "cpu_percent": 95.8,
             "memory_percent": 70.2,
             "gpu_percent": null
           },
           {
             "at": 1793997612,
-            "load_percent": 96.4,
+            "cpu_percent": 96.4,
             "memory_percent": 69.3,
             "gpu_percent": null
           },
           {
             "at": 1793997642,
-            "load_percent": 86.6,
+            "cpu_percent": 86.6,
             "memory_percent": 69.6,
             "gpu_percent": null
           },
           {
             "at": 1793997672,
-            "load_percent": 85.5,
+            "cpu_percent": 85.5,
             "memory_percent": 71.1,
             "gpu_percent": null
           },
           {
             "at": 1793997702,
-            "load_percent": 82.2,
+            "cpu_percent": 82.2,
             "memory_percent": 71.6,
             "gpu_percent": null
           },
           {
             "at": 1793997732,
-            "load_percent": 75.7,
+            "cpu_percent": 75.7,
             "memory_percent": 68.5,
             "gpu_percent": null
           },
           {
             "at": 1793997762,
-            "load_percent": 82.2,
+            "cpu_percent": 82.2,
             "memory_percent": 70.0,
             "gpu_percent": null
           },
           {
             "at": 1793997792,
-            "load_percent": 77.3,
+            "cpu_percent": 77.3,
             "memory_percent": 70.0,
             "gpu_percent": null
           },
           {
             "at": 1793997822,
-            "load_percent": 73.0,
+            "cpu_percent": 73.0,
             "memory_percent": 71.0,
             "gpu_percent": null
           },
           {
             "at": 1793997852,
-            "load_percent": 61.3,
+            "cpu_percent": 61.3,
             "memory_percent": 69.3,
             "gpu_percent": null
           },
           {
             "at": 1793997882,
-            "load_percent": 68.6,
+            "cpu_percent": 68.6,
             "memory_percent": 70.5,
             "gpu_percent": null
           },
           {
             "at": 1793997912,
-            "load_percent": 65.3,
+            "cpu_percent": 65.3,
             "memory_percent": 70.3,
             "gpu_percent": null
           },
           {
             "at": 1793997942,
-            "load_percent": 60.4,
+            "cpu_percent": 60.4,
             "memory_percent": 72.1,
             "gpu_percent": null
           },
           {
             "at": 1793997972,
-            "load_percent": 63.0,
+            "cpu_percent": 63.0,
             "memory_percent": 70.8,
             "gpu_percent": null
           },
           {
             "at": 1793998002,
-            "load_percent": 59.5,
+            "cpu_percent": 59.5,
             "memory_percent": 73.3,
             "gpu_percent": null
           },
           {
             "at": 1793998032,
-            "load_percent": 57.6,
+            "cpu_percent": 57.6,
             "memory_percent": 71.8,
             "gpu_percent": null
           },
           {
             "at": 1793998062,
-            "load_percent": 57.6,
+            "cpu_percent": 57.6,
             "memory_percent": 72.1,
             "gpu_percent": null
           },
           {
             "at": 1793998092,
-            "load_percent": 61.3,
+            "cpu_percent": 61.3,
             "memory_percent": 74.2,
             "gpu_percent": null
           },
           {
             "at": 1793998122,
-            "load_percent": 61.7,
+            "cpu_percent": 61.7,
             "memory_percent": 74.1,
             "gpu_percent": null
           },
           {
             "at": 1793998152,
-            "load_percent": 68.4,
+            "cpu_percent": 68.4,
             "memory_percent": 73.6,
             "gpu_percent": null
           },
           {
             "at": 1793998182,
-            "load_percent": 76.9,
+            "cpu_percent": 76.9,
             "memory_percent": 75.8,
             "gpu_percent": null
           },
           {
             "at": 1793998212,
-            "load_percent": 79.8,
+            "cpu_percent": 79.8,
             "memory_percent": 74.7,
             "gpu_percent": null
           },
           {
             "at": 1793998242,
-            "load_percent": 85.3,
+            "cpu_percent": 85.3,
             "memory_percent": 77.5,
             "gpu_percent": null
           },
           {
             "at": 1793998272,
-            "load_percent": 87.2,
+            "cpu_percent": 87.2,
             "memory_percent": 77.8,
             "gpu_percent": null
           },
           {
             "at": 1793998302,
-            "load_percent": 85.0,
+            "cpu_percent": 85.0,
             "memory_percent": 78.7,
             "gpu_percent": null
           },
           {
             "at": 1793998332,
-            "load_percent": 91.2,
+            "cpu_percent": 91.2,
             "memory_percent": 78.8,
             "gpu_percent": null
           },
           {
             "at": 1793998362,
-            "load_percent": 91.9,
+            "cpu_percent": 91.9,
             "memory_percent": 78.6,
             "gpu_percent": null
           },
           {
             "at": 1793998392,
-            "load_percent": 97.6,
+            "cpu_percent": 97.6,
             "memory_percent": 79.2,
             "gpu_percent": null
           },
           {
             "at": 1793998422,
-            "load_percent": 95.2,
+            "cpu_percent": 95.2,
             "memory_percent": 79.7,
             "gpu_percent": null
           },
           {
             "at": 1793998452,
-            "load_percent": 92.1,
+            "cpu_percent": 92.1,
             "memory_percent": 81.6,
             "gpu_percent": null
           },
           {
             "at": 1793998482,
-            "load_percent": 95.8,
+            "cpu_percent": 95.8,
             "memory_percent": 79.6,
             "gpu_percent": null
           },
           {
             "at": 1793998512,
-            "load_percent": 98.2,
+            "cpu_percent": 98.2,
             "memory_percent": 82.4,
             "gpu_percent": null
           },
           {
             "at": 1793998542,
-            "load_percent": 87.1,
+            "cpu_percent": 87.1,
             "memory_percent": 80.1,
             "gpu_percent": null
           },
           {
             "at": 1793998572,
-            "load_percent": 92.3,
+            "cpu_percent": 92.3,
             "memory_percent": 80.8,
             "gpu_percent": null
           },
           {
             "at": 1793998602,
-            "load_percent": 78.8,
+            "cpu_percent": 78.8,
             "memory_percent": 81.2,
             "gpu_percent": null
           },
           {
             "at": 1793998632,
-            "load_percent": 78.3,
+            "cpu_percent": 78.3,
             "memory_percent": 83.2,
             "gpu_percent": null
           },
           {
             "at": 1793998662,
-            "load_percent": 74.3,
+            "cpu_percent": 74.3,
             "memory_percent": 82.0,
             "gpu_percent": null
           },
           {
             "at": 1793998692,
-            "load_percent": 76.8,
+            "cpu_percent": 76.8,
             "memory_percent": 81.6,
             "gpu_percent": null
           },
           {
             "at": 1793998722,
-            "load_percent": 75.7,
+            "cpu_percent": 75.7,
             "memory_percent": 83.0,
             "gpu_percent": null
           },
           {
             "at": 1793998752,
-            "load_percent": 70.2,
+            "cpu_percent": 70.2,
             "memory_percent": 80.9,
             "gpu_percent": null
           },
           {
             "at": 1793998782,
-            "load_percent": 62.4,
+            "cpu_percent": 62.4,
             "memory_percent": 81.4,
             "gpu_percent": null
           },
           {
             "at": 1793998812,
-            "load_percent": 66.9,
+            "cpu_percent": 66.9,
             "memory_percent": 81.3,
             "gpu_percent": null
           },
           {
             "at": 1793998842,
-            "load_percent": 58.8,
+            "cpu_percent": 58.8,
             "memory_percent": 81.6,
             "gpu_percent": null
           },
           {
             "at": 1793998872,
-            "load_percent": 57.0,
+            "cpu_percent": 57.0,
             "memory_percent": 81.2,
             "gpu_percent": null
           },
           {
             "at": 1793998902,
-            "load_percent": 65.0,
+            "cpu_percent": 65.0,
             "memory_percent": 80.5,
             "gpu_percent": null
           },
           {
             "at": 1793998932,
-            "load_percent": 62.4,
+            "cpu_percent": 62.4,
             "memory_percent": 79.1,
             "gpu_percent": null
           },
           {
             "at": 1793998962,
-            "load_percent": 64.7,
+            "cpu_percent": 64.7,
             "memory_percent": 78.5,
             "gpu_percent": null
           },
           {
             "at": 1793998992,
-            "load_percent": 66.5,
+            "cpu_percent": 66.5,
             "memory_percent": 77.4,
             "gpu_percent": null
           },
           {
             "at": 1793999022,
-            "load_percent": 73.0,
+            "cpu_percent": 73.0,
             "memory_percent": 78.9,
             "gpu_percent": null
           },
           {
             "at": 1793999052,
-            "load_percent": 70.0,
+            "cpu_percent": 70.0,
             "memory_percent": 77.7,
             "gpu_percent": null
           },
           {
             "at": 1793999082,
-            "load_percent": 77.9,
+            "cpu_percent": 77.9,
             "memory_percent": 77.4,
             "gpu_percent": null
           },
           {
             "at": 1793999112,
-            "load_percent": 79.9,
+            "cpu_percent": 79.9,
             "memory_percent": 75.0,
             "gpu_percent": null
           },
           {
             "at": 1793999142,
-            "load_percent": 85.4,
+            "cpu_percent": 85.4,
             "memory_percent": 75.2,
             "gpu_percent": null
           },
           {
             "at": 1793999172,
-            "load_percent": 83.9,
+            "cpu_percent": 83.9,
             "memory_percent": 75.6,
             "gpu_percent": null
           },
           {
             "at": 1793999202,
-            "load_percent": 90.5,
+            "cpu_percent": 90.5,
             "memory_percent": 74.4,
             "gpu_percent": null
           },
           {
             "at": 1793999232,
-            "load_percent": 91.3,
+            "cpu_percent": 91.3,
             "memory_percent": 72.4,
             "gpu_percent": null
           },
           {
             "at": 1793999262,
-            "load_percent": 90.3,
+            "cpu_percent": 90.3,
             "memory_percent": 72.9,
             "gpu_percent": null
           },
           {
             "at": 1793999292,
-            "load_percent": 90.7,
+            "cpu_percent": 90.7,
             "memory_percent": 73.6,
             "gpu_percent": null
           },
           {
             "at": 1793999322,
-            "load_percent": 96.4,
+            "cpu_percent": 96.4,
             "memory_percent": 71.2,
             "gpu_percent": null
           },
           {
             "at": 1793999352,
-            "load_percent": 89.8,
+            "cpu_percent": 89.8,
             "memory_percent": 70.6,
             "gpu_percent": null
           },
           {
             "at": 1793999382,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999412,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999442,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999472,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999502,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999532,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999562,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999592,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999622,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999652,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999682,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999712,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999742,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999772,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999802,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999832,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999862,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999892,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999922,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999952,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           },
           {
             "at": 1793999982,
-            "load_percent": null,
+            "cpu_percent": null,
             "memory_percent": null,
             "gpu_percent": null
           }

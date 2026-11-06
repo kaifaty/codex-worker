@@ -102,7 +102,12 @@ interface Gpu {
 
 interface Metrics {
   os: "linux" | "darwin" | string;
-  cpu: { cores: number; load1: number; load5: number } | null;
+  cpu: {
+    cores: number;
+    load1: number;
+    load5: number;
+    percent: number | null; // busy share of all cores over about 1 s, 0–100; null when unknown
+  } | null;
   memory: { total_bytes: number; available_bytes: number } | null;
   gpus: Gpu[];
   disks: { mount: string; total_bytes: number; free_bytes: number }[];
@@ -120,7 +125,7 @@ interface HostView {
 
 interface HistoryPoint {
   at: number;
-  load_percent: number | null;   // load1 / cores × 100, with no upper limit
+  cpu_percent: number | null;    // cpu.percent, else load1 / cores × 100 capped at 100
   memory_percent: number | null; // (total_bytes - available_bytes) / total_bytes × 100
   gpu_percent: number | null;    // highest available GPU utilization
 }
@@ -181,7 +186,13 @@ memory only and skipping GPU commands.
 The probe only reads state; it does not write files, control services or containers, or use sudo.
 Each external command has a 5-second timeout and `stdin=DEVNULL`. It prints one JSON object and exits
 successfully even when some sections are unavailable: those sections are `null` or empty arrays.
-CPU uses `os.cpu_count` and `os.getloadavg`; Linux memory uses `/proc/meminfo` (`MemTotal` and
+CPU uses `os.cpu_count` and `os.getloadavg`. `percent` is the busy share of all cores over one
+second: on Linux, two reads of the aggregate `cpu` line of `/proc/stat` one second apart, with
+`idle + iowait` as idle time; on macOS, the last `CPU usage: … % idle` line of `top -l 2 -n 0 -s 1`
+(the first sample counts since boot), as `100 − idle`. A failed or unparsable sample gives `null`.
+Host probes collect `percent` too. Load average is reported but is no measure of use on macOS, where
+it counts threads waiting on I/O and can exceed the core count many times on an idle machine.
+The server accepts `percent` from 0 to 100; a probe without the field gives `null`. Linux memory uses `/proc/meminfo` (`MemTotal` and
 `MemAvailable`), while macOS uses `sysctl -n hw.memsize` and the final system-wide free percentage
 from `memory_pressure`. Available macOS memory is that fraction of total memory. Disks use
 `os.statvfs`: total is `f_blocks × f_frsize`, free is `f_bavail × f_frsize`; missing paths are skipped.
@@ -210,7 +221,8 @@ condition at that severity or above, including all applicable disk mounts.
 
 | Condition | `busy` threshold | `overloaded` threshold | Reason |
 | --- | --- | --- | --- |
-| CPU load1 / cores | ≥ 0.7 | ≥ 1.5 | `cpu` |
+| CPU `percent` | ≥ 70% | ≥ 90% | `cpu` |
+| CPU load1 / cores, only when `percent` is `null` | ≥ 0.7 | ≥ 1.5 | `cpu` |
 | Available memory / total | < 25% | < 10% | `memory` |
 | GPU utilization | ≥ 70% | — | `gpu` |
 | GPU used memory / total | ≥ 60% | — | `gpu_memory` |
@@ -218,7 +230,8 @@ condition at that severity or above, including all applicable disk mounts.
 
 Otherwise status is `free`. History retains at most 120 samples in memory and is reset on server
 restart. A successful machine probe appends one point; failed probes retain history without adding
-a point. Unknown percentages are `null`; CPU load percentages can exceed 100%.
+a point. Unknown percentages are `null`. `cpu_percent` is the busy percentage, or load1 / cores × 100
+capped at 100 when the percentage is unknown, so every history value is between 0 and 100.
 
 ### Columns
 

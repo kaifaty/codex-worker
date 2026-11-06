@@ -109,8 +109,10 @@ const machineId = ref<string | null>(null);
 const selectedMachine = computed(
   () => board.state.value.machines?.items.find((machine) => machine.id === machineId.value) ?? null,
 );
-function openMachine(id: string) {
+let machineOpener: HTMLElement | null = null;
+function openMachine(id: string, opener: HTMLElement | null) {
   machineId.value = id;
+  machineOpener = opener;
   selected.value = null;
 }
 watch(selected, (slug) => {
@@ -120,7 +122,15 @@ function closeMachine() {
   const id = machineId.value;
   machineId.value = null;
   if (!id) return;
-  void nextTick(() => document.querySelector<HTMLElement>(`[data-machine="${CSS.escape(id)}"] .tile`)?.focus());
+  const opener = machineOpener;
+  machineOpener = null;
+  void nextTick(() => {
+    // The button that opened the card, else the machine's visible button if the strip changed meanwhile.
+    const buttons = document.querySelectorAll<HTMLElement>(`[data-machine="${CSS.escape(id)}"] button`);
+    const visible = (button: HTMLElement | null) => !!button?.isConnected && button.offsetParent !== null;
+    const target = visible(opener) ? opener : [...buttons].find(visible);
+    target?.focus();
+  });
 }
 
 function close() {

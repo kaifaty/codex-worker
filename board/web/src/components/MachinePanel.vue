@@ -3,12 +3,12 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { Machine } from "../types";
 import { formatAge, formatFullTime } from "../lib/format";
 import {
+  cpuLoadText,
   cpuMeter,
   dataAge,
   diskMeter,
   errorLabel,
   formatBytes,
-  formatNumber,
   gpuMeter,
   memoryMeter,
   statusLevel,
@@ -54,6 +54,7 @@ const gpus = computed(() =>
     processes: [...gpu.processes].sort((a, b) => b.memory_bytes - a.memory_bytes),
   })),
 );
+const hasPercent = (cpu: { percent?: number | null }) => cpu.percent !== null && cpu.percent !== undefined;
 const disks = computed(() =>
   (metrics.value?.disks ?? []).map((disk) => ({ ...diskMeter(disk), label: disk.mount })),
 );
@@ -109,14 +110,14 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
         <div v-if="metrics" class="sections" :class="{ dim: shown.status === 'offline' }">
           <section v-if="metrics.cpu || metrics.memory" class="sec">
             <h3>Процессор и память</h3>
-            <div v-if="metrics.cpu" class="meter labelled" :title="cpuMeter(metrics.cpu).title">
-              <span class="m-label">CPU</span>
-              <span class="bar" aria-hidden="true"><span :class="cpuMeter(metrics.cpu).level" :style="{ width: `${cpuMeter(metrics.cpu).percent}%` }"></span></span>
-              <span class="num">{{ cpuMeter(metrics.cpu).value }}</span>
-            </div>
-            <p v-if="metrics.cpu" class="sub num indent">
-              {{ metrics.cpu.cores }} ядер · нагрузка за 1 мин {{ formatNumber(metrics.cpu.load1) }}, за 5 мин {{ formatNumber(metrics.cpu.load5) }}
-            </p>
+            <template v-if="metrics.cpu">
+              <div class="meter labelled cpu" :title="cpuMeter(metrics.cpu).title">
+                <span class="m-label">CPU</span>
+                <span class="bar" aria-hidden="true"><span :class="cpuMeter(metrics.cpu).level" :style="{ width: `${cpuMeter(metrics.cpu).percent}%` }"></span></span>
+                <span class="num" :class="{ big: hasPercent(metrics.cpu) }">{{ cpuMeter(metrics.cpu).value }}</span>
+              </div>
+              <p class="sub num indent">{{ cpuLoadText(metrics.cpu) }}</p>
+            </template>
             <div v-if="metrics.memory" class="meter labelled" :title="memoryMeter(metrics.memory).title">
               <span class="m-label">Память</span>
               <span class="bar" aria-hidden="true"><span :class="memoryMeter(metrics.memory).level" :style="{ width: `${memoryMeter(metrics.memory).percent}%` }"></span></span>
@@ -149,7 +150,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
           <section v-if="disks.length" class="sec">
             <h3>Диски</h3>
             <div v-for="disk in disks" :key="disk.key" class="meter labelled" :title="disk.title">
-              <span class="m-label mono ellipsis">{{ disk.label }}</span>
+              <span class="m-label mono ellipsis" :title="disk.label">{{ disk.label }}</span>
               <span class="bar" aria-hidden="true"><span :class="disk.level" :style="{ width: `${disk.percent}%` }"></span></span>
               <span class="num">свободно {{ disk.value }}</span>
             </div>
@@ -159,7 +160,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
 
         <section class="sec">
           <h3>За час</h3>
-          <MachineChart :history="shown.history" field="load_percent" title="Нагрузка CPU" :now="now" />
+          <MachineChart :history="shown.history" field="cpu_percent" title="CPU занят" :now="now" />
           <MachineChart :history="shown.history" field="memory_percent" title="Память занята" :now="now" />
           <MachineChart v-if="hasGpu" :history="shown.history" field="gpu_percent" title="GPU" :now="now" />
         </section>
@@ -168,11 +169,14 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
           <h3 id="host-title">Хост <span class="host-name">{{ shown.host.name }}</span></h3>
           <p class="sub">Машина, на которой работает эта; на статус не влияет.</p>
           <p v-if="shown.host.error" class="sub warn-text"><span aria-hidden="true">⚠</span> {{ errorLabel(shown.host.error) }}</p>
-          <div v-if="shown.host.cpu" class="meter labelled" :title="cpuMeter(shown.host.cpu).title">
-            <span class="m-label">CPU</span>
-            <span class="bar" aria-hidden="true"><span :class="cpuMeter(shown.host.cpu).level" :style="{ width: `${cpuMeter(shown.host.cpu).percent}%` }"></span></span>
-            <span class="num">{{ cpuMeter(shown.host.cpu).value }}</span>
-          </div>
+          <template v-if="shown.host.cpu">
+            <div class="meter labelled cpu" :title="cpuMeter(shown.host.cpu).title">
+              <span class="m-label">CPU</span>
+              <span class="bar" aria-hidden="true"><span :class="cpuMeter(shown.host.cpu).level" :style="{ width: `${cpuMeter(shown.host.cpu).percent}%` }"></span></span>
+              <span class="num" :class="{ big: hasPercent(shown.host.cpu) }">{{ cpuMeter(shown.host.cpu).value }}</span>
+            </div>
+            <p class="sub num indent">{{ cpuLoadText(shown.host.cpu) }}</p>
+          </template>
           <div v-if="shown.host.memory" class="meter labelled" :title="memoryMeter(shown.host.memory).title">
             <span class="m-label">Память</span>
             <span class="bar" aria-hidden="true"><span :class="memoryMeter(shown.host.memory).level" :style="{ width: `${memoryMeter(shown.host.memory).percent}%` }"></span></span>
@@ -303,16 +307,33 @@ h3 {
   color: var(--muted);
 }
 
+/* Wide enough for mounts such as /srv/assistant; a longer one is cut and keeps its full path in a tooltip. */
+.panel {
+  --label: 150px;
+}
+
 .meter {
   display: grid;
-  grid-template-columns: 92px minmax(60px, 1fr) max-content;
+  grid-template-columns: var(--label) minmax(60px, 1fr) max-content;
   align-items: center;
   gap: 10px;
   min-height: 20px;
 }
 
+.meter .big {
+  font-size: 17px;
+  font-weight: 650;
+  line-height: 22px;
+}
+
 .sub.indent {
-  margin: 0 0 4px 102px;
+  margin: 0 0 4px calc(var(--label) + 10px);
+}
+
+@media (max-width: 480px) {
+  .panel {
+    --label: 104px;
+  }
 }
 
 .sub.os {
@@ -366,8 +387,8 @@ h3 {
 }
 
 .procs {
-  width: calc(100% - 102px);
-  margin: 4px 0 0 102px;
+  width: calc(100% - var(--label) - 10px);
+  margin: 4px 0 0 calc(var(--label) + 10px);
   border-collapse: collapse;
   table-layout: fixed;
 }
