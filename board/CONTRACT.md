@@ -14,6 +14,8 @@ stops or changes work, and never writes under either source's home.
 - Accounts: `python3 -I <codex_task.py> accounts --json` (never `--refresh`), at most once per
   `BOARD_ACCOUNTS_SECONDS` (default 300). The script path comes from `BOARD_CODEX_TASK` and defaults to this
   repository's `plugins/codex-worker/skills/codex-worker/scripts/codex_task.py`.
+- Machines: `$BOARD_MACHINES_FILE` (default `$CODEX_TASK_HOME/board-machines.json`), with local or SSH
+  probes every `BOARD_MACHINES_SECONDS` (default 30). The configuration and probe are described below.
 - Desktop sessions: `$BOARD_CLAUDE_DESKTOP_DIR/claude-code-sessions/*/*/local_*.json` (default desktop
   directory `~/Library/Application Support/Claude`). These are internal application files, not a public
   API. Only `sessionId`, `cliSessionId`, `title`, `cwd`, `originCwd`, `model`, `effort`, `isArchived`,
@@ -28,7 +30,7 @@ stops or changes work, and never writes under either source's home.
   tailed through the same bounded incremental reader as task activity. Until a transcript is found,
   check the direct path on each poll and search `projects/*/` at most once per 60 seconds. Cache a found
   path. Assistant events may carry ISO `timestamp` values.
-- The server reads no other files: never `auth.json`, credentials or account homes.
+- The server never reads `auth.json`, credentials or account homes.
 
 Missing directories are skipped. Malformed metadata or live-state files preserve their last valid
 record. Symbolic links are never followed. Metadata scans run once per `BOARD_SESSIONS_SECONDS`
@@ -90,12 +92,133 @@ interface Accounts {
   data: unknown | null;       // `accounts --json` output, passed through unchanged
 }
 
+interface Gpu {
+  name: string;
+  utilization_percent: number | null;
+  memory_used_bytes: number | null; // null on Apple GPUs with shared memory
+  memory_total_bytes: number | null;
+  processes: { name: string; memory_bytes: number }[]; // ≤ 5 largest, each ≥ 100 MiB
+}
+
+interface Metrics {
+  os: "linux" | "darwin" | string;
+  cpu: { cores: number; load1: number; load5: number } | null;
+  memory: { total_bytes: number; available_bytes: number } | null;
+  gpus: Gpu[];
+  disks: { mount: string; total_bytes: number; free_bytes: number }[];
+}
+
+type MachineStatus = "free" | "busy" | "overloaded" | "offline" | "unknown";
+type MachineError = "timeout" | "unreachable" | "bad_output" | "probe_failed";
+
+interface HostView {
+  name: string;
+  cpu: Metrics["cpu"];
+  memory: Metrics["memory"];
+  error: MachineError | null;
+}
+
+interface HistoryPoint {
+  at: number;
+  load_percent: number | null;   // load1 / cores × 100, with no upper limit
+  memory_percent: number | null; // (total_bytes - available_bytes) / total_bytes × 100
+  gpu_percent: number | null;    // highest available GPU utilization
+}
+
+interface Machine {
+  id: string;
+  name: string;
+  role: string | null;
+  status: MachineStatus;
+  reasons: string[];            // cpu, memory, gpu, gpu_memory or disk:<mount>
+  checked_at: number | null;    // last attempt
+  sampled_at: number | null;    // last success
+  error: MachineError | null;   // last attempt's error
+  metrics: Metrics | null;      // last successful metrics, retained after a failure
+  host: HostView | null;        // optional physical host; never affects machine status
+  history: HistoryPoint[];      // newest 120 points, held only in memory
+}
+
+interface Machines {
+  config_error: string | null;
+  items: Machine[];
+}
+
 interface Snapshot {
   generated_at: number;
   tasks: TaskSummary[];       // all non-closed tasks, plus at most 50 closed records with the newest updated_at
   accounts: Accounts;
+  machines: Machines;
 }
 ```
+
+### Machine configuration and probes
+
+See [machines.example.json](machines.example.json) for a configuration containing only fictitious
+machines. The file is an object with a `machines` array. Each entry requires a unique `id` matching
+`^[a-z0-9-]+$` and a `name`. Exactly one of `local: true` or `ssh` selects its probe transport. Optional
+`role` describes its purpose; optional `disks` is an array of absolute paths, defaulting to `["/"]`.
+Optional `host: {"name": "Hypervisor", "ssh": "root@hypervisor.example"}` describes a VM's physical
+host. Only its CPU and memory are published.
+
+Every SSH target, including a host's target, must match `^[A-Za-z0-9_][A-Za-z0-9_.@:-]*$` and cannot
+start with `-`. An invalid entry rejects the entire file. The server rereads it when its mtime or size
+changes. A missing file means an empty machine list with no error. A malformed or invalid file keeps
+the last valid machines and sets `config_error` to a short reason without revealing an SSH target.
+Targets never appear in REST or WebSocket data, including errors.
+
+The server sends the standalone, Python 3.9-compatible `probe.py` as stdin to
+`python3 -I - <disks…>` locally, or to
+`ssh -o BatchMode=yes -o ConnectTimeout=5 -- <target> python3 -I - <disks…>` remotely. Remote paths are
+quoted with `shlex.quote`. Probes run in parallel; each has a 15-second limit and at most 1 MiB of
+stdout is read. A timed-out process is killed and awaited. Output is untrusted: fields are converted
+and validated and strings are limited to 200 characters. Malformed output gives `bad_output`.
+SSH exit code 255 gives `unreachable`, other nonzero exits give `probe_failed`, and expiry gives
+`timeout`. Stderr is retained only in server logs.
+Physical host probes use the same transport with an internal `--host` argument, collecting CPU and
+memory only and skipping GPU commands.
+
+The probe only reads state; it does not write files, control services or containers, or use sudo.
+Each external command has a 5-second timeout and `stdin=DEVNULL`. It prints one JSON object and exits
+successfully even when some sections are unavailable: those sections are `null` or empty arrays.
+CPU uses `os.cpu_count` and `os.getloadavg`; Linux memory uses `/proc/meminfo` (`MemTotal` and
+`MemAvailable`), while macOS uses `sysctl -n hw.memsize` and the final system-wide free percentage
+from `memory_pressure`. Available macOS memory is that fraction of total memory. Disks use
+`os.statvfs`: total is `f_blocks × f_frsize`, free is `f_bavail × f_frsize`; missing paths are skipped.
+
+NVIDIA metrics use `nvidia-smi` GPU queries for index, UUID, name, utilization, used memory and total
+memory, and compute-app queries for GPU UUID, process name and used memory. UUID associates processes
+with their GPU, `[N/A]` becomes `null`, and a missing or failed command yields an empty GPU list.
+Apple GPU utilization comes from `ioreg -r -d 1 -c IOAccelerator` (`Device Utilization %`), with the
+name from `sysctl -n machdep.cpu.brand_string`; GPU memory is `null` because memory is shared.
+Process names are the last path component. For `python…`, `node` or `java` under `/.venv/` or `/venv/`,
+the directory immediately before that segment is used instead. For example,
+`/x/decider/.venv/bin/python` becomes `decider`, and `/x/build/bin/llama-server` becomes `llama-server`.
+Full process paths are never published.
+
+### Machine status and history
+
+Status uses the machine's last successful metrics and consecutive failure count. Before any attempt,
+status is `unknown`; a failure without prior successful metrics or two consecutive failures gives
+`offline`. Both statuses, and `free`, have empty `reasons`. After one failed attempt with prior data,
+the previous metrics still determine status and `error` describes the failed attempt. Host metrics
+never affect status.
+
+The pure `machine_status(metrics, failures)` function uses these thresholds, defined as named
+constants in `machines.py`. The highest matching severity wins; reasons include every triggered
+condition at that severity or above, including all applicable disk mounts.
+
+| Condition | `busy` threshold | `overloaded` threshold | Reason |
+| --- | --- | --- | --- |
+| CPU load1 / cores | ≥ 0.7 | ≥ 1.5 | `cpu` |
+| Available memory / total | < 25% | < 10% | `memory` |
+| GPU utilization | ≥ 70% | — | `gpu` |
+| GPU used memory / total | ≥ 60% | — | `gpu_memory` |
+| Disk free space / total | < 15% | < 5% | `disk:<mount>` |
+
+Otherwise status is `free`. History retains at most 120 samples in memory and is reset on server
+restart. A successful machine probe appends one point; failed probes retain history without adding
+a point. Unknown percentages are `null`; CPU load percentages can exceed 100%.
 
 ### Columns
 
@@ -160,10 +283,14 @@ Server → client only; the server ignores client messages. Every message is one
   `closed` if it was archived), or a session's metadata disappeared or became archived.
 - `{"type": "activity", "slug": string, "activity": Activity}` — new latest activity of a live task.
 - `{"type": "accounts", "accounts": Accounts}` — new account data.
+- `{"type": "machines", "machines": Machines}` — at the end of a machine polling cycle when data
+  changed, comparing without `checked_at`. Metric and history changes count as changes.
 - `{"type": "ping", "at": number}` — every 20 s.
 
 The server polls file mtimes and sizes once per `BOARD_POLL_SECONDS` (default 1.0) and sends only changes.
 A client that reconnects gets a fresh `snapshot`.
+The `machines` snapshot field and WebSocket message are additive. Existing clients can ignore them;
+the current frontend selects known snapshot fields and ignores unknown WebSocket message types.
 
 ## Serving and safety
 

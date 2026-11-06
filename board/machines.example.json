@@ -1,0 +1,22 @@
+{
+  "machines": [
+    {
+      "id": "laptop",
+      "name": "Laptop",
+      "role": "agents",
+      "local": true,
+      "disks": ["/", "/Volumes/Data"]
+    },
+    {
+      "id": "gpu-box",
+      "name": "GPU box",
+      "role": "local models",
+      "ssh": "gpu-box",
+      "disks": ["/", "/data"],
+      "host": {
+        "name": "Hypervisor",
+        "ssh": "root@hypervisor.example"
+      }
+    }
+  ]
+}

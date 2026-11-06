@@ -14,6 +14,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse
 
 from .accounts import Accounts
+from .machines import Machines
 from .store import Store
 
 REPOSITORY = Path(__file__).resolve().parents[4]
@@ -34,6 +35,9 @@ class Settings:
     claude_home: Path | None = None
     sessions_seconds: float = 5
     session_stale_hours: float = 48
+    machines_file: Path | None = None
+    machines_seconds: float = 30
+    ssh_command: str = "ssh"
 
     @classmethod
     def from_env(cls):
@@ -52,6 +56,9 @@ class Settings:
             claude_home=Path(os.environ.get("BOARD_CLAUDE_HOME", "~/.claude")).expanduser(),
             sessions_seconds=float(os.environ.get("BOARD_SESSIONS_SECONDS", "5")),
             session_stale_hours=float(os.environ.get("BOARD_SESSION_STALE_HOURS", "48")),
+            machines_file=Path(os.environ["BOARD_MACHINES_FILE"]).expanduser()
+            if "BOARD_MACHINES_FILE" in os.environ else None,
+            machines_seconds=float(os.environ.get("BOARD_MACHINES_SECONDS", "30")),
         )
 
 
@@ -95,6 +102,8 @@ class Board:
             sessions_seconds=settings.sessions_seconds, session_stale_hours=settings.session_stale_hours,
         )
         self.accounts = Accounts(settings.codex_task, settings.accounts_seconds)
+        self.machines = Machines(settings.machines_file or settings.task_home / "board-machines.json",
+                                 settings.ssh_command)
         self.lock = asyncio.Lock()
         self.clients = set()
 
@@ -111,7 +120,7 @@ class Board:
     async def snapshot(self):
         async with self.lock:
             return {"generated_at": time.time(), "tasks": self.store.summaries(),
-                    "accounts": self.accounts.value}
+                    "accounts": self.accounts.value, "machines": self.machines.value}
 
     async def poll_tasks(self):
         while True:
@@ -125,6 +134,14 @@ class Board:
             if value is not None:
                 self.publish({"type": "accounts", "accounts": value})
             await asyncio.sleep(max(0, self.settings.accounts_seconds - (time.monotonic() - started)))
+
+    async def poll_machines(self):
+        while True:
+            started = time.monotonic()
+            value = await self.machines.refresh()
+            if value is not None:
+                self.publish({"type": "machines", "machines": value})
+            await asyncio.sleep(max(0, self.settings.machines_seconds - (time.monotonic() - started)))
 
 
 def read_tail(path):
@@ -142,7 +159,8 @@ def create_app(settings=None):
     @asynccontextmanager
     async def lifespan(app):
         await board.poll()
-        jobs = [asyncio.create_task(board.poll_tasks()), asyncio.create_task(board.poll_accounts())]
+        jobs = [asyncio.create_task(board.poll_tasks()), asyncio.create_task(board.poll_accounts()),
+                asyncio.create_task(board.poll_machines())]
         try:
             yield
         finally:
