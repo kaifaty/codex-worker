@@ -56,6 +56,51 @@ only events from the current busy period are shown. Transcript paths use ASCII l
 cwd encoding. Until a transcript is found, its direct path is checked on every poll and fallback searches
 across project directories run at most once per 60 seconds; a found path is cached.
 
+## Run as a service
+
+On macOS, launchd can keep the board running: it starts at login and restarts after a crash.
+`codex-worker-board plist` prints the job and installs nothing. It accepts `--host` and `--port` with
+the defaults above, and copies `CODEX_TASK_HOME` and every `BOARD_*` variable set in the current
+environment into the job. Logs go to `<CODEX_TASK_HOME>/board-server.log`.
+
+1. Clone the repository to a permanent place outside working directories, then build and sync:
+
+   ```sh
+   git clone https://github.com/kaifaty/codex-worker.git ~/codex-worker-board
+   cd ~/codex-worker-board
+   npm --prefix board/web ci && npm --prefix board/web run build
+   uv sync --project board/server --no-dev
+   ```
+
+2. Write the job:
+
+   ```sh
+   board/server/.venv/bin/codex-worker-board plist > ~/Library/LaunchAgents/codex-worker.board.plist
+   ```
+
+3. Load it:
+
+   ```sh
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.board.plist
+   ```
+
+4. Update: pull, build and sync as in step 1, then restart the job:
+
+   ```sh
+   git pull
+   npm --prefix board/web ci && npm --prefix board/web run build
+   uv sync --project board/server --no-dev
+   launchctl kickstart -k gui/$(id -u)/codex-worker.board
+   ```
+
+5. Disable:
+
+   ```sh
+   launchctl bootout gui/$(id -u)/codex-worker.board
+   ```
+
+The port must be free, so stop a manually started server before loading the job.
+
 ## Machine metrics
 
 Create the machine configuration outside the public repository, using
