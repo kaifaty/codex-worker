@@ -9,6 +9,8 @@ function task(overrides: Partial<TaskSummary> = {}): TaskSummary {
   return {
     slug: "t",
     kind: "work",
+    title: null,
+    link: null,
     repo: "repo",
     branch: null,
     task_type: null,

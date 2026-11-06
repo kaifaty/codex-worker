@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Accounts } from "../types";
-import { parseAccounts } from "../lib/accounts";
+import { parseAccounts, type DutyInfo } from "../lib/accounts";
 import { formatAge, formatClock, formatFullTime, formatUntil } from "../lib/format";
 
 const props = defineProps<{ accounts: Accounts | null; now: number; collapsed: boolean }>();
@@ -10,6 +10,9 @@ const emit = defineEmits<{ toggle: [] }>();
 const parsed = computed(() => parseAccounts(props.accounts?.data ?? null, props.now));
 const count = computed(() => parsed.value.items?.length ?? 0);
 const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "warn" : "ok");
+const dutyTitle = (duty: DutyInfo) =>
+  [duty.reason, duty.since !== null ? `с ${formatClock(duty.since, props.now)}` : null].filter(Boolean).join("\n") ||
+  "дежурный аккаунт";
 </script>
 
 <template>
@@ -43,6 +46,7 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
                 <span class="visually-hidden">{{ item.row.executor === "codex" ? "Codex" : "Claude" }}</span>
               </span>
               <span class="name ellipsis" :title="item.row.name">{{ item.row.name }}</span>
+              <span v-if="item.row.duty" class="duty" :title="dutyTitle(item.row.duty)">дежурный</span>
               <span v-if="item.row.weeklyPercent !== null" class="pct num" :class="level(item.row.weeklyPercent)">{{ Math.round(item.row.weeklyPercent) }} %</span>
             </div>
             <div v-if="item.row.weeklyPercent !== null" class="bar" role="img" :aria-label="`Неделя: ${Math.round(item.row.weeklyPercent)} %`">
@@ -191,6 +195,17 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
 .name {
   flex: 1;
   font-weight: 600;
+}
+
+.duty {
+  flex: none;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+  cursor: help;
 }
 
 .pct {

@@ -3,7 +3,7 @@ import type { Activity, Column, Phase, TaskFile, TaskSummary } from "../types";
 export const COLUMNS: { id: Column; title: string }[] = [
   { id: "running", title: "Работает" },
   { id: "sleeping", title: "Спит до сброса" },
-  { id: "review_me", title: "Ждёт ревью" },
+  { id: "review_me", title: "Ждёт тебя" },
   { id: "attention", title: "Нужно внимание" },
   { id: "closed", title: "Закрыто" },
 ];
@@ -20,7 +20,41 @@ export const PHASES: Record<Phase, string> = {
 
 export const EXECUTORS: Record<TaskSummary["executor"], string> = { codex: "Codex", claude: "Claude" };
 
-export const KINDS: Record<TaskSummary["kind"], string> = { work: "работа", review: "ревью", scout: "разведка" };
+export const KINDS: Record<TaskSummary["kind"], string> = {
+  work: "работа",
+  review: "ревью",
+  scout: "разведка",
+  session: "сессия",
+};
+
+/** Heading of a card: a session's title, else the start of its uuid; the slug for a task. */
+export function taskTitle(task: TaskSummary): string {
+  if (task.kind !== "session") return task.slug;
+  const title = task.title?.trim();
+  return title ? title : task.slug.replace(/^local_/, "").slice(0, 8);
+}
+
+/** A session's link to the Claude app, only when it is a `claude://` link. */
+export function claudeLink(task: TaskSummary): string | null {
+  const link = task.link;
+  return task.kind === "session" && typeof link === "string" && link.startsWith("claude://") ? link : null;
+}
+
+export type KindFilter = "all" | "tasks" | "sessions";
+
+export const KIND_FILTERS: { id: KindFilter; label: string }[] = [
+  { id: "all", label: "Всё" },
+  { id: "tasks", label: "Задачи" },
+  { id: "sessions", label: "Сессии" },
+];
+
+export const isKindFilter = (value: unknown): value is KindFilter =>
+  value === "all" || value === "tasks" || value === "sessions";
+
+export function matchesKind(task: TaskSummary, filter: KindFilter): boolean {
+  if (filter === "all") return true;
+  return (task.kind === "session") === (filter === "sessions");
+}
 
 export const ACTIVITY: Record<Activity["kind"], { icon: string; label: string }> = {
   command: { icon: "$", label: "команда" },

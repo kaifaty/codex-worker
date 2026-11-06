@@ -61,7 +61,18 @@
       "executor": "claude",
       "account": "claude-pool-1",
       "column": "running",
-      "phase": "ci"
+      "phase": "ci",
+      "title": null,
+      "link": null
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "local_3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c",
+    "activity": {
+      "at": 1794000005,
+      "kind": "edit",
+      "text": "Edit src/cart/merge.ts"
     }
   },
   {
@@ -104,7 +115,9 @@
       "executor": "codex",
       "account": "personal",
       "column": "running",
-      "phase": "turn"
+      "phase": "turn",
+      "title": null,
+      "link": null
     }
   },
   {
@@ -280,7 +293,9 @@
       "executor": "claude",
       "account": "claude-pool-1",
       "column": "review_me",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     }
   },
   {
@@ -310,7 +325,9 @@
       "executor": "claude",
       "account": "claude-pool-2",
       "column": "running",
-      "phase": "turn"
+      "phase": "turn",
+      "title": null,
+      "link": null
     }
   },
   {
@@ -320,6 +337,15 @@
       "at": 1794000011,
       "kind": "message",
       "text": "Нашёл гонку при закрытии сокета до onopen"
+    }
+  },
+  {
+    "type": "activity",
+    "slug": "local_3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c",
+    "activity": {
+      "at": 1794000012,
+      "kind": "command",
+      "text": "npm test -- cart"
     }
   },
   {
@@ -362,7 +388,9 @@
       "executor": "codex",
       "account": "work",
       "column": "closed",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     }
   },
   {
@@ -396,7 +424,9 @@
       "executor": "codex",
       "account": "work-team-account-number-three@example.com",
       "column": "running",
-      "phase": "review"
+      "phase": "review",
+      "title": null,
+      "link": null
     }
   },
   {

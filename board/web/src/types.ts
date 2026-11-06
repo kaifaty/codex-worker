@@ -12,8 +12,10 @@ export interface Activity {
 
 export interface TaskSummary {
   slug: string;
-  kind: "work" | "review" | "scout";
-  repo: string; // basename of the repository directory
+  kind: "work" | "review" | "scout" | "session";
+  title: string | null; // desktop session title; null for tasks
+  link: string | null; // claude://claude.ai/epitaxy/<sessionId>; null for tasks
+  repo: string; // repository basename; see the session mapping in the contract
   branch: string | null;
   task_type: string | null; // e.g. "feature", "fix", "layout"
   executor: "codex" | "claude";
@@ -24,7 +26,7 @@ export interface TaskSummary {
   column: Column;
   phase: Phase;
   phase_started_at: number | null;
-  alive: boolean; // the task's supervisor process is running
+  alive: boolean; // task supervisor running, or session PID running with status busy
   turn: number; // turns so far
   fix_round: number; // automatic fix rounds in the current cycle
   outcome: string | null; // state.json "outcome" as written by the plugin
@@ -34,14 +36,14 @@ export interface TaskSummary {
   ci: string | null; // "pending" | "passed" | "failed" | "skipped" | "timeout" | "none" | null
   sleeping_until: number | null;
   created: number | null;
-  updated_at: number; // mtime of state.json
+  updated_at: number; // task state mtime, or session lastActivityAt / 1000
   activity: Activity | null; // latest activity, only while alive
 }
 
 export type TaskFile = "brief" | "last" | "review" | "check";
 
 export interface TaskDetail extends TaskSummary {
-  timeline: { at: number; text: string }[]; // turns, checks, reviews, rotations, CI, ≤ 200 entries
+  timeline: { at: number; text: string }[]; // task events (≤ 200), or session creation and last activity
   files: TaskFile[]; // which files exist
 }
 
@@ -53,7 +55,7 @@ export interface Accounts {
 
 export interface Snapshot {
   generated_at: number;
-  tasks: TaskSummary[]; // all live tasks, plus the 50 most recent archived ones as column "closed"
+  tasks: TaskSummary[]; // all non-closed tasks, plus at most 50 closed records with the newest updated_at
   accounts: Accounts;
 }
 
