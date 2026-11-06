@@ -164,7 +164,8 @@ The documents name paths in the new layout under `~/.teamster`; a legacy home ha
 moves the legacy data from `~/.codex` to `~/.teamster`. It refuses, before it changes anything and
 with a nonzero exit, when `TEAMSTER_HOME` or `CODEX_TASK_HOME` is set, when the data is already in the
 new layout, when a task or scout supervisor is alive (sleeping and waiting tasks included; it names
-them), when `~/.teamster` exists and is not empty, and when `~/.teamster` and `~/.codex` are on
+them), when `~/.teamster` exists (an empty one too: commands already use it and its own lock, so remove
+it first), and when `~/.teamster` and `~/.codex` are on
 different devices.
 
 The move uses only `os.rename`, never a copy. It builds `~/.teamster.migrating`, writes

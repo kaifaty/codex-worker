@@ -6,6 +6,7 @@ worker count; set it to 1 to use the standard sequential unittest runner.
 CODEX_TEST_TIMEOUT limits each pooled test to 300 seconds by default.
 """
 import json
+import os
 import runpy
 import subprocess
 import sys
@@ -14,6 +15,8 @@ from pathlib import Path
 
 # Isolated Python omits the script directory from its import path.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+# Every fixture uses temporary homes; an inherited data home would take precedence.
+os.environ.pop("TEAMSTER_HOME", None)
 
 import rotation_workspace
 import rotation_data_home

@@ -792,9 +792,11 @@ def cmd_claude_login(a):
             pool.append(account)
         else:
             previous.update(account)
-    claude_accounts.clear_limits(a.name)
+        claude_accounts.clear_limits(a.name)
     print(f"Claude account {a.name} saved")
-    cmd_claude_probe(a)
+    # The probe writes cached limits; like claude-probe, it must not run while the home moves.
+    with config.home_lock():
+        cmd_claude_probe(a)
 
 
 def cmd_docs(a):

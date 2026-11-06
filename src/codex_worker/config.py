@@ -104,7 +104,9 @@ def home_moved():
     """Why this process's data home is no longer current, or None."""
     if resolve_homes() != (CODEX_HOME, DATA_HOME, LAYOUT):
         return f"the data home moved after this command started; run {COMMAND} again"
-    if LAYOUT == "legacy" and DATA_HOME == default_codex_home().resolve() and migrating_home().exists():
+    # After the final rename and before the marker, CODEX_TASK_HOME=~/.codex still resolves to legacy.
+    if LAYOUT == "legacy" and DATA_HOME == default_codex_home().resolve() and (
+            migrating_home().exists() or (default_data_home() / MIGRATION_RECORD).exists()):
         return (f"a data home migration is unfinished ({migrating_home()}); "
                 f"run {COMMAND} migrate-home --apply to finish it")
     return None

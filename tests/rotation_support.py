@@ -658,6 +658,8 @@ class RotationTestCase(unittest.TestCase):
                         CODEX_TASK_ROLLOUT_SEARCH_SECONDS="0.05",
                         GIT_AUTHOR_NAME="Rotation Test", GIT_AUTHOR_EMAIL="rotation@example.test",
                         GIT_COMMITTER_NAME="Rotation Test", GIT_COMMITTER_EMAIL="rotation@example.test")
+        # An inherited data home would take precedence over the temporary one.
+        self.env.pop("TEAMSTER_HOME", None)
         # The external process gets no opportunity to ask for a credential or pager.
         self.env.update(GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat")
         # Later test-specific Git settings must not affect fixture creation.

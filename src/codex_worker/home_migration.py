@@ -72,8 +72,7 @@ def current_plan(codex, target, staging):
         record = read_record(target / config.MIGRATION_RECORD)
         if record is not None and not (codex / config.HOME_MARKER).exists():
             return record, "marker"
-        if record is not None or any(target.iterdir()):
-            return None, None
+        return None, None
     record = read_record(staging / config.MIGRATION_RECORD) if staging.exists() else None
     if record is not None:
         return record, "staging"
@@ -93,7 +92,10 @@ def refusals(codex, target, staging):
     if record is None:
         if not legacy_sources(codex):
             return [f"the data is already in the new layout: {codex} holds none of the legacy files"]
-        return [f"{target} exists and is not empty; move it away or empty it first"]
+        if any(target.iterdir()):
+            return [f"{target} exists and is not empty; move it away or empty it first"]
+        # Commands already use an existing ~/.teamster and its own lock, which the move does not hold.
+        return [f"{target} exists; remove the empty directory first (rmdir {target})"]
     if stage == "new" and not record["moved"]:
         return [f"the data is already in the new layout: {codex} holds none of the legacy files"]
     destination = staging if staging.exists() else (target if target.exists() else target.parent)

@@ -26,10 +26,16 @@ def spawn(st, prompt, effort=None, current_message=False, kind="work", review_af
         # Standalone review preserves the last work result and publication receipt.
         st.pop("publish", None)
         st["result"] = None
+    # The supervisor runs in the worktree: pass the resolved homes, not relative variables.
+    environment = dict(os.environ)
+    if config.HOME_VARIABLES["TEAMSTER_HOME"]:
+        environment["TEAMSTER_HOME"] = str(config.DATA_HOME)
+    if config.HOME_VARIABLES["CODEX_TASK_HOME"]:
+        environment["CODEX_TASK_HOME"] = str(config.CODEX_HOME)
     with (d / "stderr.log").open("a") as errors:
         proc = subprocess.Popen([sys.executable, "-I", str(config.SCRIPT_RESOLVED), "_run", st["slug"]],
-                                cwd=st["worktree"], stdin=subprocess.DEVNULL, stdout=errors, stderr=errors,
-                                start_new_session=True)
+                                cwd=st["worktree"], env=environment, stdin=subprocess.DEVNULL,
+                                stdout=errors, stderr=errors, start_new_session=True)
     st["pid"] = proc.pid
     task_state.save(st)
     return proc

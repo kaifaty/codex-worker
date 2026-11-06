@@ -134,7 +134,8 @@ class DataHomeTests(RotationTestCase):
         self.configure()
         data.mkdir()
         (self.home / "claude-accounts.json").rename(data / "config.json")
-        self.env["TEAMSTER_HOME"] = str(data)
+        # A relative TEAMSTER_HOME reaches the supervisor, which runs in the worktree, resolved.
+        self.env["TEAMSTER_HOME"] = os.path.relpath(data, self.repo)
         codex_before = set(os.listdir(self.home))
         self.account(self.home, "A", self.reset, runs=[{"mode": "complete", "reply": self.work_result()}])
         self.start("apart")
@@ -177,8 +178,10 @@ class DataHomeTests(RotationTestCase):
         (user / ".teamster").mkdir()
         (user / ".teamster/note.txt").write_text("someone else's\n")
         self.assert_refused(user, "exists and is not empty")
-        # An empty ~/.teamster is no obstacle; plan mode lists the moves and changes nothing.
         (user / ".teamster/note.txt").unlink()
+        self.assert_refused(user, "remove the empty directory first")
+        (user / ".teamster").rmdir()
+        # Plan mode lists the moves and changes nothing.
         before = tree(user)
         self.assertIn("nothing changed", self.migrate(user, apply=False))
         self.assertEqual(tree(user), before)
@@ -236,6 +239,13 @@ class DataHomeTests(RotationTestCase):
                     if (codex / "claude-tasks").exists():
                         self.assertEqual(self.user_worker(user).task_state.load("x")["slug"], "x")
                     with self.assertRaises(SystemExit) as raised, config.home_lock():
+                        pass
+                    self.assertIn("migration is unfinished", str(raised.exception))
+                elif not (codex / "teamster-home").exists():
+                    # Old jobs with CODEX_TASK_HOME=~/.codex still resolve to legacy and must not write there.
+                    legacy = self.user_worker(user, CODEX_TASK_HOME=str(codex)).config
+                    self.assertEqual(legacy.LAYOUT, "legacy")
+                    with self.assertRaises(SystemExit) as raised, legacy.home_lock():
                         pass
                     self.assertIn("migration is unfinished", str(raised.exception))
                 self.assertIn("finishes it", self.migrate(user, apply=False))
