@@ -197,10 +197,12 @@ def stop_outcome(st, stopped):
     return "stopped" if pid and request.get("pid") == pid else "interrupted"
 
 
-def running_tasks(exclude=""):
+def running_tasks(exclude="", root=None, scouts=False):
+    """Slugs whose supervisor is alive, including sleeping and waiting ones."""
     out = []
-    for p in config.TASKS.glob("*/state.json"):
+    for p in (config.TASKS if root is None else root).glob("*/state.json"):
         st = json.loads(p.read_text())
-        if st["slug"] != exclude and st.get("kind") != "scout" and procs.alive(st.get("pid")):
+        if (st["slug"] != exclude and (scouts or st.get("kind") != "scout")
+                and procs.alive(st.get("pid"))):
             out.append(st["slug"])
     return out

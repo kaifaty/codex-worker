@@ -56,6 +56,36 @@ def test_plist_fields(tmp_path, monkeypatch, capsys, console_script):
     assert defaults[-4:] == ["--host", "127.0.0.1", "--port", "8787"]
 
 
+@pytest.mark.parametrize("variable", ["TEAMSTER_HOME", "CODEX_TASK_HOME"])
+def test_plist_names_the_data_home_by_layout(tmp_path, monkeypatch, capsys, variable):
+    """New-layout data homes get TEAMSTER_HOME; legacy ones keep CODEX_TASK_HOME."""
+    clean_environment(monkeypatch, tmp_path / "codex")
+    monkeypatch.delenv("CODEX_TASK_HOME")
+    monkeypatch.delenv("TEAMSTER_HOME", raising=False)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    data = tmp_path / (".teamster" if variable == "TEAMSTER_HOME" else ".codex")
+    (data / ("tasks" if variable == "TEAMSTER_HOME" else "claude-tasks")).mkdir(parents=True)
+    board_main.main(["plist"])
+    job = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
+    environment = job["EnvironmentVariables"]
+    assert {key: value for key, value in environment.items() if key != "PATH"} == {variable: str(data)}
+    assert job["StandardOutPath"] == str(data / "board-server.log")
+
+
+def test_plist_resolves_a_relative_data_home(tmp_path, monkeypatch, capsys):
+    """launchd starts the job in WorkingDirectory, so a relative TEAMSTER_HOME must become absolute."""
+    clean_environment(monkeypatch, "codex")
+    monkeypatch.setenv("TEAMSTER_HOME", "data")
+    monkeypatch.chdir(tmp_path)
+    board_main.main(["plist"])
+    job = plistlib.loads(capsys.readouterr().out.encode("utf-8"))
+    environment = job["EnvironmentVariables"]
+    for directory in (tmp_path, job["WorkingDirectory"]):
+        assert Path(directory, environment["TEAMSTER_HOME"]) == tmp_path / "data"
+        assert Path(directory, environment["CODEX_TASK_HOME"]) == tmp_path / "codex"
+    assert job["StandardOutPath"] == job["StandardErrorPath"] == str(tmp_path / "data/board-server.log")
+
+
 def free_port():
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))

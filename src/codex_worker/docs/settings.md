@@ -1,7 +1,7 @@
 # Settings
 
-Settings live in `~/.codex/codex-worker.json`. The old `~/.codex/claude-accounts.json` is read only when
-that file is absent.
+Settings live in `config.json` in the [data home](#data-home) (`~/.teamster`). A legacy home keeps them in
+`~/.codex/codex-worker.json` and reads the old `~/.codex/claude-accounts.json` only when that file is absent.
 
 | Key | Default | Effect |
 |---|---|---|
@@ -60,7 +60,7 @@ All timestamps below are UTC ISO 8601 strings; unknown values are `null`.
 | `thresholds` | Object with configured `soft_switch_at` and `switch_at` used-percentage thresholds |
 | `credits_floor` | Active credit floor: the configured value, or `0` after `credits_floor_until` |
 | `credits_floor_until` | Configured end date of the floor (`YYYY-MM-DD`), or `null` |
-| `duty` | Contents of `~/.codex/duty.json` (`account`, `family`, `since`, `checked_at`, `reason`, `rooms` by family), or `null` without a readable duty record ([accounts.md](accounts.md#duty-account)) |
+| `duty` | Contents of `~/.teamster/duty.json` (`account`, `family`, `since`, `checked_at`, `reason`, `rooms` by family), or `null` without a readable duty record ([accounts.md](accounts.md#duty-account)) |
 
 The JSON includes no tokens, credential paths, or raw account errors.
 
@@ -124,10 +124,90 @@ does not enable CI. Waiting and repair mechanics are in [ci.md](ci.md).
 ## Standing rules
 
 `start` appends `src/codex_worker/rules.md` or `src/codex_worker/rules.ru.md` to the brief, following `language`.
-`~/.codex/codex-worker-rules.md`, if present, replaces either file: use it for another language or your
+`~/.teamster/rules.md`, if present, replaces either file: use it for another language or your
 own rules. `{branch}` and `{base}` in it are replaced with the task's branch and PR target. Scouts use
 their own read-only instructions instead of task rules.
 With `--check`, `start` appends a rule to run the saved check in full before finishing with status `done`, including when a custom rules file is used.
+
+## Data home
+
+The tool keeps its own files in a data home, apart from Codex's home. Codex's home is `~/.codex`, or
+`CODEX_TASK_HOME` when set; it keeps `config.toml`, sessions and the default `main` login, with
+`~/.codex-accounts` next to it. The data home is the first match:
+
+1. `TEAMSTER_HOME` is set: that directory, new layout. Codex's home is `CODEX_TASK_HOME` if set, else `~/.codex`.
+2. `CODEX_TASK_HOME` is set: if it contains the file `teamster-home`, the data home is the path written
+   in that file, new layout; otherwise it is `CODEX_TASK_HOME` itself, legacy layout.
+3. Neither is set: `~/.teamster` if it exists, new layout. Otherwise `~/.codex` in the legacy layout if
+   it holds `claude-tasks/` or `codex-worker.json`, or while an unfinished `~/.teamster.migrating`
+   exists. Otherwise `~/.teamster`, new layout.
+
+| Purpose | Legacy layout | New layout |
+|---|---|---|
+| Task records | `claude-tasks/` | `tasks/` |
+| Worktrees | `worktrees/` | `worktrees/` |
+| Settings | `codex-worker.json`, read fallback `claude-accounts.json` | `config.json` |
+| Settings lock | `codex-worker.lock` | `config.lock` |
+| Telemetry journal | `codex-worker-log.jsonl` | `log.jsonl` |
+| Reset journal | `codex-worker-resets.jsonl` | `resets.jsonl` |
+| Rules override | `codex-worker-rules.md` | `rules.md` |
+| Duty | `duty.json`, `duty-log.jsonl`, `duty.lock`, `duty-launchd.log` | same names |
+| Board | `board-machines.json`, `board-server.log` | same names |
+
+The documents name paths in the new layout under `~/.teamster`; a legacy home has the legacy names in
+`~/.codex`. `duty plist` and `codex-worker-board plist` write `TEAMSTER_HOME` for a new-layout home
+(and `CODEX_TASK_HOME` when Codex's home is not `~/.codex`), and `CODEX_TASK_HOME` for a legacy one.
+
+### migrate-home
+
+`codex-worker migrate-home` prints the plan and changes nothing; `codex-worker migrate-home --apply`
+moves the legacy data from `~/.codex` to `~/.teamster`. It refuses, before it changes anything and
+with a nonzero exit, when `TEAMSTER_HOME` or `CODEX_TASK_HOME` is set, when the data is already in the
+new layout, when a task or scout supervisor is alive (sleeping and waiting tasks included; it names
+them), when `~/.teamster` exists and is not empty, when `~/.teamster` exists and is empty, and when
+`~/.teamster` and `~/.codex` are on different devices. An empty `~/.teamster` is refused with a request
+to `rmdir` it: while the directory exists, commands already treat it as the data home (rule 3) and
+lock it with its own `config.lock`, which the migration does not hold.
+
+The move uses only `os.rename`, never a copy. It builds `~/.teamster.migrating`, writes
+`migration.json` there with every planned pair, renames each present item into it under its new
+name, renames the directory to `~/.teamster`, and finally writes `~/.codex/teamster-home` with the
+new path, so launchd jobs that still set `CODEX_TASK_HOME=~/.codex` follow the move. Until the
+directory rename the tool keeps resolving to the legacy home. Running `--apply` again after a crash
+at any step resumes from the saved plan and finishes.
+
+Worktrees never move: git worktree metadata and task state hold absolute paths through
+`~/.codex/worktrees`. `~/.teamster/worktrees` becomes a symlink to the resolved real path of
+`~/.codex/worktrees` (which may itself be a symlink to another disk), and the old entry stays. Also
+left in place: `.bak-*` files, `~/.codex/checks`, `~/.codex/briefs`, `~/.codex-accounts`, every Codex
+file, and the lock files `codex-worker.lock` and `duty.lock`.
+
+Commands that write task records, journals or cached limits (`start`, `scout`, `say`, `review`,
+`clean`, `verdict`, `accounts`, `reset-credit`, `claude-probe`) hold the settings lock shared for their
+whole run; `login` and the `claude-*` account
+commands hold it exclusively. `migrate-home --apply` holds the legacy settings lock and `duty.lock`
+exclusively from its final checks until the marker is written. The legacy lock files are never moved,
+so a command that starts meanwhile waits for the same lock. Once granted, a command resolves its data
+home again and stops if the home moved or a migration is unfinished; run it again.
+
+After the move, restart the launchd jobs with
+`launchctl kickstart -k gui/$(id -u)/codex-worker.board` and
+`launchctl kickstart -k gui/$(id -u)/codex-worker.duty`, and regenerate the plists you printed. The
+tool never runs `launchctl` itself.
+
+### Rolling back
+
+With no task running and the launchd jobs stopped. Clean tasks started after the migration first:
+their worktree paths go through `~/.teamster/worktrees`, which the rollback removes.
+
+1. `rm ~/.codex/teamster-home`
+2. Move every recorded pair back:
+   `python3 -c 'import json, os; [os.rename(p["to"], p["from"]) for p in json.load(open(os.path.expanduser("~/.teamster/migration.json")))["moved"]]'`
+3. `rm ~/.teamster/worktrees ~/.teamster/migration.json` (the symlink only; the worktrees are still in
+   `~/.codex/worktrees`), then `rm -f ~/.teamster/*.lock` and `rmdir ~/.teamster`. If `rmdir` fails,
+   the remaining files were created after the migration; move each to its legacy name from the table
+   above first.
+4. Restart the launchd jobs and regenerate their plists; they set `CODEX_TASK_HOME` again.
 
 ## Repository trust
 

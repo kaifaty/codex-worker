@@ -1,11 +1,13 @@
 """Worker settings, script paths and polling intervals."""
 import datetime
+import fcntl
 import json
 import os
 import re
 import runpy
 import shutil
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import codex_worker
@@ -15,9 +17,120 @@ from . import executors, procs, result_schema
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
 CODEX = {"path": os.environ.get("CODEX_TASK_CODEX")}
-CODEX_HOME = Path(os.environ.get("CODEX_TASK_HOME", str(Path.home() / ".codex"))).expanduser().resolve()
-TASKS = CODEX_HOME / "claude-tasks"
-WORKTREES = CODEX_HOME / "worktrees"
+# Every file of ours, by data home layout. Codex's own files stay in CODEX_HOME.
+LAYOUTS = {
+    "legacy": {"tasks": "claude-tasks", "worktrees": "worktrees",
+               "settings": "codex-worker.json", "settings_fallback": "claude-accounts.json",
+               "settings_lock": "codex-worker.lock", "telemetry": "codex-worker-log.jsonl",
+               "resets": "codex-worker-resets.jsonl", "rules": "codex-worker-rules.md",
+               "duty": "duty.json", "duty_log": "duty-log.jsonl", "duty_lock": "duty.lock",
+               "duty_launchd_log": "duty-launchd.log",
+               "board_machines": "board-machines.json", "board_log": "board-server.log"},
+    "new": {"tasks": "tasks", "worktrees": "worktrees",
+            "settings": "config.json", "settings_fallback": None,
+            "settings_lock": "config.lock", "telemetry": "log.jsonl",
+            "resets": "resets.jsonl", "rules": "rules.md",
+            "duty": "duty.json", "duty_log": "duty-log.jsonl", "duty_lock": "duty.lock",
+            "duty_launchd_log": "duty-launchd.log",
+            "board_machines": "board-machines.json", "board_log": "board-server.log"},
+}
+# A Codex home holding this file names the data home that replaced its legacy data.
+HOME_MARKER = "teamster-home"
+MIGRATION_RECORD = "migration.json"
+
+
+# One process resolves its homes from the environment it started with.
+USER_HOME = Path.home()
+HOME_VARIABLES = {"TEAMSTER_HOME": os.environ.get("TEAMSTER_HOME"),
+                  "CODEX_TASK_HOME": os.environ.get("CODEX_TASK_HOME")}
+
+
+def default_codex_home():
+    return USER_HOME / ".codex"
+
+
+def default_data_home():
+    return USER_HOME / ".teamster"
+
+
+def migrating_home():
+    """Where migrate-home assembles the new data home before its final rename."""
+    return USER_HOME / ".teamster.migrating"
+
+
+def resolve_homes(environ=None):
+    """(Codex home, data home, layout) by the first matching rule; empty variables count as unset."""
+    environ = HOME_VARIABLES if environ is None else environ
+
+    def absolute(value):
+        return Path(value).expanduser().resolve()
+
+    codex = absolute(environ.get("CODEX_TASK_HOME") or default_codex_home())
+    if environ.get("TEAMSTER_HOME"):
+        return codex, absolute(environ["TEAMSTER_HOME"]), "new"
+    if environ.get("CODEX_TASK_HOME"):
+        marker = codex / HOME_MARKER
+        target = marker.read_text(encoding="utf-8").strip() if marker.is_file() else ""
+        return (codex, absolute(target), "new") if target else (codex, codex, "legacy")
+    data = default_data_home()
+    if data.exists():
+        return codex, absolute(data), "new"
+    legacy = LAYOUTS["legacy"]
+    # An unfinished migration keeps resolving to the legacy home until its final rename.
+    if (migrating_home().exists() or (codex / legacy["tasks"]).exists()
+            or (codex / legacy["settings"]).exists()):
+        return codex, codex, "legacy"
+    return codex, absolute(data), "new"
+
+
+CODEX_HOME, DATA_HOME, LAYOUT = resolve_homes()
+
+
+def data_path(purpose):
+    """The path of one of our files or directories in the data home."""
+    return DATA_HOME / LAYOUTS[LAYOUT][purpose]
+
+
+def settings_path():
+    """The settings file to read: the current name, else the legacy fallback when present."""
+    path = data_path("settings")
+    fallback = LAYOUTS[LAYOUT]["settings_fallback"]
+    if not path.exists() and fallback and (DATA_HOME / fallback).exists():
+        return DATA_HOME / fallback
+    return path
+
+
+def home_moved():
+    """Why this process's data home is no longer current, or None."""
+    if resolve_homes() != (CODEX_HOME, DATA_HOME, LAYOUT):
+        return f"the data home moved after this command started; run {COMMAND} again"
+    # After the final rename and before the marker, CODEX_TASK_HOME=~/.codex still resolves to legacy.
+    if LAYOUT == "legacy" and DATA_HOME == default_codex_home().resolve() and (
+            migrating_home().exists() or (default_data_home() / MIGRATION_RECORD).exists()):
+        return (f"a data home migration is unfinished ({migrating_home()}); "
+                f"run {COMMAND} migrate-home --apply to finish it")
+    return None
+
+
+@contextmanager
+def home_lock(exclusive=False):
+    """Hold the settings lock in the current data home.
+
+    Commands that change task records hold it shared; settings writers and
+    migrate-home hold it exclusively. After the lock is granted the data home
+    is resolved again, so a command never writes into a home that moved.
+    """
+    DATA_HOME.mkdir(mode=0o700, parents=True, exist_ok=True)
+    with data_path("settings_lock").open("a") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX if exclusive else fcntl.LOCK_SH)
+        reason = home_moved()
+        if reason:
+            procs.die(reason)
+        yield
+
+
+TASKS = data_path("tasks")
+WORKTREES = data_path("worktrees")
 PACKAGE = Path(__file__).absolute().parent
 SCRIPT = PACKAGE / "__main__.py"
 SCRIPT_RESOLVED = SCRIPT.resolve()
@@ -84,9 +197,7 @@ def require_claude():
 
 
 def accounts_config():
-    p = CODEX_HOME / "codex-worker.json"
-    if not p.exists():
-        p = CODEX_HOME / "claude-accounts.json"
+    p = settings_path()
     cfg = json.loads(p.read_text(encoding="utf-8")) if p.exists() else {}
     if not isinstance(cfg, dict):
         procs.die("settings must be a JSON object")

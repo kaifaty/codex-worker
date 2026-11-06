@@ -164,23 +164,23 @@ Run all commands as `codex-worker <command>`.
 | `stats <slug>` | Show per-turn runtime, tool calls, tokens, and available usage estimates. |
 | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model] [--json]` | Summarize persistent costs and outcomes (default: seven days); combine grouping dimensions with commas. |
 | `accounts [--json]` | Show login, plan, limits, reset times, credits, and availability in English, plus a line for each Claude account; `--json` emits one object with `codex`, `claude`, `thresholds`, and the active `credits_floor`. |
-| `login <name> [--browser]` | Have the human sign in to a Codex account; writes `codex-worker.json`. |
+| `login <name> [--browser]` | Have the human sign in to a Codex account; writes the settings file. |
 | `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` | Have the human save an isolated Claude CLI account and store its token at the Keychain prompt, then probe it; a failed probe leaves the account saved and exits nonzero. |
 | `claude-probe <name>` | Send one short request to check the token and cache five-hour and seven-day limits. |
 | `claude-rename <old> <new>` | Rename the Claude pool entry and cached limits, keeping its config directory and Keychain service. |
 | `claude-remove <name>` | Remove the Claude pool entry and cached limits; leave and print its directory and Keychain entry for manual deletion. The last account cannot be removed. |
 | `stop <slug>` | Interrupt the task; send the next instructions with `say`. |
 | `clean <slug> [--keep-branch]` | Remove the worktree and task logs and archive threads; optionally retain the local branch. |
+| `migrate-home [--apply]` | Print, or with `--apply` carry out, the move of legacy data from `~/.codex` to `~/.teamster` ([Data home](#data-home)). |
 
-Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
-`~/.codex/claude-tasks/<slug>/`. Turns continue independently of the lead's session. Only one task runs at
+Tasks use `~/.teamster/worktrees/claude-<slug>/<repo>`, with state and logs under
+`~/.teamster/tasks/<slug>/`. Turns continue independently of the lead's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
 If a stacked base branch has been deleted, the automatic merge check switches once to that remote's
 default branch; `wait` and `status` show the change, and later turns and new PRs use the new base.
 
-The supervisor keeps numeric stage telemetry in `<CODEX_TASK_HOME>/codex-worker-log.jsonl`
-(default `~/.codex/`); `clean` preserves it. Use `report` to compare review findings, check success,
+The supervisor keeps numeric stage telemetry in `~/.teamster/log.jsonl`; `clean` preserves it. Use `report` to compare review findings, check success,
 fix rounds to clean review, tokens, and weekly-window usage before changing rounds or angle defaults.
 In `Tasks by cost`, `slug` is followed by `repo` (the repository directory name used by `--repo`)
 and `started` (task creation time in local time, `MM-DD HH:MM`, or `-` when unknown).
@@ -268,8 +268,18 @@ produces `== base tests: skipped (…)` and is not rerun.
 
 ## Settings and language
 
-Settings live in `~/.codex/codex-worker.json`. If it does not exist, the worker reads the legacy
-`~/.codex/claude-accounts.json`; the new file always takes precedence. `login` writes only the new file.
+Settings live in `~/.teamster/config.json`; `login` writes this file.
+
+### Data home
+
+The tool keeps its own files (settings, task records, worktrees, journals, duty and board files) in a
+data home, apart from Codex's home `~/.codex`, which keeps `config.toml`, sessions and the `main` login.
+The data home is `TEAMSTER_HOME` when set, otherwise `~/.teamster`. An existing installation that keeps
+`claude-tasks/` or `codex-worker.json` in `~/.codex` goes on using it in the legacy layout
+(`codex-worker.json` with the fallback `claude-accounts.json`, `claude-tasks/`, `codex-worker-log.jsonl`,
+`codex-worker-rules.md`) until `codex-worker migrate-home --apply` moves it; `codex-worker migrate-home`
+alone prints the plan. Worktrees stay in place behind a symlink. The resolving rules, the full name
+table, the refusals and the rollback steps are in `codex-worker docs settings`.
 
 A minimal configuration is:
 
@@ -307,17 +317,17 @@ A settings file containing only language or other preferences does **not** enabl
 monitoring or rotation. The `accounts` command remains available to inspect the current login.
 
 English standing rules are in `src/codex_worker/rules.md`; Russian rules are in `src/codex_worker/rules.ru.md`.
-If `~/.codex/codex-worker-rules.md` exists, it replaces both. Use this file for other languages or your
+If `~/.teamster/rules.md` exists, it replaces both. Use this file for other languages or your
 own working rules. The worker substitutes `{branch}` and `{base}` in the selected rules.
 Scouts use their own read-only instructions instead of these task rules. Account status labels are
 always English.
 
-`CODEX_TASK_HOME` can select another main Codex home. Settings, the rules override, task state, and
-worktrees then resolve under that home.
+`CODEX_TASK_HOME` can select another main Codex home. Without `TEAMSTER_HOME` the data home then is
+that directory in the legacy layout, unless its `teamster-home` file names a data home.
 
 ## Optional workspace sandbox
 
-The sandbox is off by default. To enable it, add these settings to `~/.codex/codex-worker.json`:
+The sandbox is off by default. To enable it, add these settings to `~/.teamster/config.json`:
 
 ```json
 {
@@ -329,7 +339,7 @@ The sandbox is off by default. To enable it, add these settings to `~/.codex/cod
 `start --sandbox off|workspace` overrides the setting for one task, and `say` inherits the saved mode.
 Workers, fresh and resumed reviews, and saved checks use `workspace-write` with network access.
 Scouts remain read-only. Writes outside the worktree are blocked, protecting task state and saved
-checks, other repositories, `~/.ssh`, and `~/.codex`. Temporary directories remain writable, and each
+checks, other repositories, `~/.ssh`, `~/.teamster`, and `~/.codex`. Temporary directories remain writable, and each
 entry in `writable_dirs` explicitly grants additional write access. Builds using caches outside the
 worktree fail until those cache directories are added. Reading the entire disk, including tokens,
 and network access are **not** restricted.
@@ -347,7 +357,7 @@ repository whose config references worktree files through `include.path` or `cor
 
 ## Task notifications
 
-Notifications work even when the lead's session has ended. For macOS, add to `codex-worker.json`:
+Notifications work even when the lead's session has ended. For macOS, add to `config.json`:
 
 ```json
 {
@@ -427,7 +437,7 @@ Authentication errors get one retry, then rotation; `needs login` means run `log
 Use `--reviewer claude` on `start`, `say`, or `review` to review through a pool of isolated Claude
 Code CLI accounts; implementation and fixes remain in Codex. The human adds each subscription with
 `codex-worker claude-login first`, which runs isolated `claude setup-token`, prompts for the token
-through macOS Keychain, and appends to `claude.accounts` in `~/.codex/codex-worker.json`. Defaults are
+through macOS Keychain, and appends to `claude.accounts` in `~/.teamster/config.json`. Defaults are
 `~/.claude-accounts/first` and the `codex-worker-claude-first` Keychain service. Override them with
 `--config-dir DIR` and `--keychain SERVICE`. Tokens stay out of arguments, settings, state and logs.
 After saving, login runs `claude-probe first` to check the token and cache usage windows; a failed

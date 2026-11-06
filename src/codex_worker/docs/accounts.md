@@ -6,14 +6,14 @@
 
 ## One login (the default)
 
-Without `accounts` in `~/.codex/codex-worker.json`, tasks use the existing `main` login in `~/.codex`;
+Without `accounts` in the settings (`~/.teamster/config.json`, see [settings.md](settings.md#data-home)), tasks use the existing `main` login in `~/.codex`;
 automatic limit monitoring and rotation are disabled. A language-only settings file does not enable
 them.
 
 ## Adding a subscription
 
 For another subscription, have the user run `codex-worker login second`. Its separate `CODEX_HOME`
-is `~/.codex-accounts/second`, and login writes the new `~/.codex/codex-worker.json`. Never copy
+is `~/.codex-accounts/second`, and login writes the settings file (`~/.teamster/config.json`, see [settings.md](settings.md#data-home)). Never copy
 `auth.json` between homes: each subscription needs its own sign-in. When the user has chosen multiple
 subscriptions, the settings can contain:
 
@@ -35,7 +35,7 @@ subscriptions, the settings can contain:
 
 `claude.accounts` is a pool of isolated Claude Code CLI accounts without assigned roles.
 `start --executor claude` runs work, follow-ups, review fixes, CI repairs and wrap-up through this
-pool. `--executor codex` uses Codex; the default comes from `executor` in `codex-worker.json`,
+pool. `--executor codex` uses Codex; the default comes from `executor` in the settings,
 otherwise `codex`. The executor is saved and cannot change during a task. Without an explicit
 `--reviewer`, Claude tasks use Codex reviews and Codex tasks keep the configured reviewer default.
 With `--reviewer claude`, reviews prefer an available account other than the Claude worker account.
@@ -51,7 +51,7 @@ environment and an isolated `CLAUDE_CONFIG_DIR`, defaulting to `~/.claude-accoun
 completes sign-in, then pastes the issued token at the Keychain password prompt. The command invokes
 `security add-generic-password -U -s <service> -a "$USER" -w`; the service defaults to
 `codex-worker-claude-<name>`. On success it appends the account to `claude.accounts` in
-`~/.codex/codex-worker.json`. Names contain only lowercase letters, digits and hyphens and must be
+the settings (`~/.teamster/config.json`). Names contain only lowercase letters, digits and hyphens and must be
 unique. Re-running the command for an existing name refreshes its login instead of duplicating it;
 explicit path or service overrides update that entry after successful setup. Adding to legacy settings
 preserves their account as `default`, including when its paths come entirely from defaults.
@@ -181,7 +181,7 @@ claude second: weight 20; 5h 4% (reset ...); 7d 13% (reset ...); as of 2026-11-0
 ```
 
 The cache
-`~/.codex/claude-tasks/claude-limits.json` stores a dictionary by account name;
+`~/.teamster/tasks/claude-limits.json` stores a dictionary by account name;
 an older unnamed cache is read as `default`. Every Claude review record and journal row carries its
 account name; `report --json` includes it in each task's `reviews` list. Claude review costs and tokens remain separate from Codex.
 
@@ -190,8 +190,8 @@ account name; `report --json` includes it in each task's `reviews` list. Claude 
 `duty tick` elects one duty account, a future orchestrator, by `room` = `(threshold − weekly used %) × weight`: `claude.work_switch_at` and the seven-day window for Claude, `soft_switch_at`, the weekly window and the account's optional `weight` (default `1`) for Codex. An account is no candidate while it is limited, lacks a token or login, has no room, has a five-hour window at `switch_at`, or has unknown limits or limits still stale after the tick's refresh (the same one as `accounts --refresh`); the tick also marks a missing Claude token as probes do.
 Any candidate Claude account outranks Codex, and a returning Claude account takes over at once. Within a family the duty moves to the largest room only when it beats the current one by both `duty.relative_margin` percent and `duty.absolute_margin` units ([settings](settings.md)); an unavailable duty is replaced at once, equal rooms go by name, and with no candidate there is no duty.
 New tasks, rotations to another account and new reviews skip the duty account; tasks already running on it continue there (follow-ups, fixes, CI rounds), their rotation behaves as for a regular task, and the new account is never the duty account. The Codex exclusion applies only with rotation (`accounts` configured): a single Codex account has no replacement. It still takes new work when no other account of its family can take it and either no account of the other family can take work now (Codex: fresh snapshots below `switch_at`; Claude: cached limits by the rules above), or the duty is a Claude account and the task's `--task-type` is in `duty.claude_only_task_types`; otherwise the task waits, sleeps (not waking for the duty account's resets) or falls back to a Codex review, as with an exhausted pool. When Claude becomes available again while Codex is on duty, a new Codex task may sleep without applying the exception in its reset calculation until the next `duty tick`.
-`duty status [--json]` shows the duty, since when, its reason, the rooms and the check age, with a warning when the last check is over 90 minutes old; `duty clear` removes `~/.codex/duty.json` (no duty, exactly as without this feature; `~/.codex/duty-log.jsonl` keeps one line per change); `accounts` marks the duty account and `accounts --json` adds `duty`. A stale `duty.json` still applies; an unreadable one is ignored with one warning until the next tick rewrites it.
-Run `duty tick` every 30 minutes with launchd: `codex-worker duty plist [--minutes 30] > ~/Library/LaunchAgents/codex-worker.duty.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.duty.plist`; the job uses the installed `codex-worker` command when available, so its path survives `uv tool upgrade codex-worker`. It logs to `~/.codex/duty-launchd.log`; a tick that finds another one running changes nothing. The tool never calls `launchctl` or writes to `~/Library` itself.
+`duty status [--json]` shows the duty, since when, its reason, the rooms and the check age, with a warning when the last check is over 90 minutes old; `duty clear` removes `~/.teamster/duty.json` (no duty, exactly as without this feature; `~/.teamster/duty-log.jsonl` keeps one line per change); `accounts` marks the duty account and `accounts --json` adds `duty`. A stale `duty.json` still applies; an unreadable one is ignored with one warning until the next tick rewrites it.
+Run `duty tick` every 30 minutes with launchd: `codex-worker duty plist [--minutes 30] > ~/Library/LaunchAgents/codex-worker.duty.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.duty.plist`; the job uses the installed `codex-worker` command when available, so its path survives `uv tool upgrade codex-worker`. It logs to `duty-launchd.log` in the data home and sets `TEAMSTER_HOME` (`CODEX_TASK_HOME` for a legacy home); a tick that finds another one running changes nothing. The tool never calls `launchctl` or writes to `~/Library` itself.
 
 ## Rotation
 

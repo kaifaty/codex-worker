@@ -43,7 +43,7 @@ of reading code yourself.
 
 A task costs what its turns last, not its reasoning level: a sprawling multi-hour thread with
 self-invented protocols can consume a weekly quota. The brief keeps the turn short and the goal clear.
-Write it in the language set by `language` in `~/.codex/codex-worker.json` (`"en"` by default, `"ru"`
+Write it in the language set by `language` in the settings (`~/.teamster/config.json`) (`"en"` by default, `"ru"`
 for Russian), translating this structure as needed:
 
 ```
@@ -90,7 +90,7 @@ ChatGPT.app bundle if present, then `codex` on `PATH`. Model and reasoning defau
 Codex configuration; `--effort` overrides reasoning effort for a task.
 Use `start --model M` for work and `--review-model M` on `start`, `say`, or `review` for Codex reviews; `say` inherits or replaces them, and `default` clears an override. Read `accounts --json` before choosing ([models and JSON fields](settings.md#task-models)).
 Use `start --task-type LABEL` to label telemetry; `say` and `review` inherit it, and `say --task-type LABEL` replaces it ([labels and grouped reports](telemetry.md)).
-Use `start --executor codex|claude` to choose the task worker; the default is `executor` in `codex-worker.json`, otherwise `codex`. The choice is saved for `say`, review fixes, CI repairs and wrap-up and cannot change during a task. Claude work requires `--sandbox off`; its model and effort default to `claude.model` and `claude.effort`, with task `--model` and `--effort` taking precedence.
+Use `start --executor codex|claude` to choose the task worker; the default is `executor` in the settings, otherwise `codex`. The choice is saved for `say`, review fixes, CI repairs and wrap-up and cannot change during a task. Claude work requires `--sandbox off`; its model and effort default to `claude.model` and `claude.effort`, with task `--model` and `--effort` taking precedence.
 Without `--reviewer`, Claude tasks use Codex reviews; Codex tasks keep the configured reviewer default. Use `--reviewer claude` on `start`, `say`, or `review` for reviews from the isolated Claude account pool, preferring another account when Claude also implements ([setup](accounts.md#claude-account-pool)).
 
 | Step | Command |
@@ -114,10 +114,10 @@ Without `--reviewer`, Claude tasks use Codex reviews; Codex tasks keep the confi
 | Duty account | `codex-worker duty tick` — refresh stale limits and elect the duty account that new work skips; `codex-worker duty status [--json]` — duty, reason, rooms and check age, warning after 90 minutes; `codex-worker duty clear` — no duty; `codex-worker duty plist [--minutes 30]` — print a launchd job for `codex-worker duty tick` ([accounts.md](accounts.md#duty-account)) |
 | Remove a Claude account | `codex-worker claude-remove <name>` — remove its pool entry and cached limits, leaving its directory and Keychain entry for manual deletion; the last account cannot be removed |
 | Interrupt | `codex-worker stop <slug>` (there is no mid-turn steer for exec; stop, then `codex-worker say`) |
-| Finish | `codex-worker clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock`; it reminds you when the task has no `codex-worker verdict` |
+| Finish | `codex-worker clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.teamster/tasks/.archive/` except `events.jsonl` and `state.lock`; it reminds you when the task has no `codex-worker verdict` |
 
-The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug>` (or `--branch NAME`); state and logs are in
-`~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only
+The worktree is `~/.teamster/worktrees/claude-<slug>/<repo>` on branch `codex/<slug>` (or `--branch NAME`); state and logs are in
+`~/.teamster/tasks/<slug>/` (a legacy home uses `~/.codex/worktrees` and `~/.codex/claude-tasks`; `codex-worker migrate-home` moves it, see `codex-worker docs settings`). Only one task runs at a time unless you pass `--parallel`; use that only
 when the tasks' builds and tests cannot interfere. A task's turn survives the end of your session; in a
 new session `status` and `wait` pick it up again.
 
@@ -208,4 +208,4 @@ reports. Verify key facts by reading only the cited `file:line` locations; use `
   the brief and follow the repository's rules.
 - Do not add accounts or enable rotation unless the user tells you to
   ([accounts.md](accounts.md)).
-- `clean` removes the task worktree and saves its record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock`; run it only after reviewing and merging the result.
+- `clean` removes the task worktree and saves its record in `~/.teamster/tasks/.archive/` except `events.jsonl` and `state.lock`; run it only after reviewing and merging the result.

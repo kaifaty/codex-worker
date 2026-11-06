@@ -1,6 +1,6 @@
 # Optional workspace sandbox
 
-The `sandbox` setting in `~/.codex/codex-worker.json` accepts `"off"` (default) or `"workspace"`.
+The `sandbox` setting in the settings file (`~/.teamster/config.json`) accepts `"off"` (default) or `"workspace"`.
 `start --sandbox off|workspace` overrides it for one task; `say` inherits the saved mode, and `status`
 shows it. For example:
 
@@ -18,7 +18,7 @@ through `codex sandbox` with the same permissions; scouts remain read-only.
 ## Limits
 
 The sandbox blocks writes outside the worktree, protecting task state and saved checks, other
-repositories, `~/.ssh`, and `~/.codex`. Temporary directories stay writable, and `writable_dirs`
+repositories, `~/.ssh`, the data home `~/.teamster`, and `~/.codex`. Temporary directories stay writable, and `writable_dirs`
 explicitly grants write access to its entries. Builds with caches outside the worktree fail until the
 cache directories are added. The sandbox does **not** restrict disk reads, including tokens, or network
 access.

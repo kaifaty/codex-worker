@@ -21,10 +21,11 @@
   codex-worker --version                              print the installed version
   codex-worker docs [<name>]                         list documents or print one
   codex-worker path                                  print the package directory
+  codex-worker migrate-home [--apply]                print or apply the move of legacy data out of ~/.codex
   codex-worker duty tick | status [--json] | clear | plist [--minutes N]  elect, show, clear or schedule the duty account
 
 All commands accept -h/--help.
-~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
+~/.teamster/config.json optionally configures language (en), accounts, switch_at (99),
 soft_switch_at (same as switch_at),
 credits (false), credits_floor (0), credits_floor_until (none),
 wait_for_reset (true), max_turn_minutes (no cap), max_task_weekly_percent (no cap), max_review_minutes (30),
@@ -32,10 +33,11 @@ executor (codex), reviewer (codex), claude (isolated account pool settings), rev
 start --ci (or ci: true) enables PR CI for the task; say inherits it and --ci-rounds (initially 1).
 start/say --ci-command CMD enables CI via sh -c; say inherits it, and --no-ci-command removes it.
 say --ci/--no-ci enables/disables CI; --ci-rounds N replaces the saved round limit. ci_timeout_minutes defaults to 30.
-Legacy claude-accounts.json is a fallback.
 Without an accounts setting, tasks use main (~/.codex) without rotation; weekly budgets still monitor rollout usage.
-State/logs: ~/.codex/claude-tasks/<slug>/; worktree: ~/.codex/worktrees/claude-<slug>/<repo>.
-CODEX_TASK_HOME and CODEX_TASK_CODEX override the main home and CLI binary (also for tests).
+State/logs: ~/.teamster/tasks/<slug>/; worktree: ~/.teamster/worktrees/claude-<slug>/<repo>.
+TEAMSTER_HOME selects the data home; CODEX_TASK_HOME and CODEX_TASK_CODEX override the Codex home and CLI binary.
+A legacy data home in ~/.codex keeps codex-worker.json (fallback claude-accounts.json), claude-tasks/ and
+codex-worker-log.jsonl; migrate-home [--apply] prints or applies the move (docs settings).
 The internal _run <slug> supervisor survives the caller and opens a new thread on rotation.
 """
 import argparse
@@ -43,7 +45,7 @@ import math
 import re
 import sys
 
-from . import commands, config, executors, prompts, supervisor, telemetry_log, wait_view
+from . import commands, config, executors, home_migration, prompts, supervisor, telemetry_log, wait_view
 
 
 HELP_TEXT = __doc__
@@ -284,8 +286,13 @@ COMMAND_HANDLERS = {
     "duty": commands.cmd_duty,
     "docs": commands.cmd_docs,
     "path": commands.cmd_path,
+    "migrate-home": home_migration.cmd_migrate_home,
     "_run": supervisor.cmd__run,
 }
+# Commands that write task records, journals or cached limits hold the settings
+# lock shared, so migrate-home cannot move the data home under them.
+HOME_LOCKED_COMMANDS = ("start", "scout", "say", "review", "clean", "verdict", "accounts", "reset-credit",
+                        "claude-probe")
 
 
 def main():
@@ -355,6 +362,8 @@ def main():
     s.add_argument("new")
     s = sub.add_parser("claude-remove", help="remove a Claude account without deleting credentials")
     s.add_argument("name")
+    s = sub.add_parser("migrate-home", help="print or apply the move of legacy data out of the Codex home")
+    s.add_argument("--apply", action="store_true", help="move the data (default: print the plan only)")
     s = sub.add_parser("duty", help="elect, show, clear or schedule the duty account")
     duty_commands = s.add_subparsers(dest="duty_command", required=True)
     duty_commands.add_parser("tick", help="refresh stale limits and re-elect the duty account")
@@ -379,4 +388,8 @@ def main():
         p.error("--fix-rounds requires --review")
     if a.cmd in ("start", "scout", "say", "review", "_run", "accounts", "reset-credit", "login", "clean"):
         config.CODEX["path"] = config.resolve_codex()
-    COMMAND_HANDLERS[a.cmd](a)
+    if a.cmd in HOME_LOCKED_COMMANDS:
+        with config.home_lock():
+            COMMAND_HANDLERS[a.cmd](a)
+    else:
+        COMMAND_HANDLERS[a.cmd](a)

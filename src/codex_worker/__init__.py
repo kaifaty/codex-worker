@@ -24,6 +24,7 @@ Layer 5:
     claude_review (implemented): isolated Claude Code review execution and limits.
     telemetry_log (implemented): journal rows and phase telemetry.
     publishing (implemented): completed turns and work or pull request publishing.
+    home_migration (implemented): migrate-home moves from the Codex home into the data home.
 Layer 6:
     checking (implemented): guarded paths and check or base-check execution.
     account_rotation (implemented): account errors, waits, and login refresh.
@@ -58,4 +59,4 @@ never import an entrypoint. Do not rebind module aliases or use dynamic
 namespaces. Only config.py and __main__.py may use __file__; usage text stays in cli.py.
 """
 
-__version__ = "1.51.0"
+__version__ = "1.52.0"

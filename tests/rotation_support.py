@@ -74,7 +74,8 @@ def emit(value):
     print(json.dumps(value, ensure_ascii=False), flush=True)
 
 def journal_records():
-    journal = Path(os.environ["CODEX_TASK_HOME"]) / "codex-worker-resets.jsonl"
+    # Data home tests run without CODEX_TASK_HOME and never consume resets.
+    journal = Path(os.environ.get("CODEX_TASK_HOME", str(home))) / "codex-worker-resets.jsonl"
     entries = []
     for line in journal.read_text().splitlines() if journal.exists() else []:
         try:
@@ -657,6 +658,8 @@ class RotationTestCase(unittest.TestCase):
                         CODEX_TASK_ROLLOUT_SEARCH_SECONDS="0.05",
                         GIT_AUTHOR_NAME="Rotation Test", GIT_AUTHOR_EMAIL="rotation@example.test",
                         GIT_COMMITTER_NAME="Rotation Test", GIT_COMMITTER_EMAIL="rotation@example.test")
+        # An inherited data home would take precedence over the temporary one.
+        self.env.pop("TEAMSTER_HOME", None)
         # The external process gets no opportunity to ask for a credential or pager.
         self.env.update(GIT_TERMINAL_PROMPT="0", GIT_PAGER="cat")
         # Later test-specific Git settings must not affect fixture creation.
