@@ -4,7 +4,7 @@ import type { BoardSource } from "../lib/source";
 import type { TaskDetail, TaskFile, TaskSummary } from "../types";
 import { formatAge, formatClock, formatDuration, formatFullTime } from "../lib/format";
 import { renderMarkdown } from "../lib/markdown";
-import { COLUMNS, EXECUTORS, FILES, KINDS, PHASES, RESULT, CI, prLabel } from "../lib/labels";
+import { COLUMNS, EXECUTORS, FILES, KINDS, PHASES, RESULT, ciChip, prLabel } from "../lib/labels";
 
 const props = defineProps<{
   slug: string;
@@ -43,9 +43,15 @@ async function loadDetail() {
 }
 
 let fileRequest = 0;
+/** The tab whose text `fileText` holds, so that another tab never shows it while its own text loads. */
+let fileTab: TaskFile | null = null;
 async function loadFile() {
   const name = tab.value;
   const request = ++fileRequest;
+  if (name !== fileTab) {
+    fileTab = name;
+    fileText.value = null;
+  }
   if (!name) {
     fileText.value = null;
     fileState.value = "idle";
@@ -178,7 +184,7 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
         </template>
         <template v-if="shown.ci">
           <dt>CI</dt>
-          <dd>{{ CI[shown.ci]?.label ?? shown.ci }}</dd>
+          <dd>{{ ciChip(shown)?.label }}</dd>
         </template>
         <template v-if="shown.sleeping_until !== null">
           <dt>Проснётся</dt>

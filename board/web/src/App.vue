@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch } from "vue";
 import type { Column, TaskSummary } from "./types";
 import type { Board } from "./store/board";
 import { useNow } from "./store/board";
@@ -34,6 +34,25 @@ const isPrefs = (value: unknown): value is Prefs => {
 };
 const prefs = ref<Prefs>(loadJson(PREFS_KEY, defaults, isPrefs));
 watch(prefs, (value) => saveJson(PREFS_KEY, value), { deep: true });
+
+type View = "board" | "map";
+const VIEW_KEY = "codex-board.view.v1";
+const view = ref<View>(loadJson(VIEW_KEY, "board", (v): v is View => v === "board" || v === "map"));
+watch(view, (value) => saveJson(VIEW_KEY, value));
+// The map and three.js load on first use, in their own chunk, and then stay mounted; the map stops
+// drawing while the board is shown.
+const MapView = shallowRef<(typeof import("./map/MapView.vue"))["default"] | null>(null);
+const mapError = ref(false);
+async function loadMap() {
+  if (MapView.value) return;
+  mapError.value = false;
+  try {
+    MapView.value = (await import("./map/MapView.vue")).default;
+  } catch {
+    mapError.value = true;
+  }
+}
+watch(view, (value) => value === "map" && void loadMap(), { immediate: true });
 
 const repos = computed(() => {
   const names = new Set(board.tasks.value.map((t) => t.repo));
@@ -106,9 +125,13 @@ onBeforeUnmount(() => board.stop());
 </script>
 
 <template>
-  <div class="app" :class="{ 'closed-open': !prefs.closedCollapsed }">
+  <div class="app" :class="{ 'closed-open': !prefs.closedCollapsed, 'map-view': view === 'map' }">
     <header class="topbar">
       <h1 class="title">Доска задач <span class="muted">codex-worker</span></h1>
+      <div class="seg views" role="group" aria-label="Вид">
+        <button type="button" class="btn" :aria-pressed="view === 'board'" @click="view = 'board'">Доска</button>
+        <button type="button" class="btn" :aria-pressed="view === 'map'" @click="view = 'map'">Карта</button>
+      </div>
       <span class="conn" :class="board.connection.value" role="status" :title="retryText">
         <span class="dot" aria-hidden="true"></span>{{ connectionText }}
         <span v-if="retryText" class="faint">{{ retryText }}</span>
@@ -116,7 +139,7 @@ onBeforeUnmount(() => board.stop());
       <span v-if="board.source.label" class="chip warn">{{ board.source.label }}</span>
       <span v-if="board.state.value.loaded" class="faint num">{{ live }} в работе и ожидании</span>
 
-      <div class="filters" role="group" aria-label="Фильтры">
+      <div v-show="view === 'board'" class="filters" role="group" aria-label="Фильтры">
         <label class="repo">
           <span class="visually-hidden">Репозиторий</span>
           <select v-model="prefs.repo" class="btn" aria-label="Репозиторий">
@@ -145,13 +168,14 @@ onBeforeUnmount(() => board.stop());
     </header>
 
     <AccountsPanel
+      v-show="view === 'board'"
       :accounts="board.state.value.accounts"
       :now="now"
       :collapsed="prefs.accountsCollapsed"
       @toggle="prefs.accountsCollapsed = !prefs.accountsCollapsed"
     />
 
-    <main class="board" :aria-busy="!board.state.value.loaded">
+    <main v-show="view === 'board'" class="board" :aria-busy="!board.state.value.loaded">
       <p v-if="!board.state.value.loaded" class="loading">Жду первый снимок доски…</p>
       <template v-else>
         <BoardColumn
@@ -171,7 +195,23 @@ onBeforeUnmount(() => board.stop());
       </template>
     </main>
 
-    <TaskPanel v-if="selected" :slug="selected" :task="selectedTask" :source="board.source" :now="now" @close="close" />
+    <TaskPanel
+      v-if="selected && view === 'board'"
+      :slug="selected"
+      :task="selectedTask"
+      :source="board.source"
+      :now="now"
+      @close="close"
+    />
+
+    <template v-if="view === 'map' || MapView">
+      <component :is="MapView" v-if="MapView" v-show="view === 'map'" :board="board" :active="view === 'map'" @board="view = 'board'" />
+      <p v-else-if="mapError" class="map-note">
+        Не удалось загрузить карту. <a href="#" @click.prevent="loadMap">Повторить</a> ·
+        <a href="#" @click.prevent="view = 'board'">Открыть доску</a>
+      </p>
+      <p v-else class="map-note">Загружаю карту…</p>
+    </template>
   </div>
 </template>
 
@@ -202,6 +242,15 @@ onBeforeUnmount(() => board.stop());
 
 .title .muted {
   font-weight: 500;
+}
+
+.views .btn {
+  padding: 1px 10px;
+}
+
+.map-note {
+  margin: 24px auto;
+  color: var(--muted);
 }
 
 .conn {
@@ -317,6 +366,13 @@ onBeforeUnmount(() => board.stop());
   .app {
     height: auto;
     min-height: 100vh;
+  }
+
+  /* The map fills the screen instead. */
+  .app.map-view {
+    height: 100vh;
+    height: 100dvh;
+    min-height: 0;
   }
 
   .topbar {
