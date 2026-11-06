@@ -135,6 +135,8 @@ function build(index: number, stageIndex: number, changedAt: number, start: numb
   return {
     slug: agent.slug,
     kind: agent.kind,
+    title: null,
+    link: null,
     repo: SCENARIO_REPO,
     branch: agent.kind === "work" ? `codex/${agent.slug}` : null,
     task_type: agent.task_type,

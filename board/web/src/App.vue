@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import type { Column, TaskSummary } from "./types";
 import type { Board } from "./store/board";
 import { useNow } from "./store/board";
-import { COLUMNS } from "./lib/labels";
+import { COLUMNS, KIND_FILTERS, isKindFilter, matchesKind, type KindFilter } from "./lib/labels";
 import { loadJson, saveJson } from "./lib/storage";
 import AccountsPanel from "./components/AccountsPanel.vue";
 import BoardColumn from "./components/BoardColumn.vue";
@@ -35,6 +35,11 @@ const isPrefs = (value: unknown): value is Prefs => {
 const prefs = ref<Prefs>(loadJson(PREFS_KEY, defaults, isPrefs));
 watch(prefs, (value) => saveJson(PREFS_KEY, value), { deep: true });
 
+// Tasks, desktop sessions or both; kept apart from Prefs so that saved prefs stay valid.
+const KIND_KEY = "codex-board.kind.v1";
+const kindFilter = ref<KindFilter>(loadJson(KIND_KEY, "all", isKindFilter));
+watch(kindFilter, (value) => saveJson(KIND_KEY, value));
+
 type View = "board" | "map";
 const VIEW_KEY = "codex-board.view.v1";
 const view = ref<View>(loadJson(VIEW_KEY, "board", (v): v is View => v === "board" || v === "map"));
@@ -64,6 +69,7 @@ const visible = computed(() =>
   board.tasks.value.filter(
     (t) =>
       (!prefs.value.repo || t.repo === prefs.value.repo) &&
+      matchesKind(t, kindFilter.value) &&
       (prefs.value.executor === "all" || t.executor === prefs.value.executor),
   ),
 );
@@ -140,6 +146,18 @@ onBeforeUnmount(() => board.stop());
       <span v-if="board.state.value.loaded" class="faint num">{{ live }} в работе и ожидании</span>
 
       <div v-show="view === 'board'" class="filters" role="group" aria-label="Фильтры">
+        <div class="seg kinds" role="group" aria-label="Задачи и сессии">
+          <button
+            v-for="option in KIND_FILTERS"
+            :key="option.id"
+            type="button"
+            class="btn"
+            :aria-pressed="kindFilter === option.id"
+            @click="kindFilter = option.id"
+          >
+            {{ option.label }}
+          </button>
+        </div>
         <label class="repo">
           <span class="visually-hidden">Репозиторий</span>
           <select v-model="prefs.repo" class="btn" aria-label="Репозиторий">

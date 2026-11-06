@@ -4,7 +4,7 @@ import type { BoardSource } from "../lib/source";
 import type { TaskDetail, TaskFile, TaskSummary } from "../types";
 import { formatAge, formatClock, formatDuration, formatFullTime } from "../lib/format";
 import { renderMarkdown } from "../lib/markdown";
-import { COLUMNS, EXECUTORS, FILES, KINDS, PHASES, RESULT, ciChip, prLabel } from "../lib/labels";
+import { COLUMNS, EXECUTORS, FILES, KINDS, PHASES, RESULT, ciChip, claudeLink, prLabel, taskTitle } from "../lib/labels";
 
 const props = defineProps<{
   slug: string;
@@ -25,7 +25,13 @@ const closeButton = ref<HTMLButtonElement | null>(null);
 const cache = new Map<string, string | null>();
 
 const shown = computed<TaskSummary | null>(() => props.task ?? detail.value);
-const files = computed(() => (["brief", "last", "review", "check"] as const).filter((name) => detail.value?.files.includes(name)));
+const session = computed(() => shown.value?.kind === "session");
+const heading = computed(() => (shown.value ? taskTitle(shown.value) : props.slug));
+const link = computed(() => (shown.value ? claudeLink(shown.value) : null));
+// A session has no files: no tabs and no requests.
+const files = computed(() =>
+  session.value ? [] : (["brief", "last", "review", "check"] as const).filter((name) => detail.value?.files.includes(name)),
+);
 
 let detailRequest = 0;
 async function loadDetail() {
@@ -132,14 +138,17 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
 <template>
   <aside class="panel" role="dialog" aria-modal="false" aria-labelledby="panel-title">
     <header class="p-head">
-      <h2 id="panel-title" class="ellipsis" :title="slug">{{ slug }}</h2>
+      <h2 id="panel-title" class="ellipsis" :title="session ? heading : slug">{{ heading }}</h2>
       <button ref="closeButton" type="button" class="btn close" title="Закрыть (Esc)" @click="emit('close')">
         <span aria-hidden="true">✕</span><span class="visually-hidden">Закрыть</span>
       </button>
     </header>
 
     <div class="p-body">
-      <p v-if="!task" class="note">Задачи больше нет на доске; показаны последние данные.</p>
+      <p v-if="!task" class="note">{{ session ? "Сессии" : "Задачи" }} больше нет на доске; показаны последние данные.</p>
+      <p v-if="link" class="actions">
+        <a class="btn app-link" :href="link">Открыть в Claude</a>
+      </p>
       <p v-if="detailError" class="note bad">Не удалось загрузить задачу: {{ detailError }}</p>
       <p v-else-if="notFound && !shown" class="note">Задача не найдена.</p>
 
@@ -151,8 +160,10 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
           <span class="exec" :class="shown.executor"><span class="glyph" aria-hidden="true">{{ shown.executor === "codex" ? "◆" : "✳" }}</span>{{ EXECUTORS[shown.executor] }}</span>
           <span v-if="shown.reviewer" class="muted"> · ревьюер {{ EXECUTORS[shown.reviewer] }}</span>
         </dd>
-        <dt>Аккаунт</dt>
-        <dd class="mono ellipsis" :title="shown.account ?? ''">{{ shown.account ?? "—" }}</dd>
+        <template v-if="!session">
+          <dt>Аккаунт</dt>
+          <dd class="mono ellipsis" :title="shown.account ?? ''">{{ shown.account ?? "—" }}</dd>
+        </template>
         <dt>Модель</dt>
         <dd class="mono ellipsis">{{ [shown.model, shown.effort].filter(Boolean).join(" · ") || "—" }}</dd>
         <dt>Репозиторий</dt>
@@ -168,8 +179,14 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
         </dd>
         <dt>Ходы</dt>
         <dd class="num">{{ shown.turn }}<template v-if="shown.fix_round > 0"> · раунд исправления {{ shown.fix_round }}</template></dd>
-        <dt>Надзиратель</dt>
-        <dd>{{ shown.alive ? "работает" : "не запущен" }}<span v-if="shown.outcome" class="muted mono"> · {{ shown.outcome }}</span></dd>
+        <template v-if="session">
+          <dt>Сессия</dt>
+          <dd>{{ shown.alive ? "идёт ход" : "ход окончен" }}</dd>
+        </template>
+        <template v-else>
+          <dt>Надзиратель</dt>
+          <dd>{{ shown.alive ? "работает" : "не запущен" }}<span v-if="shown.outcome" class="muted mono"> · {{ shown.outcome }}</span></dd>
+        </template>
         <template v-if="shown.result_status">
           <dt>Итог</dt>
           <dd>{{ RESULT[shown.result_status] ?? shown.result_status }}</dd>
@@ -238,7 +255,7 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
           <div v-else-if="fileText !== null" class="md" v-html="html"></div>
         </div>
       </section>
-      <p v-else-if="detail" class="note">Файлов задачи нет.</p>
+      <p v-else-if="detail && !session" class="note">Файлов задачи нет.</p>
     </div>
   </aside>
 </template>
@@ -271,6 +288,15 @@ const columnTitle = (id: string) => COLUMNS.find((c) => c.id === id)?.title ?? i
   margin: 0;
   font-size: 15px;
   font-weight: 650;
+}
+
+.actions {
+  margin: 0 0 10px;
+}
+
+.app-link {
+  display: inline-block;
+  text-decoration: none;
 }
 
 .close {

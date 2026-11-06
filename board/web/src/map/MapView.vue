@@ -3,7 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, onUpdated, ref, shallow
 import type { TaskSummary } from "../types";
 import { createBoard, useNow, type Board } from "../store/board";
 import { formatAge, formatDuration, formatUntil } from "../lib/format";
-import { ACTIVITY, EXECUTORS, PHASES, prLabel, problemLabel } from "../lib/labels";
+import { ACTIVITY, EXECUTORS, PHASES, prLabel, problemLabel, taskTitle } from "../lib/labels";
 import TaskPanel from "../components/TaskPanel.vue";
 import { defaultRepo, islandTasks, placement, type Placement } from "./placement";
 import { NoWebGLError, createIslandScene, type IslandScene, type SceneEntry, type ZoomLevel } from "./scene";
@@ -70,7 +70,7 @@ function phaseText(task: TaskSummary): string {
     case "sleeping":
       return PHASES.sleeping;
     case "review_me":
-      return "ждёт ревью";
+      return "ждёт тебя";
     case "attention":
       return problemLabel(task) ?? "нужно внимание";
     default: {
@@ -114,6 +114,7 @@ const labels = computed(() =>
     const who = `${EXECUTORS[task.executor]}${task.account ? ` · ${task.account}` : ""}`;
     return {
       task,
+      name: taskTitle(task),
       where,
       // At its bench the agent shares the bench label; elsewhere it has its own.
       home: where.place === "bench",
@@ -121,7 +122,7 @@ const labels = computed(() =>
       phaseClass: phaseClass(task),
       line,
       who,
-      title: [task.slug, phase, who, `${line.text}${line.age ? ` · ${line.age}` : ""}`].join("\n"),
+      title: [taskTitle(task), phase, who, `${line.text}${line.age ? ` · ${line.age}` : ""}`].join("\n"),
       wake: task.sleeping_until !== null ? formatUntil(task.sleeping_until, now.value) : "до сброса",
     };
   }),
@@ -135,7 +136,7 @@ const CAPTIONS = [
   { id: "dock", text: "причал" },
 ] as const;
 
-const hiddenTitle = computed(() => island.value.hidden.map((task) => task.slug).join("\n"));
+const hiddenTitle = computed(() => island.value.hidden.map(taskTitle).join("\n"));
 
 // Panel -------------------------------------------------------------------------------------------
 
@@ -262,7 +263,7 @@ onBeforeUnmount(() => {
             :title="label.title"
             @click="open(label.task.slug)"
           >
-            <span class="b-slug"><span v-if="label.where.beacon" class="alarm" aria-label="нужно внимание">!</span>{{ label.task.slug }}</span>
+            <span class="b-slug"><span v-if="label.where.beacon" class="alarm" aria-label="нужно внимание">!</span>{{ label.name }}</span>
             <span class="b-phase"><span class="dot" aria-hidden="true"></span>{{ label.phase }}</span>
             <template v-if="label.home">
               <span class="b-who"><span class="glyph" aria-hidden="true">{{ glyph(label.task) }}</span>{{ label.who }}</span>
@@ -279,7 +280,7 @@ onBeforeUnmount(() => {
             class="lbl tent"
             :data-anchor="`tent:${label.task.slug}`"
             data-priority="3"
-            :title="`${label.task.slug}: спит, проснётся ${label.wake}`"
+            :title="`${label.name}: спит, проснётся ${label.wake}`"
             @click="open(label.task.slug)"
           >
             ⏾ {{ label.wake }}

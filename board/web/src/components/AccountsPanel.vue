@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import type { Accounts } from "../types";
-import { parseAccounts } from "../lib/accounts";
+import { parseAccounts, type DutyInfo } from "../lib/accounts";
 import { formatAge, formatClock, formatFullTime, formatUntil } from "../lib/format";
 
 const props = defineProps<{ accounts: Accounts | null; now: number; collapsed: boolean }>();
@@ -10,6 +10,9 @@ const emit = defineEmits<{ toggle: [] }>();
 const parsed = computed(() => parseAccounts(props.accounts?.data ?? null, props.now));
 const count = computed(() => parsed.value.items?.length ?? 0);
 const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "warn" : "ok");
+const dutyTitle = (duty: DutyInfo) =>
+  [duty.reason, duty.since !== null ? `с ${formatClock(duty.since, props.now)}` : null].filter(Boolean).join("\n") ||
+  "дежурный аккаунт";
 </script>
 
 <template>
@@ -49,6 +52,7 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
               <span :class="level(item.row.weeklyPercent)" :style="{ width: `${Math.min(100, Math.max(0, item.row.weeklyPercent))}%` }"></span>
             </div>
             <div class="line sub">
+              <span v-if="item.row.duty" class="duty" :title="dutyTitle(item.row.duty)">дежурный</span>
               <span v-if="item.row.status" class="status" :class="{ bad: item.row.bad }">
                 {{ item.row.status }}<template v-if="item.row.limitedUntil !== null"> · {{ formatUntil(item.row.limitedUntil, now) }}</template>
               </span>
@@ -191,6 +195,18 @@ const level = (percent: number) => (percent >= 90 ? "bad" : percent >= 70 ? "war
 .name {
   flex: 1;
   font-weight: 600;
+}
+
+.duty {
+  flex: none;
+  padding: 0 5px;
+  margin-right: auto;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 15px;
+  cursor: help;
 }
 
 .pct {

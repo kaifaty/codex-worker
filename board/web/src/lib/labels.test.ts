@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { TaskSummary } from "../types";
-import { FLASH_MS, ciChip, isFlashing, problemLabel } from "./labels";
+import { FLASH_MS, ciChip, claudeLink, isFlashing, matchesKind, problemLabel, taskTitle } from "./labels";
 
 const task = (extra: Partial<TaskSummary>): TaskSummary => ({
-  slug: "t", kind: "work", repo: "r", branch: null, task_type: null, executor: "codex", account: null,
+  slug: "t", kind: "work", title: null, link: null, repo: "r", branch: null, task_type: null, executor: "codex", account: null,
   reviewer: null, model: null, effort: null, column: "closed", phase: "idle", phase_started_at: null,
   alive: false, turn: 1, fix_round: 0, outcome: null, result_status: null, summary: null, pr: null,
   ci: null, sleeping_until: null, created: null, updated_at: 0, activity: null, ...extra,
@@ -45,5 +45,34 @@ describe("isFlashing", () => {
     expect(isFlashing(10_000, 10_000)).toBe(true);
     expect(isFlashing(10_000, 10_000 + FLASH_MS - 1)).toBe(true);
     expect(isFlashing(10_000, 10_000 + FLASH_MS)).toBe(false);
+  });
+});
+
+describe("desktop sessions", () => {
+  const sid = "local_3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c";
+  const session = (extra: Partial<TaskSummary> = {}) =>
+    task({ slug: sid, kind: "session", executor: "claude", link: `claude://claude.ai/epitaxy/${sid}`, ...extra });
+
+  it("heads a session card with its title, else the start of its uuid", () => {
+    expect(taskTitle(session({ title: "Fix the cart" }))).toBe("Fix the cart");
+    expect(taskTitle(session({ title: null }))).toBe("3f2a9c1e");
+    expect(taskTitle(session({ title: "  " }))).toBe("3f2a9c1e");
+    expect(taskTitle(task({ slug: "board-web", title: "ignored" }))).toBe("board-web");
+  });
+
+  it("links only to the Claude app", () => {
+    expect(claudeLink(session())).toBe(`claude://claude.ai/epitaxy/${sid}`);
+    expect(claudeLink(session({ link: "https://claude.ai/epitaxy/x" }))).toBeNull();
+    expect(claudeLink(session({ link: "javascript:alert(1)" }))).toBeNull();
+    expect(claudeLink(session({ link: null }))).toBeNull();
+    expect(claudeLink(task({ link: "claude://claude.ai/epitaxy/x" }))).toBeNull();
+  });
+
+  it("filters tasks and sessions", () => {
+    const list = [task({ slug: "a" }), task({ slug: "b", kind: "scout" }), session()];
+    const slugs = (filter: Parameters<typeof matchesKind>[1]) => list.filter((t) => matchesKind(t, filter)).map((t) => t.slug);
+    expect(slugs("all")).toEqual(["a", "b", sid]);
+    expect(slugs("tasks")).toEqual(["a", "b"]);
+    expect(slugs("sessions")).toEqual([sid]);
   });
 });

@@ -30,7 +30,9 @@
       "executor": "claude",
       "account": "claude-pool-2",
       "column": "running",
-      "phase": "turn"
+      "phase": "turn",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -61,7 +63,9 @@
       "executor": "codex",
       "account": "work-team-account-number-three@example.com",
       "column": "running",
-      "phase": "check"
+      "phase": "check",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -92,7 +96,9 @@
       "executor": "claude",
       "account": "claude-pool-1",
       "column": "running",
-      "phase": "ci"
+      "phase": "ci",
+      "title": null,
+      "link": null
     },
     {
       "kind": "review",
@@ -123,7 +129,9 @@
       "executor": "codex",
       "account": "personal",
       "column": "running",
-      "phase": "review"
+      "phase": "review",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -154,7 +162,9 @@
       "executor": "claude",
       "account": "claude-pool-3",
       "column": "running",
-      "phase": "fix"
+      "phase": "fix",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -181,7 +191,42 @@
       "executor": "codex",
       "account": "personal",
       "column": "running",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
+    },
+    {
+      "slug": "local_3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c",
+      "kind": "session",
+      "title": "Разобрать, почему корзина теряет товары после входа",
+      "link": "claude://claude.ai/epitaxy/local_3f2a9c1e-7b4d-4e8a-9c21-5d6e7f8a9b0c",
+      "repo": "demo-shop",
+      "branch": null,
+      "task_type": null,
+      "executor": "claude",
+      "account": null,
+      "reviewer": null,
+      "model": "claude-opus-5-5",
+      "effort": "high",
+      "column": "running",
+      "phase": "turn",
+      "phase_started_at": 1793999905,
+      "alive": true,
+      "turn": 4,
+      "fix_round": 0,
+      "outcome": null,
+      "result_status": null,
+      "summary": null,
+      "pr": null,
+      "ci": null,
+      "sleeping_until": null,
+      "created": 1793994600,
+      "updated_at": 1793999980,
+      "activity": {
+        "at": 1793999994,
+        "kind": "tool",
+        "text": "Read src/cart/merge.ts"
+      }
     },
     {
       "kind": "work",
@@ -208,7 +253,9 @@
       "executor": "codex",
       "account": "work",
       "column": "sleeping",
-      "phase": "sleeping"
+      "phase": "sleeping",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -235,7 +282,9 @@
       "executor": "claude",
       "account": "claude-pool-1",
       "column": "sleeping",
-      "phase": "sleeping"
+      "phase": "sleeping",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -262,7 +311,9 @@
       "executor": "claude",
       "account": "claude-pool-2",
       "column": "review_me",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -289,7 +340,67 @@
       "executor": "codex",
       "account": "work",
       "column": "review_me",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
+    },
+    {
+      "slug": "local_8d1e5b7a-2c3f-4a6b-8e9d-0f1a2b3c4d5e",
+      "kind": "session",
+      "title": "Обновить тексты на странице оплаты",
+      "link": "claude://claude.ai/epitaxy/local_8d1e5b7a-2c3f-4a6b-8e9d-0f1a2b3c4d5e",
+      "repo": "demo-shop",
+      "branch": "claude/checkout-copy",
+      "task_type": null,
+      "executor": "claude",
+      "account": null,
+      "reviewer": null,
+      "model": "claude-opus-5-5",
+      "effort": "medium",
+      "column": "review_me",
+      "phase": "idle",
+      "phase_started_at": 1793998500,
+      "alive": false,
+      "turn": 7,
+      "fix_round": 0,
+      "outcome": null,
+      "result_status": null,
+      "summary": null,
+      "pr": "https://github.com/example/demo-shop/pull/42",
+      "ci": null,
+      "sleeping_until": null,
+      "created": 1793913600,
+      "updated_at": 1793998500,
+      "activity": null
+    },
+    {
+      "slug": "local_c4b9e2d7-6a1f-4c3e-b8d2-9e7f6a5b4c3d",
+      "kind": "session",
+      "title": null,
+      "link": "claude://claude.ai/epitaxy/local_c4b9e2d7-6a1f-4c3e-b8d2-9e7f6a5b4c3d",
+      "repo": "(no folder)",
+      "branch": null,
+      "task_type": null,
+      "executor": "claude",
+      "account": null,
+      "reviewer": null,
+      "model": "claude-sonnet-5-5",
+      "effort": "high",
+      "column": "review_me",
+      "phase": "idle",
+      "phase_started_at": 1793992800,
+      "alive": false,
+      "turn": 1,
+      "fix_round": 0,
+      "outcome": null,
+      "result_status": null,
+      "summary": null,
+      "pr": null,
+      "ci": null,
+      "sleeping_until": null,
+      "created": 1793991000,
+      "updated_at": 1793992800,
+      "activity": null
     },
     {
       "kind": "work",
@@ -316,7 +427,9 @@
       "executor": "codex",
       "account": "personal",
       "column": "attention",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -343,7 +456,9 @@
       "executor": "claude",
       "account": "claude-pool-3",
       "column": "attention",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -370,7 +485,9 @@
       "executor": "codex",
       "account": "work",
       "column": "attention",
-      "phase": "turn"
+      "phase": "turn",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -397,7 +514,9 @@
       "executor": "claude",
       "account": "claude-pool-1",
       "column": "attention",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -424,7 +543,9 @@
       "executor": "codex",
       "account": "personal",
       "column": "closed",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     },
     {
       "kind": "scout",
@@ -451,7 +572,9 @@
       "executor": "claude",
       "account": "claude-pool-2",
       "column": "closed",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     },
     {
       "kind": "work",
@@ -478,7 +601,9 @@
       "executor": "codex",
       "account": "work",
       "column": "closed",
-      "phase": "idle"
+      "phase": "idle",
+      "title": null,
+      "link": null
     }
   ],
   "accounts": {
@@ -621,7 +746,23 @@
         "switch_at": 99
       },
       "credits_floor": 0,
-      "credits_floor_until": null
+      "credits_floor_until": null,
+      "duty": {
+        "account": "claude-pool-1",
+        "family": "claude",
+        "since": 1793988600,
+        "checked_at": 1793999360,
+        "reason": "наибольший запас недели среди аккаунтов Claude",
+        "rooms": {
+          "claude": {
+            "claude-pool-1": 37,
+            "claude-pool-2": 31
+          },
+          "codex": {
+            "personal": 54
+          }
+        }
+      }
     }
   }
 }

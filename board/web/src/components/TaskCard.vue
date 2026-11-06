@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { TaskSummary } from "../types";
 import { formatAge, formatClock, formatDuration, formatFullTime, formatUntil } from "../lib/format";
-import { ACTIVITY, EXECUTORS, KINDS, PHASES, ciChip, isFlashing, prLabel, problemLabel } from "../lib/labels";
+import { ACTIVITY, EXECUTORS, KINDS, PHASES, ciChip, claudeLink, isFlashing, prLabel, problemLabel, taskTitle } from "../lib/labels";
 
 const props = defineProps<{
   task: TaskSummary;
@@ -14,6 +14,9 @@ const props = defineProps<{
 const emit = defineEmits<{ open: [slug: string] }>();
 
 const t = computed(() => props.task);
+const session = computed(() => t.value.kind === "session");
+const title = computed(() => taskTitle(t.value));
+const link = computed(() => claudeLink(t.value));
 const ci = computed(() => ciChip(t.value));
 // Checked once when the card is rendered; the key keeps a running animation from restarting.
 const flashing = computed(() => isFlashing(props.changedAt, Date.now()));
@@ -31,12 +34,12 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
 </script>
 
 <template>
-  <article class="card" :class="[t.executor, { selected, dead: !t.alive }]" :data-slug="t.slug">
+  <article class="card" :class="[t.executor, { selected, dead: !t.alive, session }]" :data-slug="t.slug">
     <span v-if="flashing" :key="changedAt" class="flash" aria-hidden="true"></span>
 
     <div class="row head">
       <h3 class="slug">
-        <button type="button" class="open" :title="t.slug" @click="emit('open', t.slug)">{{ t.slug }}</button>
+        <button type="button" class="open" :title="session ? title : t.slug" @click="emit('open', t.slug)">{{ title }}</button>
       </h3>
       <span class="exec" :class="t.executor" :title="`Исполнитель: ${EXECUTORS[t.executor]}`">
         <span class="glyph" aria-hidden="true">{{ t.executor === "codex" ? "◆" : "✳" }}</span>{{ EXECUTORS[t.executor] }}
@@ -69,10 +72,11 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
       </span>
     </div>
 
-    <div v-if="ci || t.pr || problem" class="row chips">
+    <div v-if="ci || t.pr || problem || link" class="row chips">
       <span v-if="problem" class="chip bad">{{ problem }}</span>
       <span v-if="ci" class="chip" :class="ci.tone">{{ ci.label }}</span>
       <a v-if="t.pr" class="pr" :href="t.pr" target="_blank" rel="noopener" :title="t.pr">{{ prLabel(t.pr) }} ↗</a>
+      <a v-if="link" class="pr app-link" :href="link" title="Открыть сессию в приложении Claude">Открыть в Claude ↗</a>
     </div>
 
     <div v-if="showSummary" class="row">
@@ -280,5 +284,27 @@ const showSummary = computed(() => !t.value.alive && !!t.value.summary);
 
 .dead .slug {
   font-weight: 550;
+}
+
+/* A desktop session: a quieter, flat card with a dashed outline, so it never reads as a task. */
+.card.session {
+  border-color: var(--border-strong);
+  border-style: dashed;
+  border-left-style: solid;
+  border-left-color: color-mix(in srgb, var(--claude) 45%, var(--border));
+  background: transparent;
+  box-shadow: none;
+}
+
+.card.session:hover {
+  border-left-color: color-mix(in srgb, var(--claude) 45%, var(--border));
+}
+
+.card.session.selected {
+  border-color: var(--focus);
+}
+
+.app-link {
+  margin-left: auto;
 }
 </style>

@@ -15,6 +15,15 @@ export interface AccountRow {
   bad: boolean;
   /** Unix seconds until which the account is limited. */
   limitedUntil: number | null;
+  /** Set when this is the duty account (`data.duty`). */
+  duty: DutyInfo | null;
+}
+
+export interface DutyInfo {
+  /** Why this account was elected, as `duty tick` wrote it. */
+  reason: string | null;
+  /** Unix seconds since which the account is on duty. */
+  since: number | null;
 }
 
 export type AccountItem = { kind: "row"; row: AccountRow } | { kind: "raw"; key: string; json: string };
@@ -87,6 +96,7 @@ function codexRow(entry: Obj, index: number): AccountRow | null {
     status: status === null ? "нет данных" : status === "available" ? null : (CODEX_STATUS[status] ?? status),
     bad: status !== null && status !== "available",
     limitedUntil: null,
+    duty: null,
   };
 }
 
@@ -114,6 +124,18 @@ function claudeRow(entry: Obj, index: number, now: number): AccountRow | null {
     status,
     bad,
     limitedUntil: bad && limitedUntil !== null && limitedUntil > now ? limitedUntil : null,
+    duty: null,
+  };
+}
+
+/** `data.duty`: an object with `account` and `family`, or null or missing when there is no duty. */
+function dutyOf(data: Obj): { account: string; family: "codex" | "claude"; info: DutyInfo } | null {
+  const duty = data.duty;
+  if (!isObj(duty) || typeof duty.account !== "string" || (duty.family !== "codex" && duty.family !== "claude")) return null;
+  return {
+    account: duty.account,
+    family: duty.family,
+    info: { reason: typeof duty.reason === "string" && duty.reason ? duty.reason : null, since: toSeconds(duty.since) },
   };
 }
 
@@ -137,5 +159,10 @@ export function parseAccounts(data: unknown, now: number): ParsedAccounts {
   };
   add(data.codex, "codex");
   add(data.claude, "claude");
+  const duty = dutyOf(data);
+  if (duty) {
+    const item = items.find((i) => i.kind === "row" && i.row.executor === duty.family && i.row.name === duty.account);
+    if (item?.kind === "row") item.row.duty = duty.info;
+  }
   return { items, raw: null };
 }
