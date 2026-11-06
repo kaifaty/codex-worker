@@ -5,10 +5,12 @@ import json
 import os
 import shlex
 import sys
+from pathlib import Path
 
 import pytest
 
 from codex_worker_board import machines as machines_module
+from codex_worker_board import probe
 from codex_worker_board.machines import Machines, machine_status, normalize_metrics
 
 
@@ -97,7 +99,9 @@ def test_untrusted_metrics_are_projected_coerced_and_bounded():
     sample["memory"] = {"total_bytes": "1000", "available_bytes": "500"}
     sample["gpus"] = [{"name": "g" * 250, "utilization_percent": "70",
                        "memory_used_bytes": None, "memory_total_bytes": None,
-                       "processes": [{"name": "/x/decider/.venv/bin/python", "memory_bytes": "123456789"}],
+                       "processes": [{"name": name, "memory_bytes": "123456789"} for name in (
+                           "/x/decider/.venv/bin/python", "/.venv/bin/python",
+                           "/x/first/venv/nested/.venv/bin/node")],
                        "private": "discard"}]
     sample["private"] = "discard"
     clean = normalize_metrics(sample)
@@ -105,7 +109,9 @@ def test_untrusted_metrics_are_projected_coerced_and_bounded():
     assert clean["cpu"] == {"cores": 4, "load1": 2.5, "load5": 1.5}
     assert clean["memory"] == {"total_bytes": 1000, "available_bytes": 500}
     assert len(clean["os"]) == len(clean["gpus"][0]["name"]) == 200
-    assert clean["gpus"][0]["processes"] == [{"name": "decider", "memory_bytes": 123456789}]
+    assert clean["gpus"][0]["processes"] == [
+        {"name": name, "memory_bytes": 123456789} for name in ("decider", "python", "first")
+    ]
     assert "discard" not in json.dumps(clean)
     for bad in ([], {"os": "linux"}, dict(metrics(), cpu={"cores": 0, "load1": 0, "load5": 0}),
                 dict(metrics(), cpu={"cores": 4, "load1": "NaN", "load5": 0}),
@@ -219,7 +225,7 @@ def test_fake_ssh_arguments_probe_stdin_host_and_retained_samples(tmp_path):
     assert len(calls) == 8
     for call in calls:
         assert call["args"][:5] == ["-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "--"]
-        assert "def " in call["source"] and "import " in call["source"]
+        assert call["source"] == Path(probe.__file__).read_text()
         command = shlex.split(call["args"][6])
         if call["args"][5] == target:
             assert command == ["python3", "-I", "-", "/", "/data with spaces/$(literal)"]
@@ -230,7 +236,7 @@ def test_fake_ssh_arguments_probe_stdin_host_and_retained_samples(tmp_path):
 
 @pytest.mark.parametrize("body,error", [
     ("print('not JSON')\n", "bad_output"),
-    ("sys.stdout.write('x' * (4 * 1024 * 1024))\n", "bad_output"),
+    (f"sys.stdout.write(json.dumps({metrics()!r}) + ' ' * (2 * 1024 * 1024))\n", "bad_output"),
     ("sys.exit(8)\n", "probe_failed"),
 ])
 def test_bad_probe_output_and_nonzero_status(tmp_path, body, error):

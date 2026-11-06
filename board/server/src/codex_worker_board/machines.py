@@ -11,6 +11,8 @@ import signal
 import time
 from pathlib import Path
 
+from .probe import process_name
+
 PROBE_TIMEOUT = 15
 OUTPUT_LIMIT = 1024 * 1024
 HISTORY_LIMIT = 120
@@ -103,13 +105,7 @@ def _memory(value):
 def _process_name(value):
     if not isinstance(value, str):
         raise ValueError("Expected a process name")
-    parts = value.split("/")
-    base = parts[-1]
-    if base.startswith("python") or base in ("node", "java"):
-        for marker in (".venv", "venv"):
-            if marker in parts[1:-1]:
-                return parts[parts.index(marker) - 1][:STRING_LIMIT]
-    return base[:STRING_LIMIT]
+    return process_name(value)[:STRING_LIMIT]
 
 
 def normalize_metrics(raw):
