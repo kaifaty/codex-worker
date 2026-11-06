@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 from rotation_support import PYTHON, SCRIPT, PACKAGE, RotationTestCase
+from worker_loader import load_worker
 
 
 class ResultScoutConfigTests(RotationTestCase):
@@ -501,6 +502,40 @@ class ResultScoutConfigTests(RotationTestCase):
         for name in ("paused", "woke", "turn_finished"):
             self.assertEqual(self.notification("scout-sleep", name)["kind"], "scout")
 
+    def test_teamster_environment_overrides_legacy_names(self):
+        overrides = {
+            "RATE_POLL_SECONDS": "2", "ROLLOUT_SEARCH_SECONDS": "2", "WAIT_POLL_SECONDS": "2",
+            "CI_POLL_SECONDS": "2", "ACCOUNT_RETRY_SECONDS": "2", "CAPACITY_RETRY_SECONDS": "2",
+            "SLEEP_STEP": "2", "RESET_MARGIN": "2", "MINUTE_SECONDS": "2",
+            "CODEX": str(self.fake), "CLAUDE": str(self.root / "claude"),
+            "CLOCK_FILE": str(self.root / "clock.json"),
+        }
+        environment = dict(self.env)
+        for name, value in overrides.items():
+            environment["CODEX_TASK_" + name] = value
+            environment["TEAMSTER_" + name] = value + "0" if value == "2" else value + "-new"
+        worker = load_worker(environment, clear=True)
+        for name in overrides:
+            if name.endswith("SECONDS") or name in ("SLEEP_STEP", "RESET_MARGIN"):
+                self.assertEqual(getattr(worker.config, name), 20)
+        self.assertEqual(worker.config.CODEX["path"], str(self.fake) + "-new")
+        self.assertEqual(worker.clock.CLOCK.path, self.root / "clock.json-new")
+        with mock.patch.dict(os.environ, environment, clear=True), \
+                mock.patch.object(worker.config.shutil, "which", side_effect=lambda value: value):
+            self.assertEqual(worker.config.resolve_codex(), str(self.fake) + "-new")
+            self.assertEqual(worker.config.claude_binary(), str(self.root / "claude-new"))
+            with mock.patch.dict(os.environ, {"CODEX_WORKER_SAMPLE": "old", "TEAMSTER_SAMPLE": "new"}):
+                self.assertEqual(worker.config.env("CODEX_WORKER_SAMPLE"), "new")
+        legacy = load_worker(dict(self.env, **{"CODEX_TASK_" + key: value
+                                              for key, value in overrides.items()}), clear=True)
+        for name in overrides:
+            if name.endswith("SECONDS") or name in ("SLEEP_STEP", "RESET_MARGIN"):
+                self.assertEqual(getattr(legacy.config, name), 2)
+        self.assertEqual(legacy.config.CODEX["path"], str(self.fake))
+        self.assertEqual(legacy.clock.CLOCK.path, self.root / "clock.json")
+        self.assertEqual(legacy.config.accounts_config()["claude"]["accounts"][0]["token_keychain"],
+                         "codex-worker-claude-reviewer")
+
     def test_binary_resolution_env_bundle_path_and_install_error(self):
         worker = self.worker()
         bundle = self.root / "bundled-codex"
@@ -520,7 +555,7 @@ class ResultScoutConfigTests(RotationTestCase):
             with self.assertRaises(SystemExit) as error:
                 worker.config.resolve_codex()
             self.assertIn("Codex CLI", str(error.exception))
-            self.assertIn("CODEX_TASK_CODEX", str(error.exception))
+            self.assertIn("TEAMSTER_CODEX", str(error.exception))
 
     def test_new_settings_override_legacy_and_legacy_remains_readable(self):
         self.configure()

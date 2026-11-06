@@ -1049,7 +1049,7 @@ class WorkspaceTests(RotationTestCase):
         script.write_text(
             "import os, sys\n"
             "sys.path.insert(0, " + repr(str(PACKAGE.parent)) + ")\n"
-            "from codex_worker import clock\n"
+            "from teamster import clock\n"
             "clock.CLOCK.sleep(240)\n"
             "print(os.environ['CODEX_CI_SHA'])\n"
             "print(os.environ['CODEX_CI_BRANCH'])\n"

@@ -1715,7 +1715,7 @@ class ClaudeReviewTests(RotationTestCase):
                 self.assertEqual(st["sleeping"]["account"], "first")
                 self.assertAlmostEqual(st["sleeping"]["until"], now + 600 + worker.config.RESET_MARGIN, delta=1)
 
-    def test_duty_codex_tasks_reviews_and_rotation_skip_the_duty_account(self):
+    def test_duty_codex_work_reviews_and_rotation_skip_the_duty_account(self):
         third = self.root / "third-home"
         third.mkdir()
         self.configure(language="en", accounts=[{"name": "main", "home": str(self.home)},
@@ -1829,7 +1829,7 @@ class ClaudeReviewTests(RotationTestCase):
         self.assertEqual(environment["CODEX_TASK_HOME"], str(self.home))
         for directory in ("/opt/homebrew/bin", str(home / ".local/bin"), "/usr/bin"):
             self.assertIn(directory, environment["PATH"].split(os.pathsep))
-        installed = Path(PYTHON).parent / "codex-worker"
+        installed = Path(PYTHON).parent / "teamster"
         expected = ([str(installed), "duty", "tick"] if installed.is_file()
                     else [PYTHON, "-I", str(SCRIPT), "duty", "tick"])
         worker = load_worker(self.env, name="duty_plist_worker")
@@ -1837,7 +1837,7 @@ class ClaudeReviewTests(RotationTestCase):
         created = subprocess.run([PYTHON, "-m", "venv", "--without-pip", str(interpreter.parent.parent)],
                                  cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(created.returncode, 0, created.stderr)
-        self.assertFalse(interpreter.with_name("codex-worker").exists())
+        self.assertFalse(interpreter.with_name("teamster").exists())
         with mock.patch.object(worker.commands.sys, "executable", str(interpreter)):
             fallback = worker.commands.duty_launchd_plist(15)
             started = time.time()
@@ -1851,7 +1851,7 @@ class ClaudeReviewTests(RotationTestCase):
             self.assertFalse(status["stale"])
             self.assertEqual(fallback["ProgramArguments"],
                              [str(interpreter), "-I", str(SCRIPT), "duty", "tick"])
-            installed = interpreter.with_name("codex-worker")
+            installed = interpreter.with_name("teamster")
             installed.write_text("#!/bin/sh\n")
             stable = worker.commands.duty_launchd_plist(15)
             self.assertEqual(stable["ProgramArguments"], [str(installed), "duty", "tick"])

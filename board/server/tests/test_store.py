@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from codex_worker_board.store import Store, alive, phase
+from teamster_board.store import Store, alive, phase
 
 
 @pytest.fixture
@@ -188,7 +188,7 @@ def test_finished_scouts_are_closed_for_success_failure_and_abandoned_work(tmp_p
 
 def test_stale_tasks_close_by_state_mtime_with_live_exemption_and_configurable_threshold(tmp_path, pids, monkeypatch):
     now = 20 * 86400.0
-    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now)
+    monkeypatch.setattr("teamster_board.store.time.time", lambda: now)
     live, dead = pids
     for slug, pid, age in (("stale", dead, 7 * 86400 + 1), ("boundary", dead, 7 * 86400),
                            ("recent", dead, 2 * 86400), ("alive", live, 8 * 86400)):
@@ -207,7 +207,7 @@ def test_stale_tasks_close_by_state_mtime_with_live_exemption_and_configurable_t
 
 def test_snapshot_closed_limit_combines_archive_and_live_folders_by_updated_at(tmp_path, pids, monkeypatch):
     now = 20 * 86400.0
-    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now)
+    monkeypatch.setattr("teamster_board.store.time.time", lambda: now)
     live, dead = pids
     for i in range(30):
         archived = write_state(tmp_path / ".archive", f"archived-{i:02}", pid=dead)
@@ -262,7 +262,7 @@ def test_model_always_belongs_to_executor_including_during_review(tmp_path, pids
 ])
 def test_phase_observation_timer_preserves_unknown_start_and_resets_on_phase_change(tmp_path, pids, monkeypatch, fields, expected_phase):
     now = [1000.0]
-    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now[0])
+    monkeypatch.setattr("teamster_board.store.time.time", lambda: now[0])
     live, _ = pids
     write_state(tmp_path, pid=live, **fields)
     store = Store(tmp_path)
@@ -298,7 +298,7 @@ def test_phase_observation_timer_preserves_unknown_start_and_resets_on_phase_cha
 
 def test_phase_observation_timer_starts_for_task_appearing_after_first_poll(tmp_path, pids, monkeypatch):
     now = [1000.0]
-    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now[0])
+    monkeypatch.setattr("teamster_board.store.time.time", lambda: now[0])
     live, _ = pids
     store = Store(tmp_path)
     store.poll()
@@ -349,7 +349,7 @@ def session_store(tmp_path, **options):
     ({}, False, "review_me"),
 ])
 def test_session_column_precedence(tmp_path, pids, monkeypatch, fields, busy, expected):
-    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: 300000)
+    monkeypatch.setattr("teamster_board.store.time.time", lambda: 300000)
     write_session(tmp_path / "desktop", **fields)
     if busy:
         write_live(tmp_path / "home", pids[0])
@@ -483,7 +483,7 @@ def test_session_bad_files_keep_previous_state_and_missing_sources_are_optional(
 
 def test_session_metadata_scan_cadence_cache_and_archived_memory(tmp_path, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("codex_worker_board.store.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("teamster_board.store.time.monotonic", lambda: clock[0])
     desktop = tmp_path / "desktop"
     metadata = write_session(desktop)
     archived = write_session(desktop, "local_archived", isArchived=True, title="archived payload")
@@ -520,7 +520,7 @@ def test_session_metadata_scan_cadence_cache_and_archived_memory(tmp_path, monke
 
 def test_session_moved_transcript_search_is_cached_and_only_busy_sessions_read(tmp_path, pids, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("codex_worker_board.store.time.monotonic", lambda: clock[0])
+    monkeypatch.setattr("teamster_board.store.time.monotonic", lambda: clock[0])
     write_session(tmp_path / "desktop")
     home = tmp_path / "home"
     write_live(home, pids[0], status="idle")
@@ -687,7 +687,7 @@ def test_session_symlinks_and_invalid_slug_are_not_read(tmp_path, pids):
 
 def test_session_closed_limit_is_shared_with_tasks_and_custom_staleness(tmp_path, monkeypatch):
     now = 300000.0
-    monkeypatch.setattr("codex_worker_board.store.time.time", lambda: now)
+    monkeypatch.setattr("teamster_board.store.time.time", lambda: now)
     desktop = tmp_path / "desktop"
     for index in range(30):
         task = write_state(tmp_path / "tasks" / ".archive", f"archived-{index:02}")

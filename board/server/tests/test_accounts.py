@@ -3,8 +3,8 @@
 import asyncio
 import json
 
-from codex_worker_board import accounts as accounts_module
-from codex_worker_board.accounts import Accounts
+from teamster_board import accounts as accounts_module
+from teamster_board.accounts import Accounts
 
 
 def write_script(path, body):

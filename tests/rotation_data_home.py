@@ -19,7 +19,7 @@ from rotation_support import PYTHON, SCRIPT, RotationTestCase
 from worker_loader import load_worker
 
 
-UNSET = {"TEAMSTER_HOME": "", "CODEX_TASK_HOME": ""}
+UNSET = {"TEAMSTER_HOME": "", "TEAMSTER_CODEX_HOME": "", "CODEX_TASK_HOME": ""}
 
 
 def tree(root):
@@ -126,6 +126,11 @@ class DataHomeTests(RotationTestCase):
         self.assertEqual(homes(), (codex, data, "new") + new)
         self.assertEqual(homes(TEAMSTER_HOME=str(other)), (codex, other, "new") + new)
         self.assertEqual(homes(TEAMSTER_HOME=str(other), CODEX_TASK_HOME=str(data)), (data, other, "new") + new)
+        self.assertEqual(homes(TEAMSTER_HOME=str(data), TEAMSTER_CODEX_HOME=str(other),
+                               CODEX_TASK_HOME=str(codex)), (other, data, "new") + new)
+        self.assertEqual(homes(TEAMSTER_CODEX_HOME=str(other), CODEX_TASK_HOME=str(codex)),
+                         (codex, codex, "legacy", "claude-tasks", "claude-accounts.json",
+                          "codex-worker-log.jsonl"))
         self.assertEqual(homes(CODEX_TASK_HOME=str(other)), (other, other, "legacy") + legacy)
         # An old launchd job keeps CODEX_TASK_HOME and follows the marker left by migrate-home.
         (codex / "teamster-home").write_text(str(other) + "\n")
@@ -156,7 +161,7 @@ class DataHomeTests(RotationTestCase):
         environment = job["EnvironmentVariables"]
         for directory in (self.repo, job.get("WorkingDirectory", "/")):
             self.assertEqual(Path(directory, environment["TEAMSTER_HOME"]), data)
-            self.assertEqual(Path(directory, environment["CODEX_TASK_HOME"]), self.home)
+            self.assertEqual(Path(directory, environment["TEAMSTER_CODEX_HOME"]), self.home)
         self.assertEqual(job["StandardOutPath"], str(data / "duty-launchd.log"))
 
     def test_migrate_home_refusals_change_nothing(self):
@@ -286,7 +291,7 @@ class DataHomeTests(RotationTestCase):
             self.migrate(self.user)
         stdout, stderr = started[0].communicate(timeout=30)
         self.assertNotEqual(started[0].returncode, 0, stdout)
-        self.assertIn("the data home moved after this command started; run codex-worker again", stderr)
+        self.assertIn("the data home moved after this command started; run teamster again", stderr)
         self.assertFalse((self.home / "claude-tasks").exists())
         self.assertFalse((self.user / ".teamster/tasks/late").exists())
         self.assertFalse((self.home / "worktrees/claude-late").exists())
@@ -313,8 +318,11 @@ class DataHomeTests(RotationTestCase):
         self.assertIn("nothing changed", self.cli("migrate-home"))
         self.assertEqual(tree(self.user), user_before)
         output = self.cli("migrate-home", "--apply")
-        for label in ("codex-worker.board", "codex-worker.duty"):
+        for label in ("teamster.board", "teamster.duty"):
             self.assertIn(f"launchctl kickstart -k gui/$(id -u)/{label}", output)
+            old_label = label.replace("teamster.", "codex-worker.")
+            self.assertIn(f"launchctl bootout gui/$(id -u)/{old_label}", output)
+            self.assertIn(f"launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/{label}.plist", output)
         data = self.user / ".teamster"
         self.assertFalse(old_tasks.exists())
         self.assertEqual(os.readlink(self.home / "worktrees"), str(disk))

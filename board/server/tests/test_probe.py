@@ -5,7 +5,7 @@ import json
 import subprocess
 from pathlib import Path
 
-from codex_worker_board import probe
+from teamster_board import probe
 
 
 def test_memory_and_apple_samples():

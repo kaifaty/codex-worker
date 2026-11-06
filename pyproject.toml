@@ -3,7 +3,7 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "codex-worker"
+name = "teamster"
 dynamic = ["version"]
 description = "Run Codex or Claude work turns in isolated git worktrees, with review, checks and subscription rotation."
 readme = "README.md"
@@ -16,14 +16,15 @@ dependencies = []
 Homepage = "https://github.com/kaifaty/codex-worker"
 
 [project.scripts]
-codex-worker = "codex_worker.__main__:cli.main"
+teamster = "teamster.__main__:cli.main"
+codex-worker = "teamster.__main__:cli.main"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
-packages = ["codex_worker"]
+packages = ["teamster"]
 
 [tool.setuptools.dynamic]
-version = {attr = "codex_worker.__version__"}
+version = {attr = "teamster.__version__"}
 
 [tool.setuptools.package-data]
-codex_worker = ["rules*.md", "docs/*.md"]
+teamster = ["rules*.md", "docs/*.md"]

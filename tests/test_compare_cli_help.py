@@ -90,6 +90,20 @@ class CompareCliHelpTests(unittest.TestCase):
         self.assertEqual(output, "PASS: 4 commands identical\n")
         self.assertEqual(list(root.rglob("*.pyc")), [])
 
+        root, script = self.synthetic_repository()
+        previous = root / compare_cli_help.PREVIOUS_SCRIPT
+        previous.parent.mkdir(parents=True)
+        script.rename(previous)
+        subprocess.run(["git", "add", "-A"], cwd=str(root), check=True)
+        subprocess.run(["git", "-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
+                        "-c", "user.email=test@example.invalid", "commit", "--quiet",
+                        "--no-gpg-sign", "-m", "Use previous package"], cwd=str(root), check=True)
+        previous.rename(script)
+        status, output = self.compare_output(root)
+        self.assertEqual(status, 0)
+        self.assertEqual(output, "PASS: 4 commands identical\n")
+        self.assertEqual(list(root.rglob("*.pyc")), [])
+
     def test_stdout_stderr_and_exit_code_differences_are_reported(self):
         root, script = self.synthetic_repository()
         changes = (

@@ -8,7 +8,7 @@ from unittest import mock
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "src/codex_worker/__main__.py")
+          / "src/teamster/__main__.py")
 LOADER_PATH = Path(__file__).resolve()
 # run_path works in isolated subprocesses, where tests is absent from sys.path.
 WORKER_BOOTSTRAP = ("import runpy\nload_worker = runpy.run_path(" + repr(str(LOADER_PATH))
@@ -30,7 +30,7 @@ def load_worker(env=None, name="rotation_worker", *, clear=False, script=SCRIPT)
             mock.patch.object(sys, "path", [str(script.parent)] + sys.path):
         # Future package imports must see this fixture's environment as well.
         for module_name in tuple(sys.modules):
-            if module_name == "codex_worker" or module_name.startswith("codex_worker."):
+            if module_name == "teamster" or module_name.startswith("teamster."):
                 del sys.modules[module_name]
         spec = importlib.util.spec_from_file_location(name, str(script))
         worker = importlib.util.module_from_spec(spec)

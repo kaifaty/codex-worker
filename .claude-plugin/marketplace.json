@@ -6,8 +6,8 @@
   },
   "plugins": [
     {
-      "name": "codex-worker",
-      "source": "./plugins/codex-worker",
+      "name": "teamster",
+      "source": "./plugins/teamster",
       "description": "Let Claude plan and review while Codex implements in an isolated git worktree."
     }
   ]

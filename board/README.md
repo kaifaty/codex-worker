@@ -1,6 +1,6 @@
-# codex-worker board
+# teamster board
 
-A read-only local view of codex-worker tasks and Claude Code sessions from the Claude desktop app,
+A read-only local view of teamster tasks and Claude Code sessions from the Claude desktop app,
 with phases, accounts, live activity and configured machine metrics. The server reads JSON and event logs from disk without
 importing the plugin or changing source files. REST and WebSocket
 payloads are defined in [CONTRACT.md](CONTRACT.md).
@@ -8,7 +8,7 @@ payloads are defined in [CONTRACT.md](CONTRACT.md).
 From the repository root, with Python 3.10+ and uv installed:
 
 ```sh
-uv run --project board/server codex-worker-board
+uv run --project board/server teamster-board
 ```
 
 Open http://localhost:8787. The server listens on `127.0.0.1` by default; CLI options are
@@ -33,7 +33,7 @@ that takes three demo agents through every place.
 
 | Environment variable | Default | Purpose |
 | --- | --- | --- |
-| `TEAMSTER_HOME`, `CODEX_TASK_HOME` | `~/.teamster` | The worker's data home, found by the worker's rules (`codex-worker docs settings`). Read tasks from `tasks/` and archives from `tasks/.archive/` (`claude-tasks/` in a legacy home in `~/.codex`). Snapshots include at most 50 closed records together, ranked by state mtime. |
+| `TEAMSTER_HOME`, `CODEX_TASK_HOME` | `~/.teamster` | The worker's data home, found by the worker's rules (`teamster docs settings`). Read tasks from `tasks/` and archives from `tasks/.archive/` (`claude-tasks/` in a legacy home in `~/.codex`). Snapshots include at most 50 closed records together, ranked by state mtime. |
 | `BOARD_POLL_SECONDS` | `1.0` | Interval between file mtime and size polls, in seconds. |
 | `BOARD_ACCOUNTS_SECONDS` | `300` | Minimum interval between account subprocess calls, in seconds. |
 | `BOARD_MACHINES_FILE` | `<data home>/board-machines.json` | Machine configuration; reread when mtime or size changes. Missing means no machines; invalid files preserve the last valid list and expose `config_error`. |
@@ -43,7 +43,7 @@ that takes three demo agents through every place.
 | `BOARD_CLAUDE_HOME` | `~/.claude` | Read live state from `sessions/<pid>.json` and activity from `projects/*/<cliSessionId>.jsonl`. Key files are never opened. |
 | `BOARD_SESSIONS_SECONDS` | `5` | Interval between desktop metadata scans, in seconds; unchanged files are not read again. Live state is read on every board poll. |
 | `BOARD_SESSION_STALE_HOURS` | `48` | Close inactive sessions older than this many hours by `lastActivityAt`. Busy sessions and sessions awaiting a person take precedence. |
-| `BOARD_CODEX_TASK` | Repository `src/codex_worker/__main__.py` | Script called as `python3 -I <script> accounts --json`, without `--refresh`, with a 60-second timeout. |
+| `BOARD_TEAMSTER_COMMAND` (fallback `BOARD_CODEX_TASK`) | Repository `src/teamster/__main__.py` | Script called as `python3 -I <script> accounts --json`, without `--refresh`, with a 60-second timeout. |
 
 Account calls run outside the event loop. Errors preserve the previous account data and expose an
 error string. A malformed or partially written state file preserves its last successfully read state.
@@ -59,16 +59,16 @@ across project directories run at most once per 60 seconds; a found path is cach
 ## Run as a service
 
 On macOS, launchd can keep the board running: it starts at login and restarts after a crash.
-`codex-worker-board plist` prints the job and installs nothing. It accepts `--host` and `--port` with
-the defaults above. It sets `TEAMSTER_HOME` to a new-layout data home (also copying `CODEX_TASK_HOME`
+`teamster-board plist` prints the job and installs nothing. It accepts `--host` and `--port` with
+the defaults above. It sets `TEAMSTER_HOME` to a new-layout data home (also setting `TEAMSTER_CODEX_HOME` from that variable or `CODEX_TASK_HOME`
 when set) or `CODEX_TASK_HOME` to a legacy one, and copies every `BOARD_*` variable set in the current
 environment into the job. Logs go to `<data home>/board-server.log`.
 
 1. Clone the repository to a permanent place outside working directories, then build and sync:
 
    ```sh
-   git clone https://github.com/kaifaty/codex-worker.git ~/codex-worker-board
-   cd ~/codex-worker-board
+   git clone https://github.com/kaifaty/codex-worker.git ~/teamster-board
+   cd ~/teamster-board
    npm --prefix board/web ci && npm --prefix board/web run build
    uv sync --project board/server --no-dev
    ```
@@ -76,13 +76,13 @@ environment into the job. Logs go to `<data home>/board-server.log`.
 2. Write the job:
 
    ```sh
-   board/server/.venv/bin/codex-worker-board plist > ~/Library/LaunchAgents/codex-worker.board.plist
+   board/server/.venv/bin/teamster-board plist > ~/Library/LaunchAgents/teamster.board.plist
    ```
 
 3. Load it:
 
    ```sh
-   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.board.plist
+   launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/teamster.board.plist
    ```
 
 4. Update: pull, build and sync as in step 1, then restart the job:
@@ -91,13 +91,13 @@ environment into the job. Logs go to `<data home>/board-server.log`.
    git pull
    npm --prefix board/web ci && npm --prefix board/web run build
    uv sync --project board/server --no-dev
-   launchctl kickstart -k gui/$(id -u)/codex-worker.board
+   launchctl kickstart -k gui/$(id -u)/teamster.board
    ```
 
 5. Disable:
 
    ```sh
-   launchctl bootout gui/$(id -u)/codex-worker.board
+   launchctl bootout gui/$(id -u)/teamster.board
    ```
 
 The port must be free, so stop a manually started server before loading the job.

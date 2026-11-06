@@ -328,6 +328,6 @@ class NotificationTests(RotationTestCase):
         self.assertEqual(popen.call_args.args[0], [
             "osascript", "-e",
             'display notification "notify-macos: completed \\"quoted\\" C:\\\\tmp with newline" '
-            'with title "codex-worker"'])
+            'with title "teamster"'])
         self.assertIs(popen.call_args.kwargs["stdin"], subprocess.DEVNULL)
         self.assertTrue(popen.call_args.kwargs["start_new_session"])

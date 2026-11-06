@@ -82,12 +82,22 @@ class CompareModuleSplitTests(unittest.TestCase):
         self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
         self.assertIn("moved=2; same=0; changed=0", command.stdout)
         self.assertIn("Glue (base):", command.stdout)
-        package = self.root / compare_module_split.CURRENT_PACKAGE
+        package = self.root / compare_module_split.PREVIOUS_PACKAGE
         package.parent.mkdir()
         shutil.move(str(self.scripts / "codex_worker"), str(package))
         (self.scripts / "codex_task.py").rename(package / "__main__.py")
         self.assert_categories(self.compare(base), moved=2)
         command = self.run_tool(base)
+        self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
+        self.git("add", ".")
+        self.git("commit", "--quiet", "-m", "Move into src package")
+        old_base = self.git("rev-parse", "HEAD")
+        renamed = self.root / compare_module_split.CURRENT_PACKAGE
+        package.rename(renamed)
+        for path in renamed.glob("*.py"):
+            path.write_text(path.read_text().replace("codex_worker", "teamster"))
+        self.assert_categories(self.compare(old_base), moved=2)
+        command = self.run_tool(old_base)
         self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
 
     def test_changed_literal_is_visible_and_can_be_allowed(self):

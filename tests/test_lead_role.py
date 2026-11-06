@@ -18,8 +18,8 @@ from worker_loader import load_worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SKILL = ROOT / "plugins/codex-worker/skills/codex-worker"
-PACKAGE = ROOT / "src/codex_worker"
+SKILL = ROOT / "plugins/teamster/skills/teamster"
+PACKAGE = ROOT / "src/teamster"
 
 
 class LeadRoleTests(unittest.TestCase):

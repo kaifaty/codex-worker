@@ -961,7 +961,8 @@ class CheckGuardTests(RotationTestCase):
             {"mode": "complete", "create_files": ["done.txt"]},
             {"mode": "complete", "reply": self.review_result(False)}])
         command = (f"printf '%s\\n' \"$CODEX_TASK_CHECK_DEADLINE\" >> {shlex.quote(str(deadlines))}; "
-                   "test -f done.txt || { echo 'base queue busy'; exit 75; }")
+                   'test "$TEAMSTER_CHECK_DEADLINE" = "$CODEX_TASK_CHECK_DEADLINE" && '
+                   "{ test -f done.txt || { echo 'base queue busy'; exit 75; }; }")
         self.start("check-deadline", "--review", "--check", command, "--base-check", "--check-timeout", "600")
         output = self.wait("check-deadline")
         check = self.state("check-deadline")["checks"][-1]

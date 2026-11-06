@@ -25,7 +25,7 @@ from worker_loader import WORKER_BOOTSTRAP, load_worker
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / "src" / "codex_worker"
+PACKAGE = ROOT / "src" / "teamster"
 SCRIPT = PACKAGE / "__main__.py"
 PYTHON = sys.executable
 IMPOSSIBLE_PID = 2 ** 31 - 1

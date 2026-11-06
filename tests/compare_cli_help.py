@@ -18,7 +18,8 @@ import tempfile
 
 
 ROOT = Path(__file__).resolve().parents[1]
-SCRIPT = Path("src/codex_worker/__main__.py")
+SCRIPT = Path("src/teamster/__main__.py")
+PREVIOUS_SCRIPT = Path("src/codex_worker/__main__.py")
 LEGACY_SCRIPT = Path("plugins/codex-worker/skills/codex-worker/scripts/codex_task.py")
 
 
@@ -49,7 +50,7 @@ def archive_plugins(root, revision, destination):
 
 
 def entrypoint(directory):
-    for path in (SCRIPT, LEGACY_SCRIPT):
+    for path in (SCRIPT, PREVIOUS_SCRIPT, LEGACY_SCRIPT):
         if (directory / path).is_file():
             return directory / path
     raise ValueError("worker entrypoint not found in " + str(directory))

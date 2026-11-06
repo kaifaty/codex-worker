@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install the package into a temporary venv and run a task through its codex-worker command.
+"""Install the package into a temporary venv and run a task through its teamster command.
 
 Run with python3 -I tests/package_smoke.py. Building the wheel fetches setuptools, so this
 needs network access and is not part of test_rotation.py. Everything it writes stays in
@@ -26,14 +26,14 @@ from rotation_support import FAKE_CODEX
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / "src/codex_worker"
+PACKAGE = ROOT / "src/teamster"
 VERSION = re.search(r'^__version__ = "([^"]+)"$', (PACKAGE / "__init__.py").read_text(encoding="utf-8"),
                     re.MULTILINE)[1]
 HOOKS_CHECK = r"""import importlib.metadata, json
-entry, = [entry for entry in importlib.metadata.distribution("codex-worker").entry_points
-          if entry.group == "console_scripts" and entry.name == "codex-worker"]
+entry, = [entry for entry in importlib.metadata.distribution("teamster").entry_points
+          if entry.group == "console_scripts" and entry.name == "teamster"]
 entry.load()
-from codex_worker import executors
+from teamster import executors
 required = ("turn", "wrapup", "last_message", "messages", "pr_messages")
 print(json.dumps({"value": entry.value, "missing": {
     name: [operation for operation in required
@@ -81,14 +81,14 @@ class PackageSmokeTest(unittest.TestCase):
         target = self.root / "target"
         self.run_checked([str(venv / "bin/python"), "-I", "-m", "pip", "install", "--quiet",
                           "--target", str(target), str(wheel)], env=env, cwd=str(self.root))
-        help_text = self.run_checked([sys.executable, "-I", str(target / "codex_worker/__main__.py"),
+        help_text = self.run_checked([sys.executable, "-I", str(target / "teamster/__main__.py"),
                                       "--help"], env=env, cwd=str(self.root)).stdout
         self.assertIn("start <slug>", help_text)
         return venv
 
     def test_installed_command_runs_a_task(self):
         venv = self.install()
-        command = venv / "bin/codex-worker"
+        command = venv / "bin/teamster"
         python = venv / "bin/python"
         self.assertTrue(command.is_file())
 
@@ -152,9 +152,16 @@ class PackageSmokeTest(unittest.TestCase):
 
         help_text = cli("--help").stdout
         self.assertIn("start <slug>", help_text)
-        self.assertEqual(cli("--version").stdout.strip(), VERSION)
+        version = cli("--version")
+        self.assertEqual(version.stdout.strip(), VERSION)
+        self.assertEqual(version.stderr, "")
+        alias = self.run_checked([str(venv / "bin/codex-worker"), "--version"], cwd=str(outside), env=env)
+        module = self.run_checked([str(python), "-I", "-m", "teamster", "--version"],
+                                  cwd=str(outside), env=env)
+        self.assertEqual((alias.stdout, alias.stderr), (version.stdout, ""))
+        self.assertEqual((module.stdout, module.stderr), (version.stdout, ""))
 
-        installed = [path for path in venv.rglob("codex_worker") if (path / "__main__.py").is_file()]
+        installed = [path for path in venv.rglob("teamster") if (path / "__main__.py").is_file()]
         self.assertEqual(len(installed), 1, installed)
         installed = installed[0]
         self.assertEqual(Path(cli("path").stdout.strip()), installed)
@@ -176,7 +183,7 @@ class PackageSmokeTest(unittest.TestCase):
                 (codex_home / "fixture.json").write_text(json.dumps(fixture))
                 started = cli("start", slug, "--brief", str(brief), "--repo", str(repo),
                               "--no-push", "--check", "test -f smoke.txt")
-                self.assertIn("  wait: codex-worker wait %s   " % slug, started.stdout)
+                self.assertIn("  wait: teamster wait %s   " % slug, started.stdout)
                 self.assertEqual(started.stderr, "")
                 state_path = codex_home / "claude-tasks" / slug / "state.json"
                 self.assertEqual(json.loads(state_path.read_text())["plugin_version"], VERSION)
@@ -204,7 +211,11 @@ class PackageSmokeTest(unittest.TestCase):
                 self.assertEqual(rules, (PACKAGE / rules_name).read_text(encoding="utf-8"))
                 self.assertIn(rules.splitlines()[0], execs[-1]["prompt"])
 
+                # Earlier records keep their version field and legacy branch/worktree names.
+                state["plugin_version"] = "1.52.0"
+                state_path.write_text(json.dumps(state))
                 self.assertIn(slug, cli("status", slug).stdout)
+                self.assertEqual(json.loads(state_path.read_text()), state)
                 # stats runs the moved codex_stats.py on the task thread's rollout.
                 stats = cli("stats", slug).stdout
                 self.assertIn("== main: " + state["thread"], stats)
@@ -217,7 +228,7 @@ class PackageSmokeTest(unittest.TestCase):
 
         hooks = json.loads(self.run_checked([str(python), "-I", "-c", HOOKS_CHECK],
                                             cwd=str(outside), env=env).stdout)
-        self.assertEqual(hooks, {"value": "codex_worker.__main__:cli.main",
+        self.assertEqual(hooks, {"value": "teamster.__main__:cli.main",
                                  "missing": {"codex": [], "claude": []}})
 
         # The duty job has no Claude token and must never consult the real Keychain.

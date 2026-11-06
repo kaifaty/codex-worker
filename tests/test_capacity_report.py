@@ -13,7 +13,7 @@ from worker_loader import load_worker
 
 
 SCRIPT = (Path(__file__).resolve().parents[1]
-          / "src/codex_worker/task_report.py")
+          / "src/teamster/task_report.py")
 
 
 class CapacityReportTests(unittest.TestCase):

@@ -14,8 +14,8 @@ import unittest
 
 SCRIPTS = (Path(__file__).resolve().parents[1]
            / "src")
-PACKAGE_FILE_ALLOWLIST = {"codex_worker/config.py", "codex_worker/__main__.py"}
-ENTRYPOINTS = {"codex_task", "codex_worker.__main__"}
+PACKAGE_FILE_ALLOWLIST = {"teamster/config.py", "teamster/__main__.py"}
+ENTRYPOINTS = {"worker_entry", "teamster.__main__"}
 # Standalone helpers run by path and never import the package.
 STANDALONE = {"codex_stats.py", "rollout.py", "task_report.py", "turn_log.py", "wait_turn.py"}
 
@@ -352,22 +352,22 @@ def _file_bindings(tree):
 
 def check_layout(scripts):
     """Return file:line diagnostics for the entrypoint and its own package."""
-    paths = ([scripts / "codex_task.py"] if (scripts / "codex_task.py").is_file() else [])
-    paths += sorted(path for path in (scripts / "codex_worker").glob("*.py")
+    paths = ([scripts / "worker_entry.py"] if (scripts / "worker_entry.py").is_file() else [])
+    paths += sorted(path for path in (scripts / "teamster").glob("*.py")
                     if path.name not in STANDALONE)
     modules = {}
     for path in paths:
-        module = ("codex_task" if path.parent == scripts else
-                  "codex_worker" if path.stem == "__init__" else "codex_worker." + path.stem)
+        module = ("worker_entry" if path.parent == scripts else
+                  "teamster" if path.stem == "__init__" else "teamster." + path.stem)
         modules[module] = path
     findings = []
-    for path in sorted((scripts / "codex_worker").glob("*.py")):
+    for path in sorted((scripts / "teamster").glob("*.py")):
         if path.name in STANDALONE:
             for node, _ in _imports(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
                 names = ([node.module or ""] if isinstance(node, ast.ImportFrom)
                          else [alias.name for alias in node.names])
                 if (isinstance(node, ast.ImportFrom) and node.level) or any(
-                        name.split(".")[0] in {"codex_task", "codex_worker"} for name in names):
+                        name.split(".")[0] in {"worker_entry", "teamster"} for name in names):
                     findings.append("%s:%s: standalone-import: %s" % (path, node.lineno, path.name))
     definitions = {}
     edges = {module: [] for module in modules}
@@ -392,21 +392,21 @@ def check_layout(scripts):
         imports_to_check = []
         for node, top in _imports(tree):
             if isinstance(node, ast.ImportFrom):
-                internal = bool(node.level) or (node.module or "").split(".")[0] in {"codex_task", "codex_worker"}
+                internal = bool(node.level) or (node.module or "").split(".")[0] in {"worker_entry", "teamster"}
                 imports = []
                 if internal:
-                    imports = ([(alias, "codex_worker." + alias.name) for alias in node.names]
+                    imports = ([(alias, "teamster." + alias.name) for alias in node.names]
                                if ((node.level == 1 and node.module is None)
-                                   or (not node.level and node.module == "codex_worker")) else None)
+                                   or (not node.level and node.module == "teamster")) else None)
             else:
                 imports = [(alias, alias.name) for alias in node.names
-                           if alias.name.split(".")[0] in {"codex_task", "codex_worker"}]
+                           if alias.name.split(".")[0] in {"worker_entry", "teamster"}]
                 internal = bool(imports)
             for alias in node.names:
                 # The entrypoint exposes package modules for callers and tests.
                 reexport = (module in ENTRYPOINTS and any(
                     alias is own_alias and target in modules
-                    and target.startswith("codex_worker.")
+                    and target.startswith("teamster.")
                     for own_alias, target in imports or []))
                 if top and not reexport:
                     imports_to_check.append((_import_name(node, alias),
@@ -419,7 +419,7 @@ def check_layout(scripts):
             for alias, target in imports:
                 owner = target if alias.asname or isinstance(node, ast.ImportFrom) else target.split(".")[0]
                 aliases.setdefault(_import_name(node, alias), (owner, alias))
-                if target == "codex_worker" and target not in modules:
+                if target == "teamster" and target not in modules:
                     continue  # A namespace package is also a module.
                 if target not in modules:
                     report(path, node.lineno, "module-import-only", "unknown own module " + target)
@@ -470,7 +470,7 @@ def check_layout(scripts):
                     and node.func.id in {"globals", "locals", "vars"}
                     and not node.args and not node.keywords):
                 report(path, node.lineno, "no-dynamic-namespace", node.func.id + "()")
-            if (module != "codex_task"
+            if (module != "worker_entry"
                     and path.relative_to(scripts).as_posix() not in PACKAGE_FILE_ALLOWLIST
                     and isinstance(node, ast.Name)
                     and node.id == "__file__"):
@@ -500,7 +500,7 @@ class ModuleLayoutTests(unittest.TestCase):
     def check_tree(self, files):
         with tempfile.TemporaryDirectory(prefix="codex-module-layout-") as directory:
             root = Path(directory)
-            (root / "codex_task.py").write_text("", encoding="utf-8")
+            (root / "worker_entry.py").write_text("", encoding="utf-8")
             for relative, source in files.items():
                 path = root / relative
                 path.parent.mkdir(parents=True, exist_ok=True)
@@ -510,19 +510,19 @@ class ModuleLayoutTests(unittest.TestCase):
     def test_production_module_layout(self):
         self.assertEqual(check_layout(SCRIPTS), [])
         root = SCRIPTS.parent
-        plugin = root / "plugins/codex-worker"
+        plugin = root / "plugins/teamster"
         self.assertEqual(sorted(path.relative_to(plugin).as_posix()
                                 for path in plugin.rglob("*") if path.is_file()),
-                         [".claude-plugin/plugin.json", "skills/codex-worker/SKILL.md"])
+                         [".claude-plugin/plugin.json", "skills/teamster/SKILL.md"])
         for path in SCRIPTS.rglob("*"):
             if path.is_file() and path.suffix in {".py", ".md"}:
                 source = path.read_text(encoding="utf-8")
-                for forbidden in ("plugins/cache", "CLAUDE_SKILL_DIR", "$T", "codex_task.py"):
+                for forbidden in ("plugins/cache", "CLAUDE_SKILL_DIR", "$T", "worker_entry.py"):
                     self.assertNotIn(forbidden, source, str(path))
         with tempfile.TemporaryDirectory(prefix="codex-layout-help-") as directory:
             environment = dict(os.environ, HOME=directory, CODEX_TASK_HOME=directory,
                                CODEX_HOME=directory, CLAUDE_CONFIG_DIR=directory)
-            command = [sys.executable, "-I", str(SCRIPTS / "codex_worker/__main__.py")]
+            command = [sys.executable, "-I", str(SCRIPTS / "teamster/__main__.py")]
             help_result = subprocess.run(command + ["--help"], cwd=directory, env=environment,
                                          capture_output=True, text=True)
             self.assertEqual(help_result.returncode, 0, help_result.stderr)
@@ -530,17 +530,17 @@ class ModuleLayoutTests(unittest.TestCase):
                                        capture_output=True, text=True)
             self.assertEqual(documents.returncode, 0, documents.stderr)
             self.assertEqual(documents.stdout.splitlines(),
-                             sorted(path.stem for path in (SCRIPTS / "codex_worker/docs").glob("*.md")))
+                             sorted(path.stem for path in (SCRIPTS / "teamster/docs").glob("*.md")))
 
     def test_package_version_matches_plugin(self):
         root = Path(__file__).resolve().parents[1]
-        package = ast.parse((root / "src/codex_worker/__init__.py").read_text(encoding="utf-8"))
+        package = ast.parse((root / "src/teamster/__init__.py").read_text(encoding="utf-8"))
         versions = [node.value.value for node in package.body if isinstance(node, ast.Assign)
                     and any(isinstance(target, ast.Name) and target.id == "__version__"
                             for target in node.targets)]
-        plugin = json.loads((root / "plugins/codex-worker/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        plugin = json.loads((root / "plugins/teamster/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
         self.assertEqual(versions, [plugin["version"]], "package and plugin.json versions differ")
-        skill = (root / "plugins/codex-worker/skills/codex-worker/SKILL.md").read_text(encoding="utf-8")
+        skill = (root / "plugins/teamster/skills/teamster/SKILL.md").read_text(encoding="utf-8")
         minimum = re.search(r"version\s+`?(\d+\.\d+\.\d+)`?\s+or newer", skill, re.IGNORECASE)
         self.assertIsNotNone(minimum, "SKILL.md must state the minimum installed version")
         self.assertLessEqual(tuple(map(int, minimum[1].split("."))),
@@ -548,56 +548,56 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_each_mutant_is_rejected(self):
         mutants = (
-            ({"codex_worker/a.py": "def outer():\n    def inner():\n        return missing\n    return inner\n"},
+            ({"teamster/a.py": "def outer():\n    def inner():\n        return missing\n    return inner\n"},
              "a.py:3: undefined-global"),
-            ({"codex_worker/a.py": "def function(value=missing):\n    return value\n"},
+            ({"teamster/a.py": "def function(value=missing):\n    return value\n"},
              "a.py:1: undefined-global"),
-            ({"codex_worker/a.py": "value = 1\n", "codex_worker/b.py": "from .a import value\nvalue\n"},
+            ({"teamster/a.py": "value = 1\n", "teamster/b.py": "from .a import value\nvalue\n"},
              "b.py:1: module-import-only"),
-            ({"codex_worker/a.py": "def function():\n    global value\n"},
+            ({"teamster/a.py": "def function():\n    global value\n"},
              "a.py:2: no-global"),
-            ({"codex_worker/a.py": "value = globals()\n"},
+            ({"teamster/a.py": "value = globals()\n"},
              "a.py:1: no-dynamic-namespace"),
-            ({"codex_worker/a.py": "value = 1\n", "codex_worker/b.py": "value = 2\n"},
+            ({"teamster/a.py": "value = 1\n", "teamster/b.py": "value = 2\n"},
              "b.py:1: duplicate-name"),
-            ({"codex_worker/a.py": "from . import b\nb\n", "codex_worker/b.py": "from . import a\na\n"},
+            ({"teamster/a.py": "from . import b\nb\n", "teamster/b.py": "from . import a\na\n"},
              "b.py:1: acyclic-imports"),
-            ({"codex_worker/a.py": "import math\n"},
+            ({"teamster/a.py": "import math\n"},
              "a.py:1: unused-import: math"),
-            ({"codex_worker/a.py": "path = __file__\n"},
+            ({"teamster/a.py": "path = __file__\n"},
              "a.py:1: no-package-file"),
-            ({"codex_worker/config.py": "config_path = __file__\n",
-              "codex_worker/a.py": "path = __file__\n"},
+            ({"teamster/config.py": "config_path = __file__\n",
+              "teamster/a.py": "path = __file__\n"},
              "a.py:1: no-package-file"),
-            ({"codex_worker/a.py": "from . import b\nvalue = b.missing\n",
-              "codex_worker/b.py": "name = 1\n"},
+            ({"teamster/a.py": "from . import b\nvalue = b.missing\n",
+              "teamster/b.py": "name = 1\n"},
              "a.py:2: module-attribute: b.missing"),
-            ({"codex_worker/a.py": "from . import b\nb.name = 1\n",
-              "codex_worker/b.py": "name = 1\n"},
+            ({"teamster/a.py": "from . import b\nb.name = 1\n",
+              "teamster/b.py": "name = 1\n"},
              "a.py:2: module-attribute: b.name"),
-            ({"codex_worker/a.py": "from . import b\ndel b.name\n",
-              "codex_worker/b.py": "name = 1\n"},
+            ({"teamster/a.py": "from . import b\ndel b.name\n",
+              "teamster/b.py": "name = 1\n"},
              "a.py:2: module-attribute: b.name"),
-            ({"codex_worker/a.py": "from . import b\nb.name += 1\n",
-              "codex_worker/b.py": "name = 1\n"},
+            ({"teamster/a.py": "from . import b\nb.name += 1\n",
+              "teamster/b.py": "name = 1\n"},
              "a.py:2: module-attribute: b.name"),
-            ({"codex_worker/a.py": "from . import b\nb = object()\nb\n",
-              "codex_worker/b.py": ""},
+            ({"teamster/a.py": "from . import b\nb = object()\nb\n",
+              "teamster/b.py": ""},
              "a.py:2: module-alias-shadowed: b"),
-            ({"codex_worker/a.py": "from . import b\ndef f(b):\n    return b.x\nb\n",
-              "codex_worker/b.py": "x = 1\n"},
+            ({"teamster/a.py": "from . import b\ndef f(b):\n    return b.x\nb\n",
+              "teamster/b.py": "x = 1\n"},
              "a.py:2: module-alias-shadowed: b"),
-            ({"codex_worker/a.py": "from . import b\nvalues = [b for b in ()]\nb\n",
-              "codex_worker/b.py": ""},
+            ({"teamster/a.py": "from . import b\nvalues = [b for b in ()]\nb\n",
+              "teamster/b.py": ""},
              "a.py:2: module-alias-shadowed: b"),
-            ({"codex_worker/a.py": "def f():\n    from . import b\n",
-              "codex_worker/b.py": ""},
+            ({"teamster/a.py": "def f():\n    from . import b\n",
+              "teamster/b.py": ""},
              "a.py:2: module-import-top"),
-            ({"codex_worker/a.py": "from . import b\nclass Example:\n    value = b.missing\n",
-              "codex_worker/b.py": ""},
+            ({"teamster/a.py": "from . import b\nclass Example:\n    value = b.missing\n",
+              "teamster/b.py": ""},
              "a.py:3: module-attribute: b.missing"),
-            ({"codex_worker/a.py": "from . import b\ndef f():\n    return b.missing\n",
-              "codex_worker/b.py": ""},
+            ({"teamster/a.py": "from . import b\ndef f():\n    return b.missing\n",
+              "teamster/b.py": ""},
              "a.py:3: module-attribute: b.missing"),
         )
         for files, expected in mutants:
@@ -618,14 +618,14 @@ class ModuleLayoutTests(unittest.TestCase):
             ("class Example:\n    first: int\n    second: missing\n", 3),
         ):
             with self.subTest(source=source):
-                findings = self.check_tree({"codex_worker/a.py": source})
+                findings = self.check_tree({"teamster/a.py": source})
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:%s: undefined-global: missing" % line, findings[0])
 
     def test_package_config_can_anchor_paths(self):
         self.assertEqual(self.check_tree({
-            "codex_worker/__main__.py": "entry_path = __file__\n",
-            "codex_worker/config.py": "config_path = __file__\n",
+            "teamster/__main__.py": "entry_path = __file__\n",
+            "teamster/config.py": "config_path = __file__\n",
         }), [])
 
     def test_class_comprehension_bodies_skip_class_bindings(self):
@@ -640,7 +640,7 @@ class ModuleLayoutTests(unittest.TestCase):
         ):
             with self.subTest(expression=expression):
                 source = "class Example:\n    missing = (1,)\n    values = %s\n" % expression
-                findings = self.check_tree({"codex_worker/a.py": source})
+                findings = self.check_tree({"teamster/a.py": source})
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:3: undefined-global: missing", findings[0])
 
@@ -653,7 +653,7 @@ class ModuleLayoutTests(unittest.TestCase):
             "def outer():\n    value = 1\n    class Example:\n        value = 2\n        values = [value for item in (0,)]\n    return Example\nouter()\n",
         ):
             with self.subTest(source=source):
-                self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+                self.assertEqual(self.check_tree({"teamster/a.py": source}), [])
 
     def test_class_local_reads_before_binding_fall_back_to_globals(self):
         for source, line, name in (
@@ -673,7 +673,7 @@ class ModuleLayoutTests(unittest.TestCase):
             with self.subTest(source=source):
                 with self.assertRaises(NameError):
                     exec(source, {})
-                findings = self.check_tree({"codex_worker/a.py": source})
+                findings = self.check_tree({"teamster/a.py": source})
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:%s: undefined-global: %s" % (line, name), findings[0])
 
@@ -697,56 +697,56 @@ class ModuleLayoutTests(unittest.TestCase):
         ):
             with self.subTest(source=source):
                 exec(source, {})
-                self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+                self.assertEqual(self.check_tree({"teamster/a.py": source}), [])
 
     def test_version_specific_class_namespace_setup(self):
         source = "class Example:\n    value: int\n    __annotations__ = __annotations__\n"
         if sys.version_info < (3, 14):
             exec(source, {})
-            self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+            self.assertEqual(self.check_tree({"teamster/a.py": source}), [])
         else:
             with self.assertRaises(NameError):
                 exec(source, {})
-            findings = self.check_tree({"codex_worker/a.py": source})
+            findings = self.check_tree({"teamster/a.py": source})
             self.assertEqual(len(findings), 1, findings)
             self.assertIn("a.py:3: undefined-global: __annotations__", findings[0])
         if sys.version_info >= (3, 13):
             source = "class Example:\n    __firstlineno__ = __firstlineno__\n"
             exec(source, {})
-            self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+            self.assertEqual(self.check_tree({"teamster/a.py": source}), [])
 
     def test_private_class_global_has_its_read_line(self):
         findings = self.check_tree({
-            "codex_worker/a.py": "class Example:\n    def method(self):\n        return __missing\n",
+            "teamster/a.py": "class Example:\n    def method(self):\n        return __missing\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:3: undefined-global: _Example__missing", findings[0])
 
     def test_entrypoint_imports_are_own_imports(self):
         findings = self.check_tree({
-            "codex_task.py": "value = 1\n",
-            "codex_worker/a.py": "from codex_task import value\nvalue\n",
+            "worker_entry.py": "value = 1\n",
+            "teamster/a.py": "from worker_entry import value\nvalue\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: module-import-only", findings[0])
         findings = self.check_tree({
-            "codex_task.py": "import codex_worker.a as worker\n",
-            "codex_worker/a.py": "import codex_task as entry\nentry\n",
+            "worker_entry.py": "import teamster.a as worker\n",
+            "teamster/a.py": "import worker_entry as entry\nentry\n",
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: acyclic-imports", findings[0])
 
     def test_package_entrypoint_and_standalone_helpers(self):
         self.assertEqual(self.check_tree({
-            "codex_worker/__main__.py": "from codex_worker import a, b\nif __name__ == '__main__':\n    a.run()\n",
-            "codex_worker/a.py": "def run():\n    pass\n",
-            "codex_worker/b.py": "name = 1\n",
-            "codex_worker/rollout.py": "import json\nvalue = __file__\n",
+            "teamster/__main__.py": "from teamster import a, b\nif __name__ == '__main__':\n    a.run()\n",
+            "teamster/a.py": "def run():\n    pass\n",
+            "teamster/b.py": "name = 1\n",
+            "teamster/rollout.py": "import json\nvalue = __file__\n",
         }), [])
         findings = self.check_tree({
-            "codex_worker/a.py": "name = 1\n",
-            "codex_worker/codex_stats.py": "from codex_worker import a\n",
-            "codex_worker/task_report.py": "from . import a\n",
+            "teamster/a.py": "name = 1\n",
+            "teamster/codex_stats.py": "from teamster import a\n",
+            "teamster/task_report.py": "from . import a\n",
         })
         self.assertEqual(len(findings), 2, findings)
         self.assertIn("codex_stats.py:1: standalone-import", findings[0])
@@ -754,23 +754,23 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_known_module_import_forms_pass(self):
         self.assertEqual(self.check_tree({
-            "codex_task.py": "import codex_worker.a as worker\n",
-            "codex_worker/a.py": "from codex_worker import b\nb\n",
-            "codex_worker/b.py": "import codex_worker.c as other\nother\n",
-            "codex_worker/c.py": "name = 1\n",
+            "worker_entry.py": "import teamster.a as worker\n",
+            "teamster/a.py": "from teamster import b\nb\n",
+            "teamster/b.py": "import teamster.c as other\nother\n",
+            "teamster/c.py": "name = 1\n",
         }), [])
         self.assertEqual(self.check_tree({
-            "codex_worker/a.py": "import codex_worker.b\nvalue = codex_worker.b.name\n",
-            "codex_worker/__init__.py": "from . import b\nb\n",
-            "codex_worker/b.py": "name = 1\n",
+            "teamster/a.py": "import teamster.b\nvalue = teamster.b.name\n",
+            "teamster/__init__.py": "from . import b\nb\n",
+            "teamster/b.py": "name = 1\n",
         }), [])
-        findings = self.check_tree({"codex_worker/a.py": "from . import missing\nmissing\n"})
+        findings = self.check_tree({"teamster/a.py": "from . import missing\nmissing\n"})
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: module-import-only: unknown own module", findings[0])
 
     def test_control_flow_targets_are_module_bindings(self):
         self.assertEqual(self.check_tree({
-            "codex_task.py": ("for item in ():\n    pass\n"
+            "worker_entry.py": ("for item in ():\n    pass\n"
                               "with open('unused') as stream:\n    pass\n"
                               "try:\n    pass\nexcept Exception as error:\n    pass\n"
                               "def function():\n    return item, stream, error\n"),
@@ -778,8 +778,8 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_clean_module_import_passes(self):
         findings = self.check_tree({
-            "codex_worker/a.py": "from . import b\nvalue = b.name\n",
-            "codex_worker/b.py": "name = 1\n",
+            "teamster/a.py": "from . import b\nvalue = b.name\n",
+            "teamster/b.py": "name = 1\n",
         })
         self.assertEqual(findings, [])
 
@@ -797,7 +797,7 @@ class ModuleLayoutTests(unittest.TestCase):
             ("from . import b\n", 1, "b"),
         ):
             with self.subTest(source=source):
-                findings = self.check_tree({"codex_worker/a.py": source, "codex_worker/b.py": ""})
+                findings = self.check_tree({"teamster/a.py": source, "teamster/b.py": ""})
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:%s: unused-import: %s" % (line, name), findings[0])
 
@@ -812,36 +812,36 @@ class ModuleLayoutTests(unittest.TestCase):
             "def function():\n    import math\n",
         ):
             with self.subTest(source=source):
-                self.assertEqual(self.check_tree({"codex_worker/a.py": source}), [])
+                self.assertEqual(self.check_tree({"teamster/a.py": source}), [])
 
     def test_only_entrypoint_package_module_imports_are_reexports(self):
         self.assertEqual(self.check_tree({
-            "codex_task.py": "from codex_worker import a\n",
-            "codex_worker/a.py": "",
+            "worker_entry.py": "from teamster import a\n",
+            "teamster/a.py": "",
         }), [])
-        findings = self.check_tree({"codex_task.py": "import math\n"})
+        findings = self.check_tree({"worker_entry.py": "import math\n"})
         self.assertEqual(len(findings), 1, findings)
-        self.assertIn("codex_task.py:1: unused-import: math", findings[0])
+        self.assertIn("worker_entry.py:1: unused-import: math", findings[0])
 
     def test_module_attribute_import_forms_and_nested_reads(self):
         for statement, alias in (
             ("from . import b", "b"),
             ("from . import b as other", "other"),
-            ("from codex_worker import b", "b"),
-            ("from codex_worker import b as other", "other"),
-            ("import codex_worker.b as other", "other"),
+            ("from teamster import b", "b"),
+            ("from teamster import b as other", "other"),
+            ("import teamster.b as other", "other"),
         ):
             with self.subTest(statement=statement):
                 findings = self.check_tree({
-                    "codex_worker/a.py": statement + "\ndef outer():\n    def inner():\n        return " + alias + ".missing\n    return inner\n",
-                    "codex_worker/b.py": "name = 1\n",
+                    "teamster/a.py": statement + "\ndef outer():\n    def inner():\n        return " + alias + ".missing\n    return inner\n",
+                    "teamster/b.py": "name = 1\n",
                 })
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:4: module-attribute: " + alias + ".missing", findings[0])
 
     def test_module_attributes_and_content_mutation_pass(self):
         self.assertEqual(self.check_tree({
-            "codex_worker/a.py": ("from . import b\n"
+            "teamster/a.py": ("from . import b\n"
                                   "value = b.name\n"
                                   "b.holder['key'] = 1\n"
                                   "del b.holder['key']\n"
@@ -850,7 +850,7 @@ class ModuleLayoutTests(unittest.TestCase):
                                   "    def inner():\n"
                                   "        return b.name\n"
                                   "    return inner\n"),
-            "codex_worker/b.py": "import math\nname = math.pi\nholder = {}\n",
+            "teamster/b.py": "import math\nname = math.pi\nholder = {}\n",
         }), [])
 
     def test_module_aliases_cannot_be_bound_in_any_scope(self):
@@ -885,14 +885,14 @@ class ModuleLayoutTests(unittest.TestCase):
             ("import json as b\n", 2),
             ("from json import loads as b\n", 2),
             ("from . import b\n", 2),
-            ("from codex_worker import b\n", 2),
-            ("import codex_worker.b as b\n", 2),
+            ("from teamster import b\n", 2),
+            ("import teamster.b as b\n", 2),
             ("del b\n", 2),
         ):
             with self.subTest(statement=statement):
                 findings = self.check_tree({
-                    "codex_worker/a.py": "from . import b\n" + statement + "b\n",
-                    "codex_worker/b.py": "",
+                    "teamster/a.py": "from . import b\n" + statement + "b\n",
+                    "teamster/b.py": "",
                 })
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:%s: module-alias-shadowed: b" % line, findings[0])
@@ -900,14 +900,14 @@ class ModuleLayoutTests(unittest.TestCase):
     def test_own_imports_are_confined_to_module_scope(self):
         for source in (
             "def function():\n    from . import b\n",
-            "async def function():\n    import codex_worker.b as b\n",
-            "class Example:\n    from codex_worker import b\n",
+            "async def function():\n    import teamster.b as b\n",
+            "class Example:\n    from teamster import b\n",
             "def function():\n    if True:\n        from . import b\n",
         ):
             with self.subTest(source=source):
                 findings = self.check_tree({
-                    "codex_worker/a.py": source,
-                    "codex_worker/b.py": "",
+                    "teamster/a.py": source,
+                    "teamster/b.py": "",
                 })
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("module-import-top", findings[0])
@@ -918,14 +918,14 @@ class ModuleLayoutTests(unittest.TestCase):
         ):
             with self.subTest(source=source):
                 self.assertEqual(self.check_tree({
-                    "codex_worker/a.py": source,
-                    "codex_worker/b.py": "name = 1\n",
+                    "teamster/a.py": source,
+                    "teamster/b.py": "name = 1\n",
                 }), [])
 
     def test_late_binding_cannot_hide_a_module_attribute(self):
         findings = self.check_tree({
-            "codex_worker/a.py": "from . import b\ndef function():\n    return b.missing\nb = object()\n",
-            "codex_worker/b.py": "",
+            "teamster/a.py": "from . import b\ndef function():\n    return b.missing\nb = object()\n",
+            "teamster/b.py": "",
         })
         self.assertEqual(len(findings), 2, findings)
         self.assertTrue(any("a.py:4: module-alias-shadowed: b" in item for item in findings), findings)
@@ -936,8 +936,8 @@ class ModuleLayoutTests(unittest.TestCase):
         for pattern in ("b", "[*b]", "{'key': value, **b}"):
             with self.subTest(pattern=pattern):
                 findings = self.check_tree({
-                    "codex_worker/a.py": "from . import b\nmatch ():\n    case " + pattern + ":\n        pass\nb\n",
-                    "codex_worker/b.py": "",
+                    "teamster/a.py": "from . import b\nmatch ():\n    case " + pattern + ":\n        pass\nb\n",
+                    "teamster/b.py": "",
                 })
                 self.assertEqual(len(findings), 1, findings)
                 self.assertIn("a.py:3: module-alias-shadowed: b", findings[0])

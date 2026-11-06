@@ -1,6 +1,6 @@
 # Board data contract (v1)
 
-The board is a read-only, local web view of codex-worker tasks and Claude Code sessions from the Claude
+The board is a read-only, local web view of teamster tasks and Claude Code sessions from the Claude
 desktop app. The server reads existing files and pushes changes over a WebSocket. It never starts,
 stops or changes work, and never writes under either source's home.
 
@@ -13,10 +13,10 @@ stops or changes work, and never writes under either source's home.
   (legacy: `claude-tasks/.archive/`). Each holds `state.json` and, when present, `brief.md`,
   `last.md`, `review.md`, `check.log`.
 - Live activity: `events.jsonl` (Codex executor, `codex exec --json` lines) and `claude-events.jsonl` (Claude
-  executor, `claude --output-format stream-json` lines; written by codex-worker 1.47+). Either may be missing.
+  executor, `claude --output-format stream-json` lines; written by teamster 1.47+). Either may be missing.
 - Accounts: `python3 -I <script> accounts --json` (never `--refresh`), at most once per
-  `BOARD_ACCOUNTS_SECONDS` (default 300). The script path comes from `BOARD_CODEX_TASK` and defaults to this
-  repository's `src/codex_worker/__main__.py`.
+  `BOARD_ACCOUNTS_SECONDS` (default 300). The script path comes from `BOARD_TEAMSTER_COMMAND`, then `BOARD_CODEX_TASK` and defaults to this
+  repository's `src/teamster/__main__.py`.
 - Machines: `$BOARD_MACHINES_FILE` (default `board-machines.json` in the task home), with local or SSH
   probes every `BOARD_MACHINES_SECONDS` (default 30). The configuration and probe are described below.
 - Desktop sessions: `$BOARD_CLAUDE_DESKTOP_DIR/claude-code-sessions/*/*/local_*.json` (default desktop
@@ -312,7 +312,7 @@ the current frontend selects known snapshot fields and ignores unknown WebSocket
 
 ## Serving and safety
 
-- `codex-worker-board [--host 127.0.0.1] [--port 8787]` binds to `127.0.0.1` by default.
+- `teamster-board [--host 127.0.0.1] [--port 8787]` binds to `127.0.0.1` by default.
 - Requests whose `Host` header is not `localhost`, `127.0.0.1` or `[::1]` (with any port) get 403, and so do
   WebSocket upgrades whose `Origin` is present and not one of those hosts — DNS-rebinding protection.
 - When `board/web/dist/` exists, `/` serves it (SPA fallback to `index.html`); otherwise `/` returns a short
