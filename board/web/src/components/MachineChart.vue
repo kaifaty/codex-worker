@@ -40,7 +40,7 @@ const hoverY = computed(() =>
     <p v-else-if="data.empty" class="c-note">за час данных нет</p>
     <template v-else>
       <div class="plot" @pointermove="onMove" @pointerleave="hover = null">
-        <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" role="img" :aria-label="`${title} за час, ${staleAge ?? "сейчас"} ${percent(data.current)}`">
+        <svg :viewBox="`0 0 ${W} ${H}`" preserveAspectRatio="none" role="img" :aria-label="`${title} за час, ${staleAge ?? 'сейчас'} ${percent(data.current)}`">
           <line class="grid" x1="0" :x2="W" y1="0" y2="0" vector-effect="non-scaling-stroke" />
           <line class="grid base" x1="0" :x2="W" :y1="H" :y2="H" vector-effect="non-scaling-stroke" />
           <path class="line" :d="path" vector-effect="non-scaling-stroke" />
