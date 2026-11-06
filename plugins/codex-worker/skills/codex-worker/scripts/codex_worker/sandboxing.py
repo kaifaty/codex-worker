@@ -57,7 +57,7 @@ def rules_path(cfg=None):
         return override
     cfg = config.accounts_config() if cfg is None else cfg
     filename = "rules.ru.md" if cfg.get("language", "en") == "ru" else "rules.md"
-    return config.SKILL / "references" / filename
+    return config.PACKAGE.resolve() / filename
 
 
 def rules_text(cfg=None, no_push=False):

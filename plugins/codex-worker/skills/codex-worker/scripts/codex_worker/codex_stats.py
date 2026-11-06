@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Per-turn cost of a Codex thread, read from its rollout file.
 
-Usage: codex-stats.py <thread-id | rollout.jsonl> [--json]
+Usage: codex_stats.py <thread-id | rollout.jsonl> [--json]
 
 For every turn: reasoning effort, wall time, tokens (input, cached, uncached, output, reasoning),
 tool calls and the weekly limit's used percent at the start and end (or the longest reported

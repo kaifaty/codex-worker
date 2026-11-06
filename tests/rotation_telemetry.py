@@ -1175,7 +1175,7 @@ worker['telemetry_log'].PhaseTelemetry(state, 'work').finish(outcome='completed'
         entries = state["threads"] + state["reviews"]
         homes = {"main": self.home, "second": self.other}
         worker = self.worker()
-        self.assertEqual(worker.config.STATS, SCRIPT.with_name("codex-stats.py"))
+        self.assertEqual(worker.config.STATS, SCRIPT.parent / "codex_worker/codex_stats.py")
         with mock.patch.object(worker.commands.subprocess, "run") as run, mock.patch("builtins.print") as printer:
             worker.commands.cmd_stats(SimpleNamespace(slug="all-threads"))
         files = []

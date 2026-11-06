@@ -1,7 +1,9 @@
 """Guard the module boundaries before and during the worker package split."""
 import ast
 import builtins
+import json
 from pathlib import Path
+import re
 import symtable
 import sys
 import tempfile
@@ -11,6 +13,9 @@ import unittest
 SCRIPTS = (Path(__file__).resolve().parents[1]
            / "plugins/codex-worker/skills/codex-worker/scripts")
 PACKAGE_FILE_ALLOWLIST = {"codex_worker/config.py"}
+ENTRYPOINTS = {"codex_task", "codex_worker.__main__"}
+# Standalone helpers run by path and never import the package.
+STANDALONE = {"codex_stats.py", "rollout.py", "task_report.py"}
 
 
 class _Bindings(ast.NodeVisitor):
@@ -345,13 +350,22 @@ def _file_bindings(tree):
 
 def check_layout(scripts):
     """Return file:line diagnostics for the entrypoint and its own package."""
-    paths = [scripts / "codex_task.py"] + sorted((scripts / "codex_worker").glob("*.py"))
+    paths = [scripts / "codex_task.py"] + sorted(path for path in (scripts / "codex_worker").glob("*.py")
+                                                  if path.name not in STANDALONE)
     modules = {}
     for path in paths:
         module = ("codex_task" if path.parent == scripts else
                   "codex_worker" if path.stem == "__init__" else "codex_worker." + path.stem)
         modules[module] = path
     findings = []
+    for path in sorted((scripts / "codex_worker").glob("*.py")):
+        if path.name in STANDALONE:
+            for node, _ in _imports(ast.parse(path.read_text(encoding="utf-8"), filename=str(path))):
+                names = ([node.module or ""] if isinstance(node, ast.ImportFrom)
+                         else [alias.name for alias in node.names])
+                if (isinstance(node, ast.ImportFrom) and node.level) or any(
+                        name.split(".")[0] in {"codex_task", "codex_worker"} for name in names):
+                    findings.append("%s:%s: standalone-import: %s" % (path, node.lineno, path.name))
     definitions = {}
     edges = {module: [] for module in modules}
     analyses = {}
@@ -387,7 +401,7 @@ def check_layout(scripts):
                 internal = bool(imports)
             for alias in node.names:
                 # The entrypoint exposes package modules for callers and tests.
-                reexport = (module == "codex_task" and any(
+                reexport = (module in ENTRYPOINTS and any(
                     alias is own_alias and target in modules
                     and target.startswith("codex_worker.")
                     for own_alias, target in imports or []))
@@ -492,6 +506,13 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_production_module_layout(self):
         self.assertEqual(check_layout(SCRIPTS), [])
+
+    def test_package_version_matches_plugin(self):
+        root = Path(__file__).resolve().parents[1]
+        project = (root / "pyproject.toml").read_text(encoding="utf-8")
+        versions = re.findall(r'^version = "([^"]+)"$', project, re.MULTILINE)
+        plugin = json.loads((root / "plugins/codex-worker/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
+        self.assertEqual(versions, [plugin["version"]], "pyproject.toml and plugin.json versions differ")
 
     def test_each_mutant_is_rejected(self):
         mutants = (
@@ -682,6 +703,22 @@ class ModuleLayoutTests(unittest.TestCase):
         })
         self.assertEqual(len(findings), 1, findings)
         self.assertIn("a.py:1: acyclic-imports", findings[0])
+
+    def test_package_entrypoint_and_standalone_helpers(self):
+        self.assertEqual(self.check_tree({
+            "codex_worker/__main__.py": "from codex_worker import a, b\nif __name__ == '__main__':\n    a.run()\n",
+            "codex_worker/a.py": "def run():\n    pass\n",
+            "codex_worker/b.py": "name = 1\n",
+            "codex_worker/rollout.py": "import json\nvalue = __file__\n",
+        }), [])
+        findings = self.check_tree({
+            "codex_worker/a.py": "name = 1\n",
+            "codex_worker/codex_stats.py": "from codex_worker import a\n",
+            "codex_worker/task_report.py": "from . import a\n",
+        })
+        self.assertEqual(len(findings), 2, findings)
+        self.assertIn("codex_stats.py:1: standalone-import", findings[0])
+        self.assertIn("task_report.py:1: standalone-import", findings[1])
 
     def test_known_module_import_forms_pass(self):
         self.assertEqual(self.check_tree({

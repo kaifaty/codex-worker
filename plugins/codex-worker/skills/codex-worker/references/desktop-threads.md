@@ -5,7 +5,7 @@ For a thread the user runs in the Codex app (not started by this skill), the app
 
 - Read it: `~/.codex/sessions/YYYY/MM/DD/rollout-*-<thread-id>.jsonl`; messages have
   `payload.type == "message"` and role user/assistant. Use
-  `python3 -I "${CLAUDE_SKILL_DIR}/scripts/codex-stats.py" <thread-id>` for cost.
+  `python3 -I "${CLAUDE_SKILL_DIR}/scripts/codex_worker/codex_stats.py" <thread-id>` for cost.
 - Send to it: `codex queue --thread <thread-id> --message "…"` with a CLI that supports `queue`.
   On macOS the bundled CLI is at
   `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`.

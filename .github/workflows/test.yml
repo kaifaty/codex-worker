@@ -19,3 +19,4 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python tests/test_rotation.py
+      - run: python tests/package_smoke.py

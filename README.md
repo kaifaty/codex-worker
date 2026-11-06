@@ -66,6 +66,19 @@ cp -R codex-worker/plugins/codex-worker/skills/codex-worker ~/.claude/skills/
 The manually installed skill is invoked as `/codex-worker`. Keep its `scripts/` and `references/`
 directories beside `SKILL.md`.
 
+### Command without Claude Code
+
+The plugin remains the main way to use codex-worker. To run the CLI without Claude Code, install the
+`codex-worker` command:
+
+```sh
+uv tool install git+https://github.com/kaifaty/codex-worker
+codex-worker --help
+```
+
+`codex-worker <command>` replaces `python3 -I "$T" <command>`. Leads other than Claude Code have not
+been verified yet.
+
 ## Other leads
 
 Another agent or a human can read the [lead guide](plugins/codex-worker/skills/codex-worker/references/lead-guide.md)
@@ -304,7 +317,7 @@ A minimal configuration is:
 A settings file containing only language or other preferences does **not** enable automatic account
 monitoring or rotation. The `accounts` command remains available to inspect the current login.
 
-English standing rules are in `references/rules.md`; Russian rules are in `references/rules.ru.md`.
+English standing rules are in `scripts/codex_worker/rules.md`; Russian rules are in `scripts/codex_worker/rules.ru.md`.
 If `~/.codex/codex-worker-rules.md` exists, it replaces both. Use this file for other languages or your
 own working rules. The worker substitutes `{branch}` and `{base}` in the selected rules.
 Scouts use their own read-only instructions instead of these task rules. Account status labels are
@@ -487,7 +500,7 @@ other notify hooks.
 ```sh
 SCRIPTS="$HOME/.claude/skills/codex-worker/scripts"
 python3 -I "$SCRIPTS/wait-turn.py" <thread-id>
-python3 -I "$SCRIPTS/codex-stats.py" <thread-id>
+python3 -I "$SCRIPTS/codex_worker/codex_stats.py" <thread-id>
 ```
 
 Run `wait-turn.py` in the background from Claude Code. Desktop threads belong to the app; the worker's
@@ -526,6 +539,10 @@ Passing test names keeps the usual unittest behavior, for example:
 ```sh
 python3 -I tests/test_rotation.py RotationTests.test_mid_turn_rotation_preserves_work_and_followups
 ```
+
+`python3 -I tests/package_smoke.py` installs the package into a temporary virtual environment and runs
+a task through the installed `codex-worker` command with a fake Codex. It needs network access to fetch
+the build backend, so it is not part of `test_rotation.py`.
 
 ## License
 

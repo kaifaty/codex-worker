@@ -84,7 +84,7 @@ Before `start`, check that every "Done when" item can be reached within "Do not 
 
 ## Commands
 
-Set `T` to the path to `scripts/codex_task.py` in your installation.
+Set `T` to the path to `scripts/codex_task.py` in your installation, or run the installed `codex-worker` command in place of `python3 -I "$T"`.
 
 If a command prints a codex-worker version warning, set `T` again using the path shown in the warning.
 

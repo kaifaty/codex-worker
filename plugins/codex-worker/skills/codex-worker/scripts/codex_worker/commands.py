@@ -106,7 +106,7 @@ def cmd_start(a):
     account = executor.account(st)
     cursor = executor.cursor_label + " " + (executor.cursor(st) or "?")
     print(f"started {a.slug}: executor {executor.name}, account {account or '?'}, {cursor}, pid {st.get('pid')}\n  worktree {wt}\n  branch {branch}")
-    print(f"  wait: {config.SCRIPT} wait {a.slug}   (run it as a background command)")
+    print(f"  wait: {config.COMMAND} wait {a.slug}   (run it as a background command)")
 
 
 def require_idle(st):
@@ -144,7 +144,7 @@ def cmd_scout(a):
             break
         time.sleep(0.1)
     print(f"started scout {a.slug}: account {st['account']}, thread {st['thread'] or '?'}, pid {st.get('pid')}\n  directory {directory}")
-    print(f"  wait: {config.SCRIPT} wait {a.slug}   (run it as a background command)")
+    print(f"  wait: {config.COMMAND} wait {a.slug}   (run it as a background command)")
 
 
 def cmd_say(a):
@@ -574,9 +574,14 @@ def duty_launchd_plist(minutes):
         if os.environ.get(key):
             environment[key] = os.environ[key]
     log = str(config.CODEX_HOME / "duty-launchd.log")
+    if config.PLUGIN_LAYOUT:
+        program = ["/usr/bin/env", "python3", "-I", "-c", DUTY_LAUNCHER, str(config.PLUGIN.parent),
+                   str(config.SCRIPT_RESOLVED.relative_to(config.PLUGIN)), str(config.SCRIPT_RESOLVED)]
+    else:
+        # An installed package runs its own interpreter and entrypoint directly.
+        program = [sys.executable, "-I", str(config.SCRIPT_RESOLVED), "duty", "tick"]
     return {"Label": DUTY_LAUNCHD_LABEL,
-            "ProgramArguments": ["/usr/bin/env", "python3", "-I", "-c", DUTY_LAUNCHER, str(config.PLUGIN.parent),
-                                 str(config.SCRIPT_RESOLVED.relative_to(config.PLUGIN)), str(config.SCRIPT_RESOLVED)],
+            "ProgramArguments": program,
             "StartInterval": minutes * 60, "RunAtLoad": True, "EnvironmentVariables": environment,
             "StandardOutPath": log, "StandardErrorPath": log}
 
