@@ -1532,9 +1532,9 @@
           },
           {
             "at": 1793999996,
-            "load_percent": 114.8,
-            "memory_percent": 88.4,
-            "gpu_percent": 61.0
+            "load_percent": 163.3,
+            "memory_percent": 92.8,
+            "gpu_percent": 86
           }
         ]
       },
@@ -2323,9 +2323,9 @@
           },
           {
             "at": 1793999989,
-            "load_percent": 13.4,
-            "memory_percent": 15.5,
-            "gpu_percent": 12.7
+            "load_percent": 9.7,
+            "memory_percent": 14.5,
+            "gpu_percent": 6
           }
         ]
       },
@@ -3107,9 +3107,9 @@
           },
           {
             "at": 1793999993,
-            "load_percent": 31.5,
-            "memory_percent": 56.6,
-            "gpu_percent": 21.0
+            "load_percent": 38.8,
+            "memory_percent": 54.1,
+            "gpu_percent": 38
           }
         ]
       },

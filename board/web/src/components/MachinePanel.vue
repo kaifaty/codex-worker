@@ -107,20 +107,18 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
         <p v-if="!metrics" class="note">Метрик ещё не было.</p>
 
         <div v-if="metrics" class="sections" :class="{ dim: shown.status === 'offline' }">
-          <section v-if="metrics.cpu" class="sec">
-            <h3>Процессор</h3>
-            <div class="meter" :title="cpuMeter(metrics.cpu).title">
+          <section v-if="metrics.cpu || metrics.memory" class="sec">
+            <h3>Процессор и память</h3>
+            <div v-if="metrics.cpu" class="meter labelled" :title="cpuMeter(metrics.cpu).title">
+              <span class="m-label">CPU</span>
               <span class="bar" aria-hidden="true"><span :class="cpuMeter(metrics.cpu).level" :style="{ width: `${cpuMeter(metrics.cpu).percent}%` }"></span></span>
               <span class="num">{{ cpuMeter(metrics.cpu).value }}</span>
             </div>
-            <p class="sub num">
-              {{ metrics.cpu.cores }} ядер · за 1 мин {{ formatNumber(metrics.cpu.load1) }} · за 5 мин {{ formatNumber(metrics.cpu.load5) }}
+            <p v-if="metrics.cpu" class="sub num indent">
+              {{ metrics.cpu.cores }} ядер · нагрузка за 1 мин {{ formatNumber(metrics.cpu.load1) }}, за 5 мин {{ formatNumber(metrics.cpu.load5) }}
             </p>
-          </section>
-
-          <section v-if="metrics.memory" class="sec">
-            <h3>Память</h3>
-            <div class="meter" :title="memoryMeter(metrics.memory).title">
+            <div v-if="metrics.memory" class="meter labelled" :title="memoryMeter(metrics.memory).title">
+              <span class="m-label">Память</span>
               <span class="bar" aria-hidden="true"><span :class="memoryMeter(metrics.memory).level" :style="{ width: `${memoryMeter(metrics.memory).percent}%` }"></span></span>
               <span class="num">свободно {{ memoryMeter(metrics.memory).value }}</span>
             </div>
@@ -135,7 +133,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
                 <span class="bar" aria-hidden="true"><span :class="meter.level" :style="{ width: `${meter.percent}%` }"></span></span>
                 <span class="num">{{ meter.key === "gpu" ? meter.value : `свободно ${meter.value}` }}</span>
               </div>
-              <p v-if="gpu.shared" class="sub">видеопамять общая с системной</p>
+              <p v-if="gpu.shared" class="sub indent">видеопамять общая с системной</p>
               <table v-if="gpu.processes.length" class="procs">
                 <caption class="visually-hidden">Процессы на {{ gpu.name }}</caption>
                 <tbody>
@@ -156,7 +154,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
               <span class="num">свободно {{ disk.value }}</span>
             </div>
           </section>
-          <p v-if="metrics.os" class="sub">ОС: {{ metrics.os }}</p>
+          <p v-if="metrics.os" class="sub os">ОС: {{ metrics.os }}</p>
         </div>
 
         <section class="sec">
@@ -167,7 +165,7 @@ onBeforeUnmount(() => window.removeEventListener("keydown", onKey));
         </section>
 
         <section v-if="shown.host" class="host" aria-labelledby="host-title">
-          <h3 id="host-title">Хост {{ shown.host.name }}</h3>
+          <h3 id="host-title">Хост <span class="host-name">{{ shown.host.name }}</span></h3>
           <p class="sub">Машина, на которой работает эта; на статус не влияет.</p>
           <p v-if="shown.host.error" class="sub warn-text"><span aria-hidden="true">⚠</span> {{ errorLabel(shown.host.error) }}</p>
           <div v-if="shown.host.cpu" class="meter labelled" :title="cpuMeter(shown.host.cpu).title">
@@ -307,14 +305,24 @@ h3 {
 
 .meter {
   display: grid;
-  grid-template-columns: minmax(60px, 1fr) max-content;
+  grid-template-columns: 92px minmax(60px, 1fr) max-content;
   align-items: center;
   gap: 10px;
   min-height: 20px;
 }
 
-.meter.labelled {
-  grid-template-columns: 92px minmax(60px, 1fr) max-content;
+.sub.indent {
+  margin: 0 0 4px 102px;
+}
+
+.sub.os {
+  margin: 0 0 14px;
+}
+
+.host-name {
+  text-transform: none;
+  letter-spacing: 0;
+  color: var(--text);
 }
 
 .m-label {
@@ -358,8 +366,8 @@ h3 {
 }
 
 .procs {
-  width: 100%;
-  margin-top: 4px;
+  width: calc(100% - 102px);
+  margin: 4px 0 0 102px;
   border-collapse: collapse;
   table-layout: fixed;
 }

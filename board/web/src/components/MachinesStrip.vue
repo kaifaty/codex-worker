@@ -2,7 +2,7 @@
 import { computed } from "vue";
 import type { Machine, Machines } from "../types";
 import { formatFullTime } from "../lib/format";
-import { dataAge, errorLabel, freeSummary, statusLevel, statusText, tileMeters } from "../lib/machines";
+import { STATUS, dataAge, errorLabel, freeSummary, statusLevel, statusText, tileMeters } from "../lib/machines";
 
 const props = defineProps<{ machines: Machines | null; now: number; collapsed: boolean; selected: string | null }>();
 const emit = defineEmits<{ toggle: []; open: [id: string] }>();
@@ -34,6 +34,16 @@ const tiles = computed(() =>
         </button>
       </h2>
       <span v-if="items.length" class="faint num">{{ freeSummary(items) }}</span>
+      <!-- Collapsed: still one line that tells which machine is free. -->
+      <ul v-if="collapsed && items.length" class="mini">
+        <li v-for="tile in tiles" :key="tile.machine.id">
+          <button type="button" class="mini-btn" :class="tile.machine.status" :title="tile.status" @click="emit('open', tile.machine.id)">
+            <span class="t-status" :class="tile.level"><span class="dot" aria-hidden="true"></span></span>
+            <span class="ellipsis">{{ tile.machine.name }}</span>
+            <span class="mini-word" :class="tile.level">{{ STATUS[tile.machine.status] }}</span>
+          </button>
+        </li>
+      </ul>
       <p v-if="machines?.config_error" class="config faint" :title="machines.config_error">
         Конфиг машин не прочитан: {{ machines.config_error }}
       </p>
@@ -50,7 +60,7 @@ const tiles = computed(() =>
         >
           <span class="t-line">
             <span class="t-name ellipsis" :title="tile.machine.name">{{ tile.machine.name }}</span>
-            <span class="t-status ellipsis" :class="tile.level" :title="tile.status">
+            <span class="t-status" :class="tile.level">
               <span class="dot" aria-hidden="true"></span>{{ tile.status }}
             </span>
           </span>
@@ -135,6 +145,47 @@ const tiles = computed(() =>
   text-overflow: ellipsis;
 }
 
+.mini {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mini-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 220px;
+  padding: 0 7px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 18px;
+  cursor: pointer;
+}
+
+.mini-btn.offline,
+.mini-btn.unknown {
+  border-style: dashed;
+  color: var(--muted);
+}
+
+.mini-word {
+  flex: none;
+  color: var(--muted);
+}
+
+.mini-word.ok { color: var(--ok); }
+.mini-word.warn { color: var(--warn); }
+.mini-word.bad { color: var(--bad); }
+
 .tiles {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(205px, 1fr));
@@ -152,10 +203,10 @@ const tiles = computed(() =>
 .tile {
   display: grid;
   align-content: start;
-  gap: 2px;
+  gap: 1px;
   width: 100%;
   min-width: 0;
-  padding: 5px 8px 6px;
+  padding: 4px 8px 5px;
   border: 1px solid var(--border);
   border-radius: var(--radius);
   background: var(--surface);
@@ -190,10 +241,12 @@ const tiles = computed(() =>
   opacity: 0.6;
 }
 
+/* A long status ("перегружена: процессор, память, GPU") moves under the name instead of being cut. */
 .t-line {
   display: flex;
+  flex-wrap: wrap;
   align-items: baseline;
-  gap: 6px;
+  gap: 0 6px;
   min-width: 0;
   margin-bottom: 1px;
 }
@@ -204,13 +257,26 @@ const tiles = computed(() =>
 }
 
 .t-status {
-  flex: 1 1 0;
   display: inline-flex;
   align-items: center;
-  justify-content: flex-end;
   gap: 4px;
+  min-width: 0;
+  margin-left: auto;
   color: var(--muted);
   font-size: 11.5px;
+}
+
+.t-line .t-status {
+  display: block;
+  flex: 1 1 auto;
+  white-space: normal;
+  text-align: right;
+}
+
+.t-line .t-status .dot {
+  display: inline-block;
+  margin-right: 4px;
+  vertical-align: 0;
 }
 
 .t-status .dot {
@@ -235,7 +301,7 @@ const tiles = computed(() =>
   gap: 6px;
   min-width: 0;
   font-size: 11.5px;
-  line-height: 15px;
+  line-height: 14px;
 }
 
 .m-label {

@@ -34,6 +34,7 @@ const hoverY = computed(() =>
   <figure class="chart">
     <figcaption class="c-head">
       <span class="c-title">{{ title }}</span>
+      <span v-if="!data.collecting && !data.empty" class="c-scale num">шкала 0–{{ data.max }} %</span>
     </figcaption>
     <p v-if="data.collecting" class="c-note">история собирается</p>
     <p v-else-if="data.empty" class="c-note">за час данных нет</p>
@@ -51,7 +52,6 @@ const hoverY = computed(() =>
             {{ percent(hoverValue) }} · {{ formatAge(hover.at, now) }}
           </span>
         </template>
-        <span class="scale num">{{ data.max }} %</span>
       </div>
       <div class="c-axis">
         <span>час назад</span>
@@ -125,13 +125,9 @@ svg {
   stroke-linecap: round;
 }
 
-.scale {
-  position: absolute;
-  top: 1px;
-  left: 4px;
+.c-scale {
   color: var(--faint);
   font-size: 10.5px;
-  pointer-events: none;
 }
 
 .cross {

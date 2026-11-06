@@ -1035,9 +1035,9 @@
             },
             {
               "at": 1794000006,
-              "load_percent": 109.7,
-              "memory_percent": 88.4,
-              "gpu_percent": 59.9
+              "load_percent": 175.0,
+              "memory_percent": 92.8,
+              "gpu_percent": 86
             }
           ]
         },
@@ -1826,9 +1826,9 @@
             },
             {
               "at": 1793999999,
-              "load_percent": 11.0,
-              "memory_percent": 15.9,
-              "gpu_percent": 12.9
+              "load_percent": 10.8,
+              "memory_percent": 14.5,
+              "gpu_percent": 6
             }
           ]
         },
@@ -2610,9 +2610,9 @@
             },
             {
               "at": 1794000003,
-              "load_percent": 30.7,
-              "memory_percent": 56.3,
-              "gpu_percent": 17.9
+              "load_percent": 43.1,
+              "memory_percent": 54.1,
+              "gpu_percent": 38
             }
           ]
         },
@@ -4249,9 +4249,9 @@
             },
             {
               "at": 1794000013,
-              "load_percent": 115.9,
-              "memory_percent": 88.3,
-              "gpu_percent": 57.2
+              "load_percent": 168.3,
+              "memory_percent": 92.8,
+              "gpu_percent": 86
             }
           ]
         },
@@ -5040,9 +5040,9 @@
             },
             {
               "at": 1794000006,
-              "load_percent": 10.6,
-              "memory_percent": 16.1,
-              "gpu_percent": 12.1
+              "load_percent": 10.2,
+              "memory_percent": 14.5,
+              "gpu_percent": 6
             }
           ]
         },
@@ -5824,9 +5824,9 @@
             },
             {
               "at": 1794000010,
-              "load_percent": 34.9,
-              "memory_percent": 56.4,
-              "gpu_percent": 18.1
+              "load_percent": 40.6,
+              "memory_percent": 54.1,
+              "gpu_percent": 38
             }
           ]
         },
