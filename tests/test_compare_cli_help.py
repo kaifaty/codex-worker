@@ -57,7 +57,7 @@ class CompareCliHelpTests(unittest.TestCase):
         script.parent.mkdir(parents=True)
         script.write_text(SYNTHETIC_SCRIPT, encoding="utf-8")
         for arguments in (
-                ["init", "--quiet"], ["add", "plugins"],
+                ["init", "--quiet"], ["add", "src"],
                 ["-c", "core.hooksPath=/dev/null", "-c", "user.name=Test",
                  "-c", "user.email=test@example.com", "commit", "--quiet",
                  "--no-gpg-sign", "-m", "Add synthetic CLI"]):
@@ -113,7 +113,7 @@ class CompareCliHelpTests(unittest.TestCase):
                 script.write_text(source, encoding="utf-8")
                 status, output = self.compare_output(root)
                 self.assertEqual(status, 1)
-                self.assertIn("FAIL: codex_task.py beta --help", output)
+                self.assertIn("FAIL: codex-worker beta --help", output)
                 for text in expected:
                     self.assertIn(text, output)
 

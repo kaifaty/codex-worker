@@ -9,7 +9,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from rotation_support import PYTHON, SCRIPT, SKILL, RotationTestCase
+from rotation_support import PYTHON, SCRIPT, PACKAGE, RotationTestCase
 
 
 class ResultScoutConfigTests(RotationTestCase):
@@ -560,7 +560,7 @@ class ResultScoutConfigTests(RotationTestCase):
                     (self.home / "codex-worker.json").write_text('{"language":"ru"}')
                 cfg = worker.config.accounts_config()
                 self.assertEqual(cfg["language"], language)
-                expected = SKILL / "scripts/codex_worker" / ("rules.ru.md" if language == "ru" else "rules.md")
+                expected = PACKAGE / ("rules.ru.md" if language == "ru" else "rules.md")
                 self.assertEqual(worker.sandboxing.rules_path(), expected)
                 self.assertEqual(worker.sandboxing.rules_text(), expected.read_text())
                 prompt = worker.threads.handoff(st)
@@ -589,7 +589,7 @@ class ResultScoutConfigTests(RotationTestCase):
                     override.write_text("Custom instructions for {branch}, targeting {base}.\n")
                 else:
                     override.unlink(missing_ok=True)
-                rules = override if custom else SKILL / "scripts/codex_worker" / (
+                rules = override if custom else PACKAGE / (
                     "rules.ru.md" if language == "ru" else "rules.md")
                 self.assertEqual(worker.sandboxing.rules_path(), rules)
                 self.assertEqual(worker.sandboxing.rules_text(), rules.read_text())
@@ -618,7 +618,7 @@ class ResultScoutConfigTests(RotationTestCase):
         worker = self.worker()
         self.assertEqual(self.invocations()[1]["prompt"], worker.prompts.review_prompt(
             self.state("single-account"), worker.config.accounts_config()))
-        self.assertIn((SKILL / "scripts/codex_worker" / "rules.md").read_text().splitlines()[0],
+        self.assertIn((PACKAGE / "rules.md").read_text().splitlines()[0],
                       self.invocations()[0]["prompt"])
         self.notification("single-account", "turn_finished")
 
@@ -643,7 +643,7 @@ class ResultScoutConfigTests(RotationTestCase):
         self.assertEqual(execute.call_args.args[2]["CODEX_HOME"], str(self.other))
 
     def test_notify_logs_without_computer_use_and_chains_only_when_present(self):
-        hook = SCRIPT.with_name("turn-log.py")
+        hook = SCRIPT.with_name("turn_log.py")
         hook_home = self.root / "hook-home"
         client = (hook_home / ".codex" / "computer-use" / "Codex Computer Use.app" / "Contents" /
                   "SharedSupport" / "SkyComputerUseClient.app" / "Contents" / "MacOS" / "SkyComputerUseClient")
@@ -684,11 +684,11 @@ class ResultScoutConfigTests(RotationTestCase):
                     stream.write(json.dumps({"thread": thread, "last": last}) + "\n")
 
         with mock.patch.object(Path, "home", return_value=hook_home), \
-                mock.patch.object(sys, "argv", ["wait-turn.py", "desktop-thread"]), \
+                mock.patch.object(sys, "argv", ["wait_turn.py", "desktop-thread"]), \
                 mock.patch.object(time, "sleep", side_effect=finish_turn), \
                 mock.patch("builtins.print") as printer:
             with self.assertRaises(SystemExit) as error:
-                runpy.run_path(str(SCRIPT.with_name("wait-turn.py")), run_name="__main__")
+                runpy.run_path(str(SCRIPT.with_name("wait_turn.py")), run_name="__main__")
         self.assertEqual(error.exception.code, 0)
         printer.assert_called_once()
         self.assertIn("new turn", printer.call_args.args[0])
@@ -703,7 +703,7 @@ class ResultScoutConfigTests(RotationTestCase):
             {"timestamp": "2026-01-01T00:01:00Z", "type": "event_msg", "payload": {"type": "task_complete"}},
         ]
         rollout.write_text("\n".join(json.dumps(event) for event in events))
-        result = subprocess.run([PYTHON, "-I", str(SCRIPT.parent / "codex_worker/codex_stats.py"), str(rollout), "--json"],
+        result = subprocess.run([PYTHON, "-I", str(SCRIPT.parent / "codex_stats.py"), str(rollout), "--json"],
                                 text=True, capture_output=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         totals = json.loads(result.stdout)["totals"]
@@ -737,7 +737,7 @@ class ResultScoutConfigTests(RotationTestCase):
                      "payload": {"type": "task_complete"}},
                 ]
                 rollout.write_text("\n".join(json.dumps(event) for event in events))
-                command = [PYTHON, "-I", str(SCRIPT.parent / "codex_worker/codex_stats.py"), str(rollout)]
+                command = [PYTHON, "-I", str(SCRIPT.parent / "codex_stats.py"), str(rollout)]
                 result = subprocess.run(command + ["--json"], text=True, capture_output=True, timeout=5)
                 self.assertEqual(result.returncode, 0, result.stderr)
                 turn = json.loads(result.stdout)["turns"][0]

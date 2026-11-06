@@ -2,8 +2,10 @@
 import ast
 import builtins
 import json
+import os
 from pathlib import Path
 import re
+import subprocess
 import symtable
 import sys
 import tempfile
@@ -11,11 +13,11 @@ import unittest
 
 
 SCRIPTS = (Path(__file__).resolve().parents[1]
-           / "plugins/codex-worker/skills/codex-worker/scripts")
-PACKAGE_FILE_ALLOWLIST = {"codex_worker/config.py"}
+           / "src")
+PACKAGE_FILE_ALLOWLIST = {"codex_worker/config.py", "codex_worker/__main__.py"}
 ENTRYPOINTS = {"codex_task", "codex_worker.__main__"}
 # Standalone helpers run by path and never import the package.
-STANDALONE = {"codex_stats.py", "rollout.py", "task_report.py"}
+STANDALONE = {"codex_stats.py", "rollout.py", "task_report.py", "turn_log.py", "wait_turn.py"}
 
 
 class _Bindings(ast.NodeVisitor):
@@ -350,8 +352,9 @@ def _file_bindings(tree):
 
 def check_layout(scripts):
     """Return file:line diagnostics for the entrypoint and its own package."""
-    paths = [scripts / "codex_task.py"] + sorted(path for path in (scripts / "codex_worker").glob("*.py")
-                                                  if path.name not in STANDALONE)
+    paths = ([scripts / "codex_task.py"] if (scripts / "codex_task.py").is_file() else [])
+    paths += sorted(path for path in (scripts / "codex_worker").glob("*.py")
+                    if path.name not in STANDALONE)
     modules = {}
     for path in paths:
         module = ("codex_task" if path.parent == scripts else
@@ -506,13 +509,42 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_production_module_layout(self):
         self.assertEqual(check_layout(SCRIPTS), [])
+        root = SCRIPTS.parent
+        plugin = root / "plugins/codex-worker"
+        self.assertEqual(sorted(path.relative_to(plugin).as_posix()
+                                for path in plugin.rglob("*") if path.is_file()),
+                         [".claude-plugin/plugin.json", "skills/codex-worker/SKILL.md"])
+        for path in SCRIPTS.rglob("*"):
+            if path.is_file() and path.suffix in {".py", ".md"}:
+                source = path.read_text(encoding="utf-8")
+                for forbidden in ("plugins/cache", "CLAUDE_SKILL_DIR", "$T", "codex_task.py"):
+                    self.assertNotIn(forbidden, source, str(path))
+        with tempfile.TemporaryDirectory(prefix="codex-layout-help-") as directory:
+            environment = dict(os.environ, HOME=directory, CODEX_TASK_HOME=directory,
+                               CODEX_HOME=directory, CLAUDE_CONFIG_DIR=directory)
+            command = [sys.executable, "-I", str(SCRIPTS / "codex_worker/__main__.py")]
+            help_result = subprocess.run(command + ["--help"], cwd=directory, env=environment,
+                                         capture_output=True, text=True)
+            self.assertEqual(help_result.returncode, 0, help_result.stderr)
+            documents = subprocess.run(command + ["docs"], cwd=directory, env=environment,
+                                       capture_output=True, text=True)
+            self.assertEqual(documents.returncode, 0, documents.stderr)
+            self.assertEqual(documents.stdout.splitlines(),
+                             sorted(path.stem for path in (SCRIPTS / "codex_worker/docs").glob("*.md")))
 
     def test_package_version_matches_plugin(self):
         root = Path(__file__).resolve().parents[1]
-        project = (root / "pyproject.toml").read_text(encoding="utf-8")
-        versions = re.findall(r'^version = "([^"]+)"$', project, re.MULTILINE)
+        package = ast.parse((root / "src/codex_worker/__init__.py").read_text(encoding="utf-8"))
+        versions = [node.value.value for node in package.body if isinstance(node, ast.Assign)
+                    and any(isinstance(target, ast.Name) and target.id == "__version__"
+                            for target in node.targets)]
         plugin = json.loads((root / "plugins/codex-worker/.claude-plugin/plugin.json").read_text(encoding="utf-8"))
-        self.assertEqual(versions, [plugin["version"]], "pyproject.toml and plugin.json versions differ")
+        self.assertEqual(versions, [plugin["version"]], "package and plugin.json versions differ")
+        skill = (root / "plugins/codex-worker/skills/codex-worker/SKILL.md").read_text(encoding="utf-8")
+        minimum = re.search(r"version\s+`?(\d+\.\d+\.\d+)`?\s+or newer", skill, re.IGNORECASE)
+        self.assertIsNotNone(minimum, "SKILL.md must state the minimum installed version")
+        self.assertLessEqual(tuple(map(int, minimum[1].split("."))),
+                             tuple(map(int, versions[0].split("."))))
 
     def test_each_mutant_is_rejected(self):
         mutants = (
@@ -592,7 +624,7 @@ class ModuleLayoutTests(unittest.TestCase):
 
     def test_package_config_can_anchor_paths(self):
         self.assertEqual(self.check_tree({
-            "codex_task.py": "entry_path = __file__\n",
+            "codex_worker/__main__.py": "entry_path = __file__\n",
             "codex_worker/config.py": "config_path = __file__\n",
         }), [])
 

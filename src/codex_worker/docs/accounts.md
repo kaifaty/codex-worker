@@ -12,7 +12,7 @@ them.
 
 ## Adding a subscription
 
-For another subscription, have the user run `python3 -I "$T" login second`. Its separate `CODEX_HOME`
+For another subscription, have the user run `codex-worker login second`. Its separate `CODEX_HOME`
 is `~/.codex-accounts/second`, and login writes the new `~/.codex/codex-worker.json`. Never copy
 `auth.json` between homes: each subscription needs its own sign-in. When the user has chosen multiple
 subscriptions, the settings can contain:
@@ -42,8 +42,8 @@ With `--reviewer claude`, reviews prefer an available account other than the Cla
 Install Claude Code CLI, then have the human add each Anthropic subscription:
 
 ```sh
-python3 -I "$T" claude-login first
-python3 -I "$T" claude-login second
+codex-worker claude-login first
+codex-worker claude-login second
 ```
 
 `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` runs `claude setup-token` in a cleaned
@@ -59,7 +59,7 @@ Concurrent logins merge their account entries into the latest settings after sig
 Both sign-in and the Keychain prompt use the human's terminal, opened by its device path from
 stdin, stdout or stderr (`/dev/tty` only as a fallback: macOS kqueue rejects it, and the Claude CLI
 watches its input with kqueue);
-the plugin does not copy the issued token into its own output, arguments, settings, state, or logs.
+the tool does not copy the issued token into its own output, arguments, settings, state, or logs.
 
 After saving, `claude-login` runs the same check as `claude-probe <name>`. A failed probe prints its
 reason and exits nonzero; the account remains saved. Signing in to an existing account updates its
@@ -71,7 +71,7 @@ and Keychain token lookup as reviews, with stdin and stderr sent to `/dev/null` 
 working directory removed afterward. Rate-limit events update the account's cached windows. It prints
 one line, `Claude account <name>: token ok; 5h …; 7d …`, using the same window format as `accounts`,
 or one of `token unavailable`, `authentication failed`, `usage limit`, or `request failed`. Only a
-successful response exits zero. Tokens never enter arguments, plugin output, settings, state or logs.
+successful response exits zero. Tokens never enter arguments, tool output, settings, state or logs.
 
 `claude-rename <old> <new>` changes the name in `claude.accounts` and the cached limits key, keeping
 `config_dir` and `token_keychain` unchanged. The old name must exist; the new name must be unused
@@ -191,7 +191,7 @@ account name; `report --json` includes it in each task's `reviews` list. Claude 
 Any candidate Claude account outranks Codex, and a returning Claude account takes over at once. Within a family the duty moves to the largest room only when it beats the current one by both `duty.relative_margin` percent and `duty.absolute_margin` units ([settings](settings.md)); an unavailable duty is replaced at once, equal rooms go by name, and with no candidate there is no duty.
 New tasks, rotations to another account and new reviews skip the duty account; tasks already running on it continue there (follow-ups, fixes, CI rounds), their rotation behaves as for a regular task, and the new account is never the duty account. The Codex exclusion applies only with rotation (`accounts` configured): a single Codex account has no replacement. It still takes new work when no other account of its family can take it and either no account of the other family can take work now (Codex: fresh snapshots below `switch_at`; Claude: cached limits by the rules above), or the duty is a Claude account and the task's `--task-type` is in `duty.claude_only_task_types`; otherwise the task waits, sleeps (not waking for the duty account's resets) or falls back to a Codex review, as with an exhausted pool. When Claude becomes available again while Codex is on duty, a new Codex task may sleep without applying the exception in its reset calculation until the next `duty tick`.
 `duty status [--json]` shows the duty, since when, its reason, the rooms and the check age, with a warning when the last check is over 90 minutes old; `duty clear` removes `~/.codex/duty.json` (no duty, exactly as without this feature; `~/.codex/duty-log.jsonl` keeps one line per change); `accounts` marks the duty account and `accounts --json` adds `duty`. A stale `duty.json` still applies; an unreadable one is ignored with one warning until the next tick rewrites it.
-Run `duty tick` every 30 minutes with launchd: `python3 -I "$T" duty plist [--minutes 30] > ~/Library/LaunchAgents/codex-worker.duty.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.duty.plist`; the job runs the newest installed plugin version and logs to `~/.codex/duty-launchd.log`, and a tick that finds another one running changes nothing. The plugin never calls `launchctl` or writes to `~/Library` itself.
+Run `duty tick` every 30 minutes with launchd: `codex-worker duty plist [--minutes 30] > ~/Library/LaunchAgents/codex-worker.duty.plist`, then `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/codex-worker.duty.plist`; the job uses the installed `codex-worker` command when available, so its path survives `uv tool upgrade codex-worker`. It logs to `~/.codex/duty-launchd.log`; a tick that finds another one running changes nothing. The tool never calls `launchctl` or writes to `~/Library` itself.
 
 ## Rotation
 

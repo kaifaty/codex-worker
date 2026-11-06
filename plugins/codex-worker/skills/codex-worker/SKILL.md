@@ -9,20 +9,18 @@ The lead plans, writes the brief, reviews the result and merges. The worker impl
 in its own git worktree; Codex and Claude are available as workers and reviewers.
 Claude Code is a supported lead.
 
-Set the script path for this skill:
+First run `codex-worker --version`; version 1.51.0 or newer is required.
+If the command is missing or older, tell the user to run
+`uv tool install git+https://github.com/kaifaty/codex-worker` or
+`uv tool upgrade codex-worker`, respectively. Do not install or upgrade it yourself.
 
-```sh
-T=${CLAUDE_SKILL_DIR}/scripts/codex_task.py
-```
-
-Before the first task in a session, read [the lead guide](references/lead-guide.md).
+Before the first task in a session, read `codex-worker docs lead-guide`.
 It contains delegation rules, brief structure, commands, budgets, the work loop,
-stop rules and links to the detailed references. Run commands as `python3 -I "$T" …`.
-If a command prints a codex-worker version warning, set `T` again using the path shown.
+stop rules and links to the detailed references.
 
 In Claude Code:
 
-- Run `python3 -I "$T" wait <slug>` as a background Bash command, which reports
+- Run `codex-worker wait <slug>` as a background Bash command, which reports
   completion when the whole review/fix cycle ends.
 - Write briefs in the session scratchpad, outside the repository, so they cannot
   enter a checkout commit. Saved check scripts must live in a stable directory.

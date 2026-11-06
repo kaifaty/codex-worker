@@ -11,9 +11,9 @@ stops or changes work, and never writes under either source's home.
   `last.md`, `review.md`, `check.log`.
 - Live activity: `events.jsonl` (Codex executor, `codex exec --json` lines) and `claude-events.jsonl` (Claude
   executor, `claude --output-format stream-json` lines; written by codex-worker 1.47+). Either may be missing.
-- Accounts: `python3 -I <codex_task.py> accounts --json` (never `--refresh`), at most once per
+- Accounts: `python3 -I <script> accounts --json` (never `--refresh`), at most once per
   `BOARD_ACCOUNTS_SECONDS` (default 300). The script path comes from `BOARD_CODEX_TASK` and defaults to this
-  repository's `plugins/codex-worker/skills/codex-worker/scripts/codex_task.py`.
+  repository's `src/codex_worker/__main__.py`.
 - Machines: `$BOARD_MACHINES_FILE` (default `$CODEX_TASK_HOME/board-machines.json`), with local or SSH
   probes every `BOARD_MACHINES_SECONDS` (default 30). The configuration and probe are described below.
 - Desktop sessions: `$BOARD_CLAUDE_DESKTOP_DIR/claude-code-sessions/*/*/local_*.json` (default desktop

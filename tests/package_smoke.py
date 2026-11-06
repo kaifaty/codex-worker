@@ -13,6 +13,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -25,8 +26,8 @@ from rotation_support import FAKE_CODEX
 
 
 ROOT = Path(__file__).resolve().parents[1]
-PACKAGE = ROOT / "plugins/codex-worker/skills/codex-worker/scripts/codex_worker"
-VERSION = re.search(r'^version = "([^"]+)"$', (ROOT / "pyproject.toml").read_text(encoding="utf-8"),
+PACKAGE = ROOT / "src/codex_worker"
+VERSION = re.search(r'^__version__ = "([^"]+)"$', (PACKAGE / "__init__.py").read_text(encoding="utf-8"),
                     re.MULTILINE)[1]
 HOOKS_CHECK = r"""import importlib.metadata, json
 entry, = [entry for entry in importlib.metadata.distribution("codex-worker").entry_points
@@ -70,8 +71,19 @@ class PackageSmokeTest(unittest.TestCase):
         pip_home.mkdir()
         env = {"PATH": os.environ.get("PATH", os.defpath), "HOME": str(pip_home),
                "PIP_DISABLE_PIP_VERSION_CHECK": "1", "PIP_NO_INPUT": "1"}
-        self.run_checked([str(venv / "bin/python"), "-I", "-m", "pip", "install", "--quiet", str(source)],
+        wheels = self.root / "wheels"
+        self.run_checked([str(venv / "bin/python"), "-I", "-m", "pip", "wheel", "--quiet", "--no-deps",
+                          "--wheel-dir", str(wheels), str(source)],
                          env=env, cwd=str(self.root), timeout=600)
+        wheel, = wheels.glob("*.whl")
+        self.run_checked([str(venv / "bin/python"), "-I", "-m", "pip", "install", "--quiet", str(wheel)],
+                         env=env, cwd=str(self.root))
+        target = self.root / "target"
+        self.run_checked([str(venv / "bin/python"), "-I", "-m", "pip", "install", "--quiet",
+                          "--target", str(target), str(wheel)], env=env, cwd=str(self.root))
+        help_text = self.run_checked([sys.executable, "-I", str(target / "codex_worker/__main__.py"),
+                                      "--help"], env=env, cwd=str(self.root)).stdout
+        self.assertIn("start <slug>", help_text)
         return venv
 
     def test_installed_command_runs_a_task(self):
@@ -88,7 +100,8 @@ class PackageSmokeTest(unittest.TestCase):
             directory.mkdir()
         trace = self.root / "fake-trace.jsonl"
         fake = fake_bin / "codex"
-        fake.write_text("#!" + sys.executable + "\n" + FAKE_CODEX)
+        fake.write_text("#!" + sys.executable + "\nimport os\nos.environ.setdefault(\"CODEX_FAKE_TRACE\", "
+                        + repr(str(trace)) + ")\n" + FAKE_CODEX)
         fake.chmod(0o700)
         git_dir = str(Path(shutil.which("git")).parent)
         env = {"PATH": os.pathsep.join([str(fake_bin), git_dir, "/usr/bin", "/bin", "/usr/sbin", "/sbin"]),
@@ -139,10 +152,20 @@ class PackageSmokeTest(unittest.TestCase):
 
         help_text = cli("--help").stdout
         self.assertIn("start <slug>", help_text)
+        self.assertEqual(cli("--version").stdout.strip(), VERSION)
 
         installed = [path for path in venv.rglob("codex_worker") if (path / "__main__.py").is_file()]
         self.assertEqual(len(installed), 1, installed)
         installed = installed[0]
+        self.assertEqual(Path(cli("path").stdout.strip()), installed)
+        self.assertEqual(set(cli("docs").stdout.splitlines()),
+                         {path.stem for path in (PACKAGE / "docs").glob("*.md")})
+        self.assertEqual(cli("docs", "lead-guide").stdout,
+                         (PACKAGE / "docs/lead-guide.md").read_text(encoding="utf-8"))
+        unknown = subprocess.run([str(command), "docs", "unknown-document"], cwd=str(outside),
+                                 env=env, text=True, capture_output=True, timeout=120)
+        self.assertNotEqual(unknown.returncode, 0)
+        self.assertIn("unknown-document", unknown.stderr)
         for language in ("en", "ru"):
             with self.subTest(language=language):
                 (codex_home / "codex-worker.json").write_text(json.dumps({"language": language}))
@@ -197,14 +220,22 @@ class PackageSmokeTest(unittest.TestCase):
         self.assertEqual(hooks, {"value": "codex_worker.__main__:cli.main",
                                  "missing": {"codex": [], "claude": []}})
 
+        # The duty job has no Claude token and must never consult the real Keychain.
+        security = home / ".local/bin/security"
+        security.parent.mkdir(parents=True)
+        security.write_text("#!/bin/sh\nexit 44\n")
+        security.chmod(0o700)
         plist_text = cli("duty", "plist").stdout
         self.assertNotIn("plugins", plist_text)
-        program = plistlib.loads(plist_text.encode("utf-8"))["ProgramArguments"]
-        self.assertEqual(program[1:2] + program[3:], ["-I", "duty", "tick"])
-        self.assertEqual(Path(program[2]), (installed / "__main__.py").resolve())
-        for path in (program[0], program[2]):
-            # The venv interpreter is a link to the base Python; its directory is the venv's.
-            self.assertIn(venv, Path(path).parent.resolve().parents, path)
+        job = plistlib.loads(plist_text.encode("utf-8"))
+        started = time.time()
+        self.run_checked(job["ProgramArguments"], cwd=str(outside),
+                         env=dict(job["EnvironmentVariables"], HOME=str(home)))
+        status = json.loads(cli("duty", "status", "--json").stdout)
+        self.assertGreaterEqual(status["duty"]["checked_at"], started)
+        self.assertFalse(status["stale"])
+        self.assertEqual(status["duty"]["account"], "main")
+        self.assertEqual(job["ProgramArguments"], [str(command), "duty", "tick"])
 
 
 if __name__ == "__main__":

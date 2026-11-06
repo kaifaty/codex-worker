@@ -82,6 +82,13 @@ class CompareModuleSplitTests(unittest.TestCase):
         self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
         self.assertIn("moved=2; same=0; changed=0", command.stdout)
         self.assertIn("Glue (base):", command.stdout)
+        package = self.root / compare_module_split.CURRENT_PACKAGE
+        package.parent.mkdir()
+        shutil.move(str(self.scripts / "codex_worker"), str(package))
+        (self.scripts / "codex_task.py").rename(package / "__main__.py")
+        self.assert_categories(self.compare(base), moved=2)
+        command = self.run_tool(base)
+        self.assertEqual(command.returncode, 0, command.stderr + command.stdout)
 
     def test_changed_literal_is_visible_and_can_be_allowed(self):
         base = self.commit_tree({"codex_task.py": "def save():\n    return 1\n"})

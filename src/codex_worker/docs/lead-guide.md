@@ -2,9 +2,10 @@
 
 The lead plans, writes the brief, reviews the result and merges; the worker implements in its own git worktree.
 
-Reference detail lives in `references/`. Read a file only when its topic comes up:
+Reference detail lives in the package docs. Read any file below with `codex-worker docs <name>`
+(use its name without `.md`), only when its topic comes up:
 
-| File | Read it when |
+| File (`codex-worker docs <name>`) | Read it when |
 |---|---|
 | [results.md](results.md) | reading `wait` output: result and review fields, CI, outcomes, wrap-ups |
 | [budgets.md](budgets.md) | time and weekly caps, exhaustion, or headroom warnings |
@@ -84,11 +85,7 @@ Before `start`, check that every "Done when" item can be reached within "Do not 
 
 ## Commands
 
-Set `T` to the path to `scripts/codex_task.py` in your installation, or run the installed `codex-worker` command in place of `python3 -I "$T"`.
-
-If a command prints a codex-worker version warning, set `T` again using the path shown in the warning.
-
-Run every command below as `python3 -I "$T" …`. The CLI is resolved from `CODEX_TASK_CODEX`, then the
+Run every command below as `codex-worker …`. The CLI is resolved from `CODEX_TASK_CODEX`, then the
 ChatGPT.app bundle if present, then `codex` on `PATH`. Model and reasoning defaults come from the user's
 Codex configuration; `--effort` overrides reasoning effort for a task.
 Use `start --model M` for work and `--review-model M` on `start`, `say`, or `review` for Codex reviews; `say` inherits or replaces them, and `default` clears an override. Read `accounts --json` before choosing ([models and JSON fields](settings.md#task-models)).
@@ -96,25 +93,28 @@ Use `start --task-type LABEL` to label telemetry; `say` and `review` inherit it,
 Use `start --executor codex|claude` to choose the task worker; the default is `executor` in `codex-worker.json`, otherwise `codex`. The choice is saved for `say`, review fixes, CI repairs and wrap-up and cannot change during a task. Claude work requires `--sandbox off`; its model and effort default to `claude.model` and `claude.effort`, with task `--model` and `--effort` taking precedence.
 Without `--reviewer`, Claude tasks use Codex reviews; Codex tasks keep the configured reviewer default. Use `--reviewer claude` on `start`, `say`, or `review` for reviews from the isolated Claude account pool, preferring another account when Claude also implements ([setup](accounts.md#claude-account-pool)).
 
-| Step | Command arguments |
+| Step | Command |
 |---|---|
-| Start a task | `start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--executor codex\|claude] [--effort E] [--sandbox off\|workspace] --max-minutes M [--max-weekly P] --review [--review-angles LIST] --fix-rounds 2 [--ci] [--ci-rounds N] --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--branch` overrides `codex/<slug>` and must pass `git check-ref-format --branch`; `--guard` is repeatable; `--no-push` keeps commits local through follow-ups, reviews, fixes and wrap-up, with no branch or PR publication and no CI) |
-| Scout code | `scout <slug> "question"` or `scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; read-only in the existing directory (default `.`), no worktree or branch |
-| Wait for the cycle | `wait <slug> [--through-sleep]` as a background task that reports completion when the whole review/fix cycle ends; if your harness has no such tasks, run `wait` as an ordinary command or check `status`; read its [output](results.md#what-wait-prints) |
-| Follow-up / fix request | `say <slug> "…"` or `say <slug> --file FILE`, with `--max-minutes M [--max-weekly P] [--effort E] [--review] [--review-angles LIST] [--fix-rounds 2] [--ci\|--no-ci] [--ci-rounds N]` (only when idle), then `wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
-| First review | `review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` (only when idle), then `wait` |
-| Look | `status [<slug>]` — executor, account, state, PR, commits, last message (up to three saved messages for Claude), and the last turn's `result` |
-| Cost | `stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all Codex threads; Claude work shows UTC start, active minutes, account, session, model, effort, input/output/cache tokens, dollar cost and seven-day usage growth with totals, followed by Codex reviews |
-| Compare costs and outcomes | `report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model\|executor\|reviewer] [--json]`; `--by executor` or `--by reviewer` compares Codex and Claude by quality and cost ([telemetry.md](telemetry.md#compare-executors-and-reviewers)) |
-| Record your verdict | `verdict <slug> accepted\|revised\|redone\|dropped [--note TEXT]` when you merge or drop the work: `accepted` merged as is, `revised` merged after your edits, `redone` redone elsewhere, `dropped` not merged; works after `clean` too, and the latest verdict counts |
-| Accounts | `accounts [--json]` — logins, plans, limits, reset times and credits; JSON includes Codex and Claude pools, thresholds and the credit floor (`credits_floor`, [accounts.md](accounts.md#credits)); `reset-credit <account> [--credit ID] [--yes]` |
-| Sign in | `login <name> [--browser]` — the human signs in with a device code, or in the browser; `claude-login <name> [--config-dir DIR] [--keychain SERVICE]` saves an isolated Claude CLI account with a token entered at the Keychain prompt, then probes it; a failed probe leaves the account saved and exits nonzero |
-| Probe a Claude account | `claude-probe <name>` — send one short request to check its token and cache five-hour and seven-day limits |
-| Rename a Claude account | `claude-rename <old> <new>` — rename its pool entry and cached limits, keeping its config directory and Keychain service |
-| Duty account | `duty tick` — refresh stale limits and elect the duty account that new work skips; `duty status [--json]` — duty, reason, rooms and check age, warning after 90 minutes; `duty clear` — no duty; `duty plist [--minutes 30]` — print a launchd job for `duty tick` ([accounts.md](accounts.md#duty-account)) |
-| Remove a Claude account | `claude-remove <name>` — remove its pool entry and cached limits, leaving its directory and Keychain entry for manual deletion; the last account cannot be removed |
-| Interrupt | `stop <slug>` (there is no mid-turn steer for exec; stop, then `say`) |
-| Finish | `clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock`; it reminds you when the task has no `verdict` |
+| Read documentation | `codex-worker docs` lists documents; `codex-worker docs <name>` prints one |
+| Find package files | `codex-worker path` prints the installed package directory |
+| Check the version | `codex-worker --version` |
+| Start a task | `codex-worker start <slug> --brief brief.md [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--executor codex\|claude] [--effort E] [--sandbox off\|workspace] --max-minutes M [--max-weekly P] --review [--review-angles LIST] --fix-rounds 2 [--ci] [--ci-rounds N] --check "<command from Checks>" [--check-timeout SEC] [--guard GLOB] [--base-check]` (base defaults to the remote's default branch; `--branch` overrides `codex/<slug>` and must pass `git check-ref-format --branch`; `--guard` is repeatable; `--no-push` keeps commits local through follow-ups, reviews, fixes and wrap-up, with no branch or PR publication and no CI) |
+| Scout code | `codex-worker scout <slug> "question"` or `codex-worker scout <slug> --file Q.md`, with `[--repo DIR] [--effort E]`; read-only in the existing directory (default `.`), no worktree or branch |
+| Wait for the cycle | `codex-worker wait <slug> [--through-sleep]` as a background task that reports completion when the whole review/fix cycle ends; if your harness has no such tasks, run `codex-worker wait` as an ordinary command or check `codex-worker status`; read its [output](results.md#what-wait-prints) |
+| Follow-up / fix request | `codex-worker say <slug> "…"` or `codex-worker say <slug> --file FILE`, with `--max-minutes M [--max-weekly P] [--effort E] [--review] [--review-angles LIST] [--fix-rounds 2] [--ci\|--no-ci] [--ci-rounds N]` (only when idle), then `codex-worker wait` again; the saved check is inherited unless replaced with `--check CMD` or removed with `--no-check`; `--no-base-check` drops inherited base tests |
+| First review | `codex-worker review <slug> [--effort E] [--review-angles LIST] [--max-weekly P]` (only when idle), then `codex-worker wait` |
+| Look | `codex-worker status [<slug>]` — executor, account, state, PR, commits, last message (up to three saved messages for Claude), and the last turn's `result` |
+| Cost | `codex-worker stats <slug>` — per-turn time, tool calls, tokens, weekly-limit % across all Codex threads; Claude work shows UTC start, active minutes, account, session, model, effort, input/output/cache tokens, dollar cost and seven-day usage growth with totals, followed by Codex reviews |
+| Compare costs and outcomes | `codex-worker report [--since 7d\|30d\|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type\|effort\|model\|executor\|reviewer] [--json]`; `--by executor` or `--by reviewer` compares Codex and Claude by quality and cost ([telemetry.md](telemetry.md#compare-executors-and-reviewers)) |
+| Record your verdict | `codex-worker verdict <slug> accepted\|revised\|redone\|dropped [--note TEXT]` when you merge or drop the work: `accepted` merged as is, `revised` merged after your edits, `redone` redone elsewhere, `dropped` not merged; works after `codex-worker clean` too, and the latest verdict counts |
+| Accounts | `codex-worker accounts [--json]` — logins, plans, limits, reset times and credits; JSON includes Codex and Claude pools, thresholds and the credit floor (`credits_floor`, [accounts.md](accounts.md#credits)); `codex-worker reset-credit <account> [--credit ID] [--yes]` |
+| Sign in | `codex-worker login <name> [--browser]` — the human signs in with a device code, or in the browser; `codex-worker claude-login <name> [--config-dir DIR] [--keychain SERVICE]` saves an isolated Claude CLI account with a token entered at the Keychain prompt, then probes it; a failed probe leaves the account saved and exits nonzero |
+| Probe a Claude account | `codex-worker claude-probe <name>` — send one short request to check its token and cache five-hour and seven-day limits |
+| Rename a Claude account | `codex-worker claude-rename <old> <new>` — rename its pool entry and cached limits, keeping its config directory and Keychain service |
+| Duty account | `codex-worker duty tick` — refresh stale limits and elect the duty account that new work skips; `codex-worker duty status [--json]` — duty, reason, rooms and check age, warning after 90 minutes; `codex-worker duty clear` — no duty; `codex-worker duty plist [--minutes 30]` — print a launchd job for `codex-worker duty tick` ([accounts.md](accounts.md#duty-account)) |
+| Remove a Claude account | `codex-worker claude-remove <name>` — remove its pool entry and cached limits, leaving its directory and Keychain entry for manual deletion; the last account cannot be removed |
+| Interrupt | `codex-worker stop <slug>` (there is no mid-turn steer for exec; stop, then `codex-worker say`) |
+| Finish | `codex-worker clean <slug>` after the PR is merged: removes the worktree, deletes the local branch, archives every thread, and saves the task record in `~/.codex/claude-tasks/.archive/` except `events.jsonl` and `state.lock`; it reminds you when the task has no `codex-worker verdict` |
 
 The worktree is `~/.codex/worktrees/claude-<slug>/<repo>` on branch `codex/<slug>` (or `--branch NAME`); state and logs are in
 `~/.codex/claude-tasks/<slug>/`. Only one task runs at a time unless you pass `--parallel`; use that only

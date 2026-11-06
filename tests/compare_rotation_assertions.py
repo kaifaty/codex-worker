@@ -30,7 +30,7 @@ WORKER_ASTS = frozenset(
     ast.dump(ast.parse(expression, mode="eval").body, include_attributes=False)
     for expression in WORKER_EXPRESSIONS
 )
-SCRIPTS = ROOT / "plugins/codex-worker/skills/codex-worker/scripts"
+SCRIPTS = ROOT / "src"
 # Within assertions, only these known code inputs may bypass literal comparison.
 # Unknown wrappers keep their strings as data, even when the text parses as Python.
 SCRIPT_INPUTS = {

@@ -123,7 +123,7 @@ does not enable CI. Waiting and repair mechanics are in [ci.md](ci.md).
 
 ## Standing rules
 
-`start` appends `scripts/codex_worker/rules.md` or `scripts/codex_worker/rules.ru.md` to the brief, following `language`.
+`start` appends `src/codex_worker/rules.md` or `src/codex_worker/rules.ru.md` to the brief, following `language`.
 `~/.codex/codex-worker-rules.md`, if present, replaces either file: use it for another language or your
 own rules. `{branch}` and `{base}` in it are replaced with the task's branch and PR target. Scouts use
 their own read-only instructions instead of task rules.

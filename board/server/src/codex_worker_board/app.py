@@ -45,7 +45,7 @@ class Settings:
             task_home=Path(os.environ.get("CODEX_TASK_HOME", "~/.codex")).expanduser(),
             codex_task=Path(os.environ.get(
                 "BOARD_CODEX_TASK",
-                str(REPOSITORY / "plugins/codex-worker/skills/codex-worker/scripts/codex_task.py"),
+                str(REPOSITORY / "src/codex_worker/__main__.py"),
             )).expanduser(),
             poll_seconds=float(os.environ.get("BOARD_POLL_SECONDS", "1.0")),
             accounts_seconds=float(os.environ.get("BOARD_ACCOUNTS_SECONDS", "300")),

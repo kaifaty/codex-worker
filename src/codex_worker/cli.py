@@ -1,24 +1,27 @@
 """Delegate coding to Codex in a git worktree, with autonomous subscription rotation.
 
-  codex_task.py start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--executor codex|claude] [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
-  codex_task.py scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
-  codex_task.py say <slug> "message" | --file FILE [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
-  codex_task.py review <slug> [--effort E] [--review-model M] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
-  codex_task.py wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
-  codex_task.py status [<slug>]                       state, account and current thread
-  codex_task.py stats <slug>                          codex-stats.py for every task thread
-  codex_task.py report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model|executor|reviewer] [--json]
-  codex_task.py verdict <slug> accepted|revised|redone|dropped [--note TEXT]  record the lead's verdict
-  codex_task.py stop <slug>                           interrupt without rotating
-  codex_task.py clean <slug> [--keep-branch]          remove worktree, archive all threads
-  codex_task.py accounts [--json] [--refresh]        read account limits and login status
-  codex_task.py reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
-  codex_task.py login <name> [--browser]              add/sign in to an isolated account
-  codex_task.py claude-login <name> [--config-dir DIR] [--keychain SERVICE]  add/sign in to a Claude account
-  codex_task.py claude-probe <name>                  check a Claude token and cache usage limits
-  codex_task.py claude-rename <old> <new>            rename a Claude account without moving credentials
-  codex_task.py claude-remove <name>                 remove a Claude account from the pool
-  codex_task.py duty tick | status [--json] | clear | plist [--minutes N]  elect, show, clear or schedule the duty account
+  codex-worker start <slug> --brief FILE|- [--repo DIR] [--base origin/<branch>] [--branch NAME] [--no-push] [--executor codex|claude] [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--parallel] [--sandbox off|workspace] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci] [--ci-command CMD] [--ci-rounds N] [--check CMD] [--check-timeout SEC] [--guard GLOB] [--base-check]
+  codex-worker scout <slug> "question" | --file FILE [--repo DIR] [--effort E]  read-only research
+  codex-worker say <slug> "message" | --file FILE [--effort E] [--model M] [--review-model M] [--task-type LABEL] [--max-minutes M] [--max-weekly P] [--review] [--reviewer codex|claude] [--review-angles LIST] [--fix-rounds N] [--ci | --no-ci] [--ci-command CMD | --no-ci-command] [--ci-rounds N] [--check CMD | --no-check] [--check-timeout SEC] [--no-base-check]
+  codex-worker review <slug> [--effort E] [--review-model M] [--max-weekly P] [--reviewer codex|claude] [--review-angles LIST]  fresh review (task must be idle)
+  codex-worker wait <slug> [--timeout SEC] [--through-sleep]  wait, show rotations and the result
+  codex-worker status [<slug>]                       state, account and current thread
+  codex-worker stats <slug>                          codex_stats.py for every task thread
+  codex-worker report [--since 7d|30d|YYYY-MM-DD] [--repo NAME] [--slug SLUG] [--by task-type|effort|model|executor|reviewer] [--json]
+  codex-worker verdict <slug> accepted|revised|redone|dropped [--note TEXT]  record the lead's verdict
+  codex-worker stop <slug>                           interrupt without rotating
+  codex-worker clean <slug> [--keep-branch]          remove worktree, archive all threads
+  codex-worker accounts [--json] [--refresh]        read account limits and login status
+  codex-worker reset-credit <account> [--credit ID] [--yes]  preview/use a free limit reset
+  codex-worker login <name> [--browser]              add/sign in to an isolated account
+  codex-worker claude-login <name> [--config-dir DIR] [--keychain SERVICE]  add/sign in to a Claude account
+  codex-worker claude-probe <name>                  check a Claude token and cache usage limits
+  codex-worker claude-rename <old> <new>            rename a Claude account without moving credentials
+  codex-worker claude-remove <name>                 remove a Claude account from the pool
+  codex-worker --version                              print the installed version
+  codex-worker docs [<name>]                         list documents or print one
+  codex-worker path                                  print the package directory
+  codex-worker duty tick | status [--json] | clear | plist [--minutes N]  elect, show, clear or schedule the duty account
 
 All commands accept -h/--help.
 ~/.codex/codex-worker.json optionally configures language (en), accounts, switch_at (99),
@@ -243,7 +246,7 @@ def add_command_options(parser, command):
 
 def command_synopsis(command):
     positional = '<slug> "message" |' if command == "say" else "<slug>"
-    parts = ["codex_task.py", command, positional]
+    parts = ["codex-worker", command, positional]
     options = list(command_options(command))
     seen_groups = set()
     for option, _, group in options:
@@ -279,13 +282,19 @@ COMMAND_HANDLERS = {
     "claude-rename": commands.cmd_claude_rename,
     "claude-remove": commands.cmd_claude_remove,
     "duty": commands.cmd_duty,
+    "docs": commands.cmd_docs,
+    "path": commands.cmd_path,
     "_run": supervisor.cmd__run,
 }
 
 
 def main():
-    p = argparse.ArgumentParser(description=HELP_TEXT, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p = argparse.ArgumentParser(prog="codex-worker", description=HELP_TEXT, formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--version", action="version", version=config.plugin_version())
     sub = p.add_subparsers(dest="cmd", required=True)
+    s = sub.add_parser("docs", help="list documents or print a document")
+    s.add_argument("name", nargs="?")
+    sub.add_parser("path", help="print the package directory")
     s = sub.add_parser("start")
     s.add_argument("slug")
     add_command_options(s, "start")

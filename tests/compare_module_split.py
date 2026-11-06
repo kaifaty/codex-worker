@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = "plugins/codex-worker/skills/codex-worker/scripts"
 ENTRYPOINT = SCRIPTS + "/codex_task.py"
 PACKAGE = SCRIPTS + "/codex_worker"
+CURRENT_PACKAGE = "src/codex_worker"
 CATEGORIES = ("moved", "same", "changed", "missing", "duplicate", "new")
 
 
@@ -35,7 +36,7 @@ def _git(root, *args):
 
 def _is_worker_path(path):
     return (path == ENTRYPOINT
-            or (str(PurePosixPath(path).parent) == PACKAGE
+            or (str(PurePosixPath(path).parent) in {PACKAGE, CURRENT_PACKAGE}
                 and path.endswith(".py")))
 
 
@@ -45,7 +46,7 @@ def sources_at_revision(root, revision):
         root, "rev-parse", "--verify", revision + "^{commit}",
     ).decode("ascii").strip()
     listing = _git(root, "ls-tree", "-r", "--name-only", "-z", revision,
-                   "--", ENTRYPOINT, PACKAGE)
+                   "--", ENTRYPOINT, PACKAGE, CURRENT_PACKAGE)
     paths = sorted(path.decode("utf-8") for path in listing.split(b"\0")
                    if path and _is_worker_path(path.decode("utf-8")))
     return {path: _git(root, "show", "--no-ext-diff", revision + ":" + path)
@@ -53,7 +54,8 @@ def sources_at_revision(root, revision):
 
 
 def working_sources(root):
-    paths = [root / ENTRYPOINT] + sorted((root / PACKAGE).glob("*.py"))
+    package = CURRENT_PACKAGE if (root / CURRENT_PACKAGE).is_dir() else PACKAGE
+    paths = [root / ENTRYPOINT] + sorted((root / package).glob("*.py"))
     return {path.relative_to(root).as_posix(): path.read_bytes()
             for path in paths if path.is_file()}
 

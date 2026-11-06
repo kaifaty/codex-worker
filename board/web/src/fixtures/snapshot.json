@@ -56,7 +56,7 @@
       "activity": {
         "at": 1793999996,
         "kind": "edit",
-        "text": "Edit plugins/codex-worker/skills/codex-worker/scripts/codex_worker/account_rotation.py: move the capacity deadline check before the soft switch so that a busy account is never picked twice in a row"
+        "text": "Edit src/codex_worker/account_rotation.py: move the capacity deadline check before the soft switch so that a busy account is never picked twice in a row"
       },
       "slug": "rotation-capacity-deadline-and-a-very-long-slug-to-check-ellipsis",
       "repo": "demo-wallet-monorepo-long-name",
