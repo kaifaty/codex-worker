@@ -526,8 +526,9 @@ class ResultScoutConfigTests(RotationTestCase):
             self.assertEqual(worker.config.claude_binary(), str(self.root / "claude-new"))
             with mock.patch.dict(os.environ, {"CODEX_WORKER_SAMPLE": "old", "TEAMSTER_SAMPLE": "new"}):
                 self.assertEqual(worker.config.env("CODEX_WORKER_SAMPLE"), "new")
-        legacy = load_worker(dict(self.env, **{"CODEX_TASK_" + key: value
-                                              for key, value in overrides.items()}), clear=True)
+        legacy = load_worker(dict(self.env, TEAMSTER_CODEX="", TEAMSTER_CAPACITY_RETRY_SECONDS="",
+                                  **{"CODEX_TASK_" + key: value
+                                     for key, value in overrides.items()}), clear=True)
         for name in overrides:
             if name.endswith("SECONDS") or name in ("SLEEP_STEP", "RESET_MARGIN"):
                 self.assertEqual(getattr(legacy.config, name), 2)

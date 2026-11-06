@@ -1822,6 +1822,7 @@ class ClaudeReviewTests(RotationTestCase):
                                 cwd=self.root, env=self.env, text=True, capture_output=True, timeout=30)
         self.assertEqual(result.returncode, 0, result.stderr)
         job = plistlib.loads(result.stdout.encode())
+        self.assertEqual(job["Label"], "teamster.duty")
         home, log = Path(self.env["HOME"]), str(self.home / "duty-launchd.log")
         self.assertEqual((job["StartInterval"], job["RunAtLoad"]), (900, True))
         self.assertEqual((job["StandardOutPath"], job["StandardErrorPath"]), (log, log))

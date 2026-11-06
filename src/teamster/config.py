@@ -18,7 +18,7 @@ from . import executors, procs, result_schema
 def env(legacy_name, default=None):
     """Read a Teamster override first, retaining the old variable as a fallback."""
     name = legacy_name.removeprefix("CODEX_TASK_").removeprefix("CODEX_WORKER_")
-    return os.environ.get("TEAMSTER_" + name, os.environ.get(legacy_name, default))
+    return os.environ.get("TEAMSTER_" + name) or os.environ.get(legacy_name, default)
 
 
 CHATGPT_CODEX = Path("/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
