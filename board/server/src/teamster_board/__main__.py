@@ -24,7 +24,8 @@ def launchd_plist(host, port):
         environment["CODEX_TASK_HOME"] = str(task_home)
     else:
         environment["TEAMSTER_HOME"] = str(task_home)
-        codex_home = os.environ.get("TEAMSTER_CODEX_HOME") or os.environ.get("CODEX_TASK_HOME")
+        codex_home = (os.environ.get("TEAMSTER_CODEX_HOME") if os.environ.get("TEAMSTER_HOME") else None)
+        codex_home = codex_home or os.environ.get("CODEX_TASK_HOME")
         if codex_home:
             # The accounts command the board runs still needs a non-default Codex home.
             environment["TEAMSTER_CODEX_HOME"] = os.path.abspath(Path(codex_home).expanduser())

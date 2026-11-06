@@ -63,6 +63,7 @@ def test_plist_names_the_data_home_by_layout(tmp_path, monkeypatch, capsys, vari
     monkeypatch.delenv("CODEX_TASK_HOME")
     monkeypatch.delenv("TEAMSTER_HOME", raising=False)
     monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("TEAMSTER_CODEX_HOME", str(tmp_path / "ignored-codex"))
     data = tmp_path / (".teamster" if variable == "TEAMSTER_HOME" else ".codex")
     (data / ("tasks" if variable == "TEAMSTER_HOME" else "claude-tasks")).mkdir(parents=True)
     board_main.main(["plist"])
