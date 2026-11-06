@@ -154,7 +154,7 @@ def followup_messages(st):
     return [json.loads(line) for line in messages.read_text().splitlines()] if messages.exists() else []
 
 
-def followup_prompt(st, message, cfg, source="claude"):
+def followup_prompt(st, message, cfg, source="lead"):
     """Journal follow-ups before dispatch so rotation includes the current request."""
     with (config.TASKS / st["slug"] / "messages.jsonl").open("a", encoding="utf-8") as stream:
         stream.write(json.dumps({"at": clock.CLOCK.time(), "text": message, "source": source},
@@ -276,7 +276,7 @@ def handoff(st, current_message=False, cfg=None):
                    ("The previous worker stopped partway through the task because its subscription reached its limit.\n"
                     "Its commits and uncommitted changes in this worktree are your starting point. "
                     "Continue the existing work without starting over or reverting it.\n\n"))
-    prompt += "Сообщения от Claude и ревью по порядку:\n" if ru else "Messages from Claude and review, in order:\n"
+    prompt += "Сообщения от ведущего и ревью по порядку:\n" if ru else "Messages from the lead and review, in order:\n"
     messages = followup_messages(st)
     for n, message in enumerate(messages, 1):
         text = message["text"]

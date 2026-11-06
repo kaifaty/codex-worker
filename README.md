@@ -1,21 +1,21 @@
 # codex-worker
 
-Let Claude plan and review while Codex implements in its own git worktree. This Claude Code plugin
-moves substantial coding work to your ChatGPT subscription, saving Claude subscription usage for the
-parts where you want Claude's judgment.
+Let the lead plan and review while a worker implements in its own git worktree. The tool runs
+Codex or Claude as the worker and is distributed as a Claude Code plugin. Claude Code is a supported
+lead; the lead writes the brief, reviews the result and decides when to merge.
 
-Claude writes a bounded brief, starts Codex, and waits in the background. Codex commits and pushes;
+The lead writes a bounded brief, starts the worker, and waits in the background. Codex commits and pushes;
 the supervisor opens and updates the PR in every mode, using Codex's result title and description.
 Optional Codex reviews run in fresh threads, and the supervisor can send findings back for bounded
-fix rounds. Claude checks the final diff and review and handles merging. Optional account monitoring
+fix rounds. The lead checks the final diff and review and handles merging. Optional account monitoring
 can pause a task until a usage window resets. On GitHub, `--ci` waits for PR checks and gives Codex
-one bounded repair turn with failed-check logs before Claude reviews the final result.
+one bounded repair turn with failed-check logs before the lead reviews the final result.
 
 This repository is both the `kaifaty` Claude Code marketplace and the `codex-worker` plugin.
 
 ## Requirements
 
-- Claude Code with plugin support.
+- Claude Code with plugin support to use it as the lead.
 - Codex CLI installed and signed in to a ChatGPT account with Codex access.
 - Python 3.9 or newer, using only the standard library.
 - Git, a repository with an `origin` remote, and permission to push task branches.
@@ -66,9 +66,14 @@ cp -R codex-worker/plugins/codex-worker/skills/codex-worker ~/.claude/skills/
 The manually installed skill is invoked as `/codex-worker`. Keep its `scripts/` and `references/`
 directories beside `SKILL.md`.
 
+## Other leads
+
+Another agent or a human can read the [lead guide](plugins/codex-worker/skills/codex-worker/references/lead-guide.md)
+and call the CLI directly. Other leads have not been verified yet.
+
 ## A short task cycle
 
-The skill handles these commands for Claude. To run them yourself, set `T` to the installed
+The skill handles these commands for the lead. To run them yourself, set `T` to the installed
 `scripts/codex_task.py`. With the manual installation:
 
 ```sh
@@ -82,7 +87,7 @@ Use a brief with the change, context, measurable completion conditions, focused 
 The worker creates `codex/csv-export` and an isolated worktree, implements the task, runs the check,
 and starts a review in a fresh thread if the check passes and the result is `done`. With
 `--fix-rounds 2`, it can send findings to the worker, check the fixes, and review again twice without
-Claude relaying messages. One `wait` covers the whole cycle; in Claude Code it runs as a background
+the lead relaying messages. One `wait` covers the whole cycle; in Claude Code it runs as a background
 Bash command.
 
 For GitHub repositories, `start --ci` or `"ci": true` enables CI for the task. Follow-ups inherit
@@ -90,7 +95,7 @@ the setting and repair-round limit (initially 1); `say --ci` enables it, `say --
 and `say --ci-rounds N` changes the limit. The supervisor waits for the published PR's exact HEAD
 and sends failures to Codex for bounded repairs. See
 [CI details](plugins/codex-worker/skills/codex-worker/references/ci.md).
-Claude merges only after `CI … passed` and rechecks `gh pr checks <url>` immediately before merging.
+The lead merges only after `CI … passed` and rechecks `gh pr checks <url>` immediately before merging.
 
 Work and review turns use strict JSON schemas through `--output-schema`. `wait` renders the work's
 status (`done`, `partial`, `blocked`, or `needs_decision`), summary, checks, PR, questions, and remaining
@@ -166,7 +171,7 @@ Run all commands as `python3 -I "$T" <command>`.
 | `clean <slug> [--keep-branch]` | Remove the worktree and task logs and archive threads; optionally retain the local branch. |
 
 Tasks use `~/.codex/worktrees/claude-<slug>/<repo>`, with state and logs under
-`~/.codex/claude-tasks/<slug>/`. Turns continue independently of Claude's session. Only one task runs at
+`~/.codex/claude-tasks/<slug>/`. Turns continue independently of the lead's session. Only one task runs at
 a time unless `start --parallel` is explicitly used for tasks whose builds and tests cannot interfere.
 The default base is the remote's default branch.
 If a stacked base branch has been deleted, the automatic merge check switches once to that remote's
@@ -208,10 +213,10 @@ angles continue, and a review with only refusals stops fixes with `auto_fix_stop
 `--fix-rounds` accepts 0–5 (default 0), requires `--review`, and is unavailable for scouts. The loop
 stops on a clean review, only P3 findings (`auto_fix_stop: "only P3"`), the round limit, a worker result
 requiring intervention, or `stop`. A P1/P2 finding within two lines of code committed by a previous fix
-round stops it with `auto_fix_stop: "escalate"`; Claude reads that finding and the round's diff, then
+round stops it with `auto_fix_stop: "escalate"`; the lead reads that finding and the round's diff, then
 simplifies through `say`, accepts it as P3 or an issue, or permits one focused round with
 `say --review --fix-rounds 1`. `wait` names the originating round and commit and shows each round's
-code additions/deletions excluding guarded files; size is informational. Claude decides what to do
+code additions/deletions excluding guarded files; size is informational. The lead decides what to do
 with P3 findings. From the second review,
 reviewers focus on regressions from fixes and unmet completion conditions; new edge cases outside the
 brief are P3. Fix turns reject disproportionate work outside those conditions as `out of scope` and
@@ -242,7 +247,7 @@ Output goes to the task's `check.log`. `wait` prints the exit code and duration;
 it also prints the last 40 output lines. A failed check skips a requested automatic review. Results
 `partial`, `blocked`, and `needs_decision` skip automatic review with
 `review_skipped: "result <status>"`; the saved check still runs. The supervisor's result is objective
-evidence for that command; Claude must still read the actual diff and verify the completion conditions.
+evidence for that command; the lead must still read the actual diff and verify the completion conditions.
 
 `wait` names changed guarded files with added/deleted line counts, including uncommitted changes, and
 separately flags deleted files and added test-skip markers. Guards cover standard test and CI paths,
@@ -277,7 +282,7 @@ A minimal configuration is:
 
 | Key | Default | Meaning |
 |---|---|---|
-| `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated scout, handoff, review, fix, and reset-continuation prompts. Claude writes the brief in the user's configured language. |
+| `language` | `"en"` | `"en"` or `"ru"`; selects standing rules and worker-generated scout, handoff, review, fix, and reset-continuation prompts. The lead writes the brief in the user's configured language. |
 | `sandbox` | `"off"` | `"off"` or `"workspace"`; limit worker, review, and check writes to the worktree and `writable_dirs`. `start --sandbox` overrides it for the task; `say` inherits it. |
 | `writable_dirs` | `[]` | Additional writable directories, such as build caches; `~` is expanded and paths are made absolute. |
 | `accounts` | Absent | Explicit account list; its presence enables automatic limit monitoring and rotation. Without it, tasks use the existing `~/.codex` login. |
@@ -340,7 +345,7 @@ repository whose config references worktree files through `include.path` or `cor
 
 ## Task notifications
 
-Notifications work even when Claude's session has ended. For macOS, add to `codex-worker.json`:
+Notifications work even when the lead's session has ended. For macOS, add to `codex-worker.json`:
 
 ```json
 {
@@ -472,7 +477,7 @@ notify = ["python3", "-I", "<home>/.claude/skills/codex-worker/scripts/turn-log.
 ```
 
 For a plugin installation, use the absolute path to `scripts/turn-log.py` inside the installed skill.
-Claude can resolve it as `${CLAUDE_SKILL_DIR}/scripts/turn-log.py`; the config needs the expanded path.
+In Claude Code, resolve it as `${CLAUDE_SKILL_DIR}/scripts/turn-log.py`; the config needs the expanded path.
 Preserve any existing notify configuration so you can restore it when removing the hook.
 
 Codex supplies the JSON event argument. The hook appends events to `~/.codex/turn-events.jsonl` and
@@ -492,7 +497,7 @@ On macOS, that command may be available from the ChatGPT.app bundle listed above
 
 ## Limitations
 
-- Claude must review the diff and verify completion conditions. A Codex report or first review is not
+- The lead must review the diff and verify completion conditions. A Codex report or first review is not
   proof that the change is correct.
 - The worker relies on Codex CLI commands, event formats, and account RPCs; compatibility can change
   with CLI versions. Desktop queueing and Computer Use integration depend on installed app support.

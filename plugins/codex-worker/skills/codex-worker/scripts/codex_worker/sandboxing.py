@@ -69,11 +69,11 @@ def rules_text(cfg=None, no_push=False):
     for index, line in enumerate(lines):
         if line.startswith("- Commit as you go."):
             lines[index] = ("- Commit as you go. Keep commits local; do not publish the branch or open or edit PRs. "
-                            "Do not merge the PR or deploy anything: Claude handles review and merging.\n")
+                            "Do not merge the PR or deploy anything: the lead handles review and merging.\n")
             replaced = True
         elif line.startswith("- Коммить по ходу,"):
             lines[index] = ("- Коммить по ходу локально. Не публикуй ветку, не открывай и не редактируй PR. "
-                            "Не мержи PR и ничего не выкатывай: ревью и слияние делает Claude.\n")
+                            "Не мержи PR и ничего не выкатывай: ревью и слияние делает ведущий.\n")
             replaced = True
     if not replaced:
         cfg = config.accounts_config() if cfg is None else cfg

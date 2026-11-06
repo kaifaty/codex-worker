@@ -58,4 +58,4 @@ then waits again; it does not trigger an automatic review. An incomplete result 
 CI wait. Weekly exhaustion prevents another repair turn.
 
 See [results.md](results.md#ci-result) for output fields and examples, and
-[SKILL.md](../SKILL.md#the-loop) for Claude's merge rules.
+[lead-guide.md](lead-guide.md#the-loop) for the lead's merge rules.

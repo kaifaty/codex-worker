@@ -18,7 +18,7 @@ The supervisor saves valid implementation JSON in state as `result`; `status` sh
 | `pr_title` | required string; PR title, or empty to use the latest commit subject; when creating a PR, first reuse the latest nonempty title from this task's earlier results |
 | `pr_body` | required string; description of the whole PR, not just this turn; empty leaves an existing PR unchanged; when creating one, reuse the latest nonempty body from this task's earlier results, then fall back to `summary` |
 | `commit_message` | repository-style message, subject on the first line; empty when the worker committed or nothing changed |
-| `questions` | questions for Claude |
+| `questions` | questions for the lead |
 | `remaining` | unfinished work, including findings deferred as `out of scope` |
 | `findings` | in a fix turn, `{id, decision, note}` per supplied finding, `decision` being `fixed` or `rejected` with a one-line reason; an empty array in ordinary turns |
 
@@ -44,8 +44,8 @@ why waiting was skipped. See [ci.md](ci.md) for waiting and repair mechanics.
 
 `wait` prints, for example, `== CI 3749d91: passed (8/8, 6.2 min)` or
 `== CI 3749d91: FAILED 1/8: test (macos-latest, 3.9)`, followed by failed-check log tails.
-External checks show their names and links. Claude's merge decisions remain in
-[SKILL.md](../SKILL.md#the-loop).
+External checks show their names and links. The lead's merge decisions remain in
+[lead-guide.md](lead-guide.md#the-loop).
 
 ## Review result
 
@@ -65,11 +65,11 @@ original text.
 These are all values written to the task's top-level `outcome`. They describe supervisor execution,
 separately from the implementation `result.status`, saved checks, CI and reset-credit outcomes.
 
-| Outcome | Meaning | What Claude does |
+| Outcome | Meaning | What the lead does |
 |---|---|---|
 | `running` | A work, scout or review phase is active. | Let the active phase finish. |
 | `sleeping` | No account is currently usable; the supervisor is waiting to retry or for a reset. | Follow [accounts.md](accounts.md#waiting-for-a-reset) for `auto-continue at` and `wait --through-sleep`. |
-| `completed` | Exec completed successfully; an implementation result or review may still be incomplete or unknown. | Read `result` or the review and continue the [default loop](../SKILL.md#the-loop). |
+| `completed` | Exec completed successfully; an implementation result or review may still be incomplete or unknown. | Read `result` or the review and continue the [default loop](lead-guide.md#the-loop). |
 | `failed` | Exec or the supervisor failed, or no usable authenticated account remains. | Read the error and logs; resolve the cause, including any requested login, before a follow-up. |
 | `refused` | The model refused for possible cybersecurity risk; no retry or account rotation follows. `wait` shows the first 200 characters of the refusal. | Read the refusal and reassess the task rather than starting another automatic fix cycle. |
 | `stopped` | A durable `stop` request addressed this supervisor. | Inspect the preserved work and decide whether to continue with `say`. |
