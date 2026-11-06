@@ -13,6 +13,7 @@ of the owning module remain visible. Required operations and signatures are:
   turn(st, cfg, prompt, effort, current_message, stopped, sleep, new_turn=True)
   wrapup(st, cfg, account, prompt, effort, stopped, cursor) -> outcome
   last_message(st) -> str; messages(st) -> list[str]; pr_messages(st) -> list[str]
+Optional status_message(st) overrides the last_message fallback for status.
 Optional prepare(effort, cfg) validates startup/resume and requires its binary;
 optional stats(st) prints executor-specific statistics. Missing required hooks
 fail explicitly. Work hooks retain ownership of transport, rotation and state
@@ -76,7 +77,7 @@ class Executor:
         return ""
 
     def status_message(self, st):
-        return self.call("last_message", st)
+        return self.call("status_message" if "status_message" in self.hooks else "last_message", st)
 
     def has_history(self, st):
         return bool(st.get("threads") or self.cursor(st)

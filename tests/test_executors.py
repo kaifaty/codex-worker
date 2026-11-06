@@ -52,6 +52,20 @@ class ExecutorTests(RotationTestCase):
                     violations.append(f"{path.name}:{node.lineno}")
         self.assertEqual(violations, [])
 
+    def test_codex_status_uses_patched_last_message(self):
+        worker = self.worker()
+        state = {"slug": "codex-status", "executor": "codex", "account": "fixture-account",
+                 "thread": "fixture-thread", "worktree": str(self.root),
+                 "branch": "fixture-branch", "base": "HEAD"}
+        marker = "Patched last-message marker."
+        output = io.StringIO()
+        with mock.patch.object(worker.task_state, "load", return_value=state), \
+                mock.patch.object(worker.procs, "sh", return_value=""), \
+                mock.patch.object(worker.threads, "last_message", return_value=marker), \
+                contextlib.redirect_stdout(output):
+            worker.commands.cmd_status(SimpleNamespace(slug=state["slug"]))
+        self.assertIn(marker, output.getvalue())
+
     def test_registered_executor_lifecycle(self):
         self.env.update(HOME=str(self.root), USER="fixture-user")
         name = "fixture-harness"

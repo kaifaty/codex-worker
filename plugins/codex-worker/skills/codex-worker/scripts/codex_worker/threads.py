@@ -327,6 +327,6 @@ def codex_pr_messages(st):
 
 
 executors.get("codex").bind(sys.modules[__name__], last_message="codex_last_message",
-                            messages="thread_messages", pr_messages="codex_pr_messages")
+                            messages="thread_messages", pr_messages="codex_pr_messages", status_message="last_message")
 executors.get("claude").bind(sys.modules[__name__], last_message="claude_last_message",
                              messages="claude_messages", pr_messages="claude_messages")
