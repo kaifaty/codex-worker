@@ -111,7 +111,7 @@
         "text": "Читаю SKILL.md"
       },
       "slug": "docs-skill-refresh",
-      "repo": "codex-worker-public",
+      "repo": "teamster",
       "executor": "codex",
       "account": "personal",
       "column": "running",
@@ -6650,7 +6650,7 @@
       "updated_at": 1794000014,
       "activity": null,
       "slug": "accounts-json-schema-20261107T120013Z",
-      "repo": "codex-worker-public",
+      "repo": "teamster",
       "executor": "codex",
       "account": "work",
       "column": "closed",

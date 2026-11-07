@@ -1,4 +1,4 @@
-// Reads `codex_task.py accounts --json` output defensively. Any part that does not have the
+// Reads `teamster accounts --json` output defensively. Any part that does not have the
 // expected shape is shown as compact JSON instead.
 
 export interface AccountRow {
