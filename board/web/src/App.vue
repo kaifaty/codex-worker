@@ -169,7 +169,7 @@ onBeforeUnmount(() => board.stop());
 <template>
   <div class="app" :class="{ 'closed-open': !prefs.closedCollapsed, 'map-view': view === 'map' }">
     <header class="topbar">
-      <h1 class="title">Доска задач <span class="muted">codex-worker</span></h1>
+      <h1 class="title">Доска задач <span class="muted">teamster</span></h1>
       <div class="seg views" role="group" aria-label="Вид">
         <button type="button" class="btn" :aria-pressed="view === 'board'" @click="view = 'board'">Доска</button>
         <button type="button" class="btn" :aria-pressed="view === 'map'" @click="view = 'map'">Карта</button>
